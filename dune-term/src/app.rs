@@ -634,11 +634,13 @@ impl App {
     }
 
     fn report_mouse(&mut self, button: u8, pressed: bool) {
+        // cell_at takes the terminal lock itself, and it is not reentrant: holding it
+        // here froze the whole tile on the first click in a mouse-reporting program.
+        let (point, _) = self.cell_at(self.pointer_pos);
         let term = self.term.lock();
         if !term.mode().contains(TermMode::SGR_MOUSE) {
             return; // Only the SGR encoding is supported.
         }
-        let (point, _) = self.cell_at(self.pointer_pos);
         let line = (point.line.0 + term.grid().display_offset() as i32).max(0) as usize;
         drop(term);
         self.write(keys::mouse_sgr(button, point.column.0, line, pressed));
