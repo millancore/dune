@@ -33,11 +33,11 @@ class Dune:
         with open(os.path.join(cfg, "dune", "config"), "w") as f:
             f.write(f"keyboard_layout = us\nkeyboard_variant = {'dvorak' if layout is DVORAK else ''}\n")
         self.layout = layout
-        # A desktop application for `@` to find; its Exec creates a file.
+        # A desktop application for `:` to find; its Exec creates a file.
         apps = os.path.join(tmp, "data", "applications")
         os.makedirs(apps)
         with open(os.path.join(apps, "dunetest.desktop"), "w") as f:
-            # `@dunetes FILE` resolves to it and creates FILE.
+            # `:dunetes FILE` resolves to it and creates FILE.
             f.write("[Desktop Entry]\nType=Application\nName=Dune Test\nExec=touch %F\n")
         # DUNE_TEST_INPUT=injected: the real keyboard (the nested window may take focus
         # on the desktop while someone types) must not reach the test shells.
@@ -131,38 +131,38 @@ def main():
         tmp = tempfile.mkdtemp(prefix="dune-e2e-")
         dune = Dune(tmp, layout)
         try:
-            dune.type(f"@dunetes {tmp}/one\n")
+            dune.type(f":dunetes {tmp}/one\n")
             if not wait_for(f"{tmp}/one"):
-                fails.append(f"[{name}] @ in the first tile")
-            dune.type("@:v\n")
+                fails.append(f"[{name}] : in the first tile")
+            dune.type(":v\n")
             time.sleep(3)
-            dune.type(f"@dunetes {tmp}/two\n")
+            dune.type(f":dunetes {tmp}/two\n")
             if not wait_for(f"{tmp}/two"):
-                fails.append(f"[{name}] @ in a second tile opened with @:v")
-            # dune-term does the @ layer itself: no dune-shell wrapper in its tiles.
+                fails.append(f"[{name}] : in a second tile opened with :v")
+            # dune-term does the : layer itself: no dune-shell wrapper in its tiles.
             if not descendants_named(dune.proc.pid, "dune-term"):
                 fails.append(f"[{name}] no dune-term tiles")
             if descendants_named(dune.proc.pid, "dune-shell"):
                 fails.append(f"[{name}] dune-shell wrapper still running in dune-term tiles")
             dune.alt("h")  # focus back to the first (now resized) tile
             time.sleep(0.5)
-            dune.type(f"@dunetes {tmp}/three\n")
+            dune.type(f":dunetes {tmp}/three\n")
             if not wait_for(f"{tmp}/three"):
                 fails.append(f"[{name}] typing after Alt+h into the resized first tile")
 
             # A GUI program in a new tile takes that tile's place (DUNE_RUN + swallow).
-            dune.type("@dune-term:v\n")
+            dune.type(":dune-term:v\n")
             time.sleep(5)
             dune.log.seek(0)
             if "placing window: swallow" not in re.sub(r"\x1b\[[0-9;]*m", "", dune.log.read()):
-                fails.append(f"[{name}] @dune-term:v did not swallow its new tile")
+                fails.append(f"[{name}] :dune-term:v did not swallow its new tile")
             dune.combo([ALT], "q")  # close it; the tile's terminal comes back
             time.sleep(1)
 
-            # Any command takes the split suffix without @: it runs in a new tile.
+            # Any command takes the split suffix without the picker: it runs in a new tile.
             dune.type(f"touch:v {tmp}/from-split\n")
             if not wait_for(f"{tmp}/from-split", 6):
-                fails.append(f"[{name}] `touch:v file` without @ did not run in a new tile")
+                fails.append(f"[{name}] `touch:v file` without the picker did not run in a new tile")
             time.sleep(1)
 
             # The direction indicator (Super+Right) sends the next command to a new tile...
@@ -182,10 +182,10 @@ def main():
             if not wait_for(f"{tmp}/in-place") or terminals() != before:
                 fails.append(f"[{name}] the direction indicator was not cleared after use")
 
-            # @ launches desktop applications by name.
-            dune.type(f"@dune {tmp}/from-desktop-entry\n")  # partial name, then the args
+            # : launches desktop applications by name.
+            dune.type(f":dune {tmp}/from-desktop-entry\n")  # partial name, then the args
             if not wait_for(f"{tmp}/from-desktop-entry", 4):
-                fails.append(f"[{name}] @ did not launch the desktop entry")
+                fails.append(f"[{name}] : did not launch the desktop entry")
 
             # Clipboard: an application copies with OSC 52, Ctrl+Shift+V pastes it,
             # and another Wayland client can read it.

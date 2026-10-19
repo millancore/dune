@@ -1,4 +1,4 @@
-//! The `@` line editor shown inside a terminal tile.
+//! The `:` line editor shown inside a terminal tile.
 //!
 //! Pure logic: it turns keys into an edited line plus a list of suggestions, and
 //! renders them as text. The PTY wrapper (`crate::shell`) does the terminal I/O.
@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{desktop::App, protocol::Split};
 
+/// Typed at an empty prompt, opens the picker.
+pub const TRIGGER: char = ':';
+
 /// Suggestions shown at once; the list scrolls to keep the selection visible.
 pub const MAX_ROWS: usize = 8;
 
 /// Help line shown under the suggestions.
-pub const HINT: &str = "Tab complete · ↑↓ select · Enter run · :v side · :h below · Esc cancel";
+pub const HINT: &str = "Tab complete · ↑↓ select · Enter run · app:v side · app:h below · v/h empty tile · Esc cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -73,7 +76,7 @@ pub fn parse_keys(bytes: &[u8]) -> Vec<Key> {
     keys
 }
 
-/// A finished `@` line.
+/// A finished `:` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     /// `None` runs the command in place, swallowing the tile.
@@ -85,15 +88,15 @@ pub struct Line {
 /// `cmd:h args` (bare `:v` / `:h` opens an empty terminal). `None` for anything else,
 /// which goes to the shell as usual.
 pub fn parse_split_command(text: &str) -> Option<Line> {
-    let text = text.trim();
-    if text.starts_with('@') {
+    let line = parse_line(text.trim());
+    // A picker line (`:firefox:v`) that reached the shell is not a split.
+    if text.trim().starts_with(TRIGGER) && !line.command.is_empty() {
         return None;
     }
-    let line = parse_line(text);
     line.split.is_some().then_some(line)
 }
 
-/// Parse the text typed after `@`: `prog[:v|:h] args`.
+/// Parse the text typed after `:`: `prog[:v|:h] args`.
 pub fn parse_line(input: &str) -> Line {
     let word_end = input.find(char::is_whitespace).unwrap_or(input.len());
     let (word, rest) = input.split_at(word_end);
@@ -234,6 +237,10 @@ impl Picker {
     /// name) turned into its command, with the typed arguments. A name that matches
     /// no app runs as typed.
     fn resolve(&self) -> Line {
+        // `:v` / `:h` alone: an empty terminal on that side, as at the prompt.
+        if let Some(split) = Split::parse(self.input.trim()) {
+            return Line { split: Some(split), command: String::new() };
+        }
         let word_end = self.input.find(char::is_whitespace).unwrap_or(self.input.len());
         let (word, args) = self.input.split_at(word_end);
         let (name, split) = match word.rsplit_once(':').map(|(p, s)| (p, Split::parse(s))) {
@@ -390,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn split_commands_without_at() {
+    fn split_commands_without_the_picker() {
         assert_eq!(
             parse_split_command("vim:h test.txt"),
             Some(Line { split: Some(Split::Horizontal), command: "vim test.txt".into() })
@@ -399,7 +406,7 @@ mod tests {
         assert_eq!(parse_split_command(":v"), Some(Line { split: Some(Split::Vertical), command: "".into() }));
         assert_eq!(parse_split_command("vim test.txt"), None);
         assert_eq!(parse_split_command("echo a:v"), None);
-        assert_eq!(parse_split_command("@firefox:v"), None);
+        assert_eq!(parse_split_command(":firefox:v"), None);
     }
 
     #[test]
@@ -449,6 +456,10 @@ mod tests {
         assert_eq!(run("fi\x1b[B\r"), line(None, "nautilus --new-window"));
         // Unknown names run as typed.
         assert_eq!(run("zzz --x\r"), line(None, "zzz --x"));
+        // `:v` / `:h` alone open an empty terminal, even with apps matching the letter.
+        assert_eq!(run("v\r"), line(Some(Split::Vertical), ""));
+        assert_eq!(run("h\r"), line(Some(Split::Horizontal), ""));
+        assert_eq!(run(":v\r"), line(Some(Split::Vertical), ""));
     }
 
     #[test]

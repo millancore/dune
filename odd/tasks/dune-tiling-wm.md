@@ -59,7 +59,46 @@ program in a new tile split side-by-side (`v`) or stacked (`h`).
   tests 60 and shell_wrapper.py pass. Installed.
 - Test hygiene learned: never pkill by name (may hit the user's mako/apps); notify-send reaches the host session.
 - [ ] T20 Optional protocols for X11/apps: xdg-activation, primary selection, fractional scale
-- [ ] T7 (phase 2, pending) TTY/udev/DRM backend for running as a real session
+- [ ] T7 Real session (TTY/udev/DRM), user go-ahead 2026-10-19 after the initial commit (4d1ea3a). The real run can
+  only be done by the user from a free VT (niri holds the seat here); first runs under `timeout` as a safety net.
+  - [x] T7.1 Backend split: shared render elements (borders, direction bars); backend chosen at startup (inside a
+    Wayland/X session -> nested winit; on a TTY -> udev; `--tty` / `--nested` to force)
+  - [x] T7.2 libseat session + udev primary GPU + DRM/GBM/EGL + DrmCompositor; outputs for connected connectors,
+    vblank-paced frames, dmabuf feedback from the real device
+  - [x] T7.3 libinput: keyboard, relative/absolute pointer clamped to outputs, buttons, scroll; Ctrl+Alt+F1..F12 VT
+    switch; pause/resume on session changes
+  - [x] T7.4 Pointer cursor drawn by dune: client cursor surfaces + default xcursor theme
+  - [ ] T7.5 Several monitors (the user has two: HDMI-A-1 2560x1080 at 0,0 and HDMI-A-2 1920x1080 at 311,1080 in niri)
+    - [x] T7.5a Config `output.<NAME>.mode|position|off` in ~/.config/dune/config (parse + unit tests)
+    - [x] T7.5b udev: mode from config, skip `off` monitors, positions from config (unset ones to the right), tests
+    - [x] T7.5c One layout per output: new tiles go to the output of the target tile, else the active output (last
+      one the pointer entered or a tile was focused on); focus/swap work across monitors; tiles of a monitor that
+      goes away move to the first one
+    - [x] T7.5d Popups and unbound layers use the right output; user's config gets the output section
+    - [ ] T7.5e Real run on the two monitors (user, from tuigreet)
+    - 2026-10-19 evidence: cargo build clean; cargo test --workspace 67 pass (new: config outputs, choose_mode,
+      positions incl. the niri layout 0,0 / 311,1080). e2e nested: all pass except the 4 clipboard checks, which fail
+      the same way with the previously installed binary (pre-existing, not from T7.5). Installed (cargo install
+      --offline). Not run on hardware: niri holds the seat. Known: tiles of an unplugged monitor stay on the first
+      one when it comes back; no keybinding to move a tile to another monitor yet (focus/swap by direction cross).
+  - [ ] T7.6 Monitor hotplug
+  - [x] T7.7 How to start it: user prefers picking it at login (greetd + tuigreet, F3 lists
+    /usr/share/wayland-sessions). dist/dune-session (login shell env, XDG_SESSION_TYPE/CURRENT_DESKTOP, log to
+    ~/.local/state/dune/session.log, exec dune --tty; installed to ~/.cargo/bin) + dist/dune.desktop (installed by
+    the user with sudo, Exec with the absolute path). dune --tty exports WAYLAND_DISPLAY/DISPLAY/XDG_* /DUNE_SOCKET via
+    dbus-update-activation-environment --systemd (tty mode only). Dry run with a fake dune: env and args correct.
+  - Progress 2026-10-19: src/udev.rs (libseat session, primary GPU via udev, DRM/GBM/EGL GlesRenderer,
+    DrmOutputManager + DrmScanner from smithay-drm-extras, one output per connected connector named like HDMI-A-1
+    with make/model from libdisplay-info, outputs side by side, 16ms redraw timer + vblank-paced queue_frame,
+    pause/resume on VT switch, dmabuf v4 feedback from the real render node, shm formats from the renderer);
+    src/render.rs shared by both backends (decorations, pointer, OutputRenderElements, post_render frame callbacks);
+    src/cursor.rs (xcursor theme or built-in arrow; client cursor surfaces); Backend enum in state; `--tty` /
+    `--nested` (auto: nested when WAYLAND_DISPLAY/DISPLAY is set); relative pointer motion clamped to outputs;
+    Ctrl+Alt+F1..F12 -> session VT switch. Tests: dune 18 (pointer clamping on two outputs, VT keys), all crates 64,
+    one e2e nested run passes. NOT RUN on real hardware yet: no seatd and niri holds the logind session here, so the
+    first real run is the user's, from a free VT under `timeout`.
+  - Known gaps for the first real run: per-monitor tiling untested on hardware (T7.5e); monitor hotplug path untested (T7.6);
+    no presentation-time; no keyboard LEDs.
 
 ## Progress / evidence
 - cargo build: clean, no warnings. cargo test: 10 passed (layout + IPC codec).
@@ -97,4 +136,4 @@ program in a new tile split side-by-side (`v`) or stacked (`h`).
   (alacritty_terminal + smithay-client-toolkit + cosmic-text), awaiting decision.
 
 ## Next step
-User decision on the built-in terminal; details of the second-tile report.
+User logs into Dune from tuigreet with both monitors (T7.5e); then a keybinding to move a tile to another monitor and an `autostart` config for cliphist/polkit/steam

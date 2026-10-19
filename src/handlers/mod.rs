@@ -29,7 +29,9 @@ impl SeatHandler for Dune {
         &mut self.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: smithay::input::pointer::CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: smithay::input::pointer::CursorImageStatus) {
+        self.cursor_status = image;
+    }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
@@ -97,8 +99,8 @@ impl DmabufHandler for Dune {
     fn dmabuf_imported(&mut self, _global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
         let imported = self
             .backend
-            .as_mut()
-            .is_some_and(|backend| backend.renderer().import_dmabuf(&dmabuf, None).is_ok());
+            .renderer()
+            .is_some_and(|renderer| renderer.import_dmabuf(&dmabuf, None).is_ok());
         if imported {
             tracing::debug!("dmabuf imported");
             let _ = notifier.successful::<Dune>();

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Start dune as the desktop session (used by dune.desktop in wayland-sessions).
+#
+# Runs through a login shell first, like niri-session, so PATH and the rest of the
+# user's environment are set up. dune's log goes to ~/.local/state/dune/session.log.
+
+if [ "$1" != "--login" ] && [ -n "$SHELL" ] && grep -q "^$SHELL\$" /etc/shells; then
+    exec "$SHELL" -l -c "exec \"$0\" --login"
+fi
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=dune
+export XDG_SESSION_DESKTOP=dune
+unset WAYLAND_DISPLAY DISPLAY
+
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/dune"
+mkdir -p "$log_dir"
+[ -f "$log_dir/session.log" ] && mv -f "$log_dir/session.log" "$log_dir/session.log.old"
+
+DUNE="${DUNE_BIN:-$(command -v dune || echo "$HOME/.cargo/bin/dune")}"
+RUST_LOG="${RUST_LOG:-dune=info}" exec "$DUNE" --tty 2>"$log_dir/session.log"

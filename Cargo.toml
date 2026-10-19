@@ -11,12 +11,17 @@ description = "A terminal-first tiling Wayland compositor built on Smithay"
 dune-common = { path = "dune-common" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+xcursor = "0.3"
+
+[dependencies.smithay-drm-extras]
+git = "https://github.com/Smithay/smithay"
+rev = "023b78b1c5a05ca512767cacc07efca55fae8be4"
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay"
 rev = "023b78b1c5a05ca512767cacc07efca55fae8be4"
 default-features = false
-features = ["backend_winit", "backend_drm", "wayland_frontend", "desktop"]
+features = ["backend_winit", "backend_drm", "backend_gbm", "backend_udev", "backend_libinput", "backend_session_libseat", "wayland_frontend", "desktop"]
 
 [dependencies.nix]
 version = "0.31"

@@ -2,5 +2,6 @@
 
 pub mod at;
 pub mod desktop;
+pub mod font;
 pub mod picker;
 pub mod protocol;

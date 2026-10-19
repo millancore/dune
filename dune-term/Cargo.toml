@@ -9,5 +9,3 @@ dune-common = { path = "../dune-common" }
 libc = "0.2"
 alacritty_terminal = "0.26"
 smithay-client-toolkit = "0.21"
-swash = "0.2"
-fontdb = "0.24"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drives `dune shell` (the @ layer) in a real pty around bash and zsh, with a
+"""Drives `dune shell` (the : layer) in a real pty around bash and zsh, with a
 fake compositor socket that records the requests. Needs a built binary:
     cargo build && python3 -I tests/shell_wrapper.py"""
 
@@ -62,7 +62,7 @@ class Session:
             "DUNE_USER_SHELL": shell,
             "PS1": "$ ",
             "ZDOTDIR": f"{tmp}/zdot",
-            # `@` offers desktop applications: only the test's own.
+            # `:` offers desktop applications: only the test's own.
             "XDG_DATA_DIRS": f"{tmp}/data",
         }
         env.update(extra_env or {})
@@ -115,7 +115,7 @@ def main():
         fake = FakeCompositor(f"{tmp}/dune.sock")
 
         # Startup files that run a program, as real configs do: the wrapper must not
-        # mistake that for the end of an `@prog` or type DUNE_RUN before the prompt.
+        # mistake that for the end of a `:prog` or type DUNE_RUN before the prompt.
         startup = "sleep 0.3; echo rc-loaded\nPS1='$ '\n"
         with open(f"{tmp}/bashrc", "w") as f:
             f.write(startup)
@@ -135,12 +135,12 @@ def main():
             # 1. live list + run in place, with swallow / unswallow around it
             reset()
             s = Session(tmp, shell, args)
-            s.type("@dunetest")
+            s.type(":dunetest")
             check("Dune Test Prog" in s.text(), f"[{name}] live list shows the app while typing", s)
             s.type("\r")
             time.sleep(0.5)
             s.screen += drain(s.fd, 0.5)
-            check(os.path.exists(ran) and open(ran).read().strip() == "RAN", f"[{name}] @prog runs in place", s)
+            check(os.path.exists(ran) and open(ran).read().strip() == "RAN", f"[{name}] :prog runs in place", s)
             check(any(r.startswith(f"swallow\t{TILE}\t") for r in fake.requests), f"[{name}] swallow sent: {fake.requests}")
             # A program this short may end before the wrapper sees it running; then
             # the swallow ends with the next Enter at the latest.
@@ -149,41 +149,41 @@ def main():
 
             # 1b. a program that keeps running: unswallow as soon as it ends, no Enter needed
             reset()
-            s.type("@sleep 1\r")
+            s.type(":sleep 1\r")
             time.sleep(2.0)
             s.screen += drain(s.fd, 0.5)
             check(f"unswallow\t{TILE}" in fake.requests, f"[{name}] unswallow when a running program ends: {fake.requests}")
 
             # 2. split: nothing runs here, the compositor is asked to open a tile; Tab completes files
             reset()
-            s.type("@dunetestprog:v ind\t\r")
+            s.type(":dunetestprog:v ind\t\r")
             check(f"open\tr\t{TILE}\t{work}\tdunetestprog index.php" in fake.requests,
                   f"[{name}] split request with completed file: {fake.requests}", s)
             check(not os.path.exists(ran), f"[{name}] split does not run the program locally")
 
-            # 3. @ in the middle of a line is ordinary text
+            # 3. : in the middle of a line is ordinary text
             reset()
-            s.type("echo mid@dle\r")
-            check("mid@dle" in s.text().split("echo mid@dle")[-1], f"[{name}] @ inside a line goes to the shell", s)
+            s.type("echo mid:dle\r")
+            check("mid:dle" in s.text().split("echo mid:dle")[-1], f"[{name}] : inside a line goes to the shell", s)
             check(fake.requests == [], f"[{name}] no request for an ordinary line: {fake.requests}")
 
-            # 4. while a program runs, @ belongs to it
+            # 4. while a program runs, : belongs to it
             reset()
             s.type("cat\r")
-            s.type("@inside\r")
-            check("@inside" in s.text().split("cat")[-1], f"[{name}] @ passes through to a running program", s)
+            s.type(":inside\r")
+            check(":inside" in s.text().split("cat")[-1], f"[{name}] : passes through to a running program", s)
             s.type("\x04")
             check(fake.requests == [], f"[{name}] no request while a program runs: {fake.requests}")
 
             # 5. Esc cancels, the prompt keeps working
             reset()
-            s.type("@dune\x1b")
+            s.type(":dune\x1b")
             s.type("echo after-cancel\r")
             check(s.text().count("after-cancel") >= 2, f"[{name}] shell works after cancelling the picker", s)
             check(fake.requests == [], f"[{name}] cancel sends nothing: {fake.requests}")
             s.close()
 
-            # 6. a tile opened with @prog:v runs its command first (DUNE_RUN)
+            # 6. a tile opened with :prog:v runs its command first (DUNE_RUN)
             reset()
             s = Session(tmp, shell, args, {"DUNE_RUN": "dunetestprog first"})
             time.sleep(1.0)

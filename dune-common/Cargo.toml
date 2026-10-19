@@ -2,6 +2,8 @@
 name = "dune-common"
 version = "0.1.0"
 edition = "2024"
-description = "Code shared by the dune compositor and dune-term: the @ layer and the control protocol"
+description = "Code shared by the dune compositor and dune-term: the @ layer, the control protocol and fonts"
 
 [dependencies]
+swash = "0.2"
+fontdb = "0.24"

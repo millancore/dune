@@ -16,7 +16,7 @@ use std::{
 
 use dune_common::{
     at::AtLayer,
-    picker::{MAX_ROWS, Picker},
+    picker::{MAX_ROWS, Picker, TRIGGER},
 };
 use nix::{
     errno::Errno,
@@ -245,7 +245,7 @@ fn draw(picker: &Picker, cols: usize) -> String {
     let fit = |s: &str, width: usize| s.chars().take(width).collect::<String>();
 
     let mut s = String::from("\x1b8\x1b[J");
-    let line = format!("@{}", picker.input());
+    let line = format!("{}{}", TRIGGER, picker.input());
     s += &format!("\x1b[1m{line}\x1b[0m");
     let (first, rows) = picker.window();
     for (i, c) in rows.iter().enumerate() {

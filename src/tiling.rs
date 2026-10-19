@@ -5,24 +5,28 @@ use std::{collections::HashMap, path::PathBuf, process::Command};
 use smithay::{
     backend::input::{InputTime, KeyState},
     desktop::{Window, layer_map_for_output},
+    output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Resource, protocol::wl_surface::WlSurface},
     },
-    utils::SERIAL_COUNTER,
-    wayland::shell::xdg::ToplevelSurface,
+    utils::{Logical, Point, SERIAL_COUNTER},
+    wayland::{
+        compositor::with_states,
+        shell::xdg::{ToplevelSurface, XdgToplevelSurfaceData},
+    },
 };
 
 use dune_common::protocol::{Request, Side, direction_answer};
 
 use crate::{
-    layout::{Direction, Rect, Split, TileId, neighbor},
+    layout::{Direction, Layout, Rect, Split, TileId, drop_side, neighbor},
     state::{Dune, Tile},
 };
 
 /// Space between tiles; the focus border is drawn inside it.
 pub const GAP: i32 = 6;
-pub const BORDER: i32 = 2;
+pub const BORDER: i32 = 1;
 
 impl Dune {
     /// Open a new terminal tile next to `target` (or the focused tile).
@@ -32,17 +36,11 @@ impl Dune {
     /// `$SHELL` (see `crate::shell`), which starts the user's shell; `run` is handed
     /// to the wrapper through `DUNE_RUN` and executed as if typed as `@<run>`.
     pub fn spawn_terminal(&mut self, target: Option<TileId>, side: Option<Side>, cwd: Option<PathBuf>, run: Option<String>) {
-        let target = target.filter(|t| self.tiles.contains_key(t)).or(self.focused);
-
         let id = self.next_tile;
-        self.next_tile += 1;
-        match side {
-            Some(side) => self.layout.insert_on(id, target, side),
-            None => {
-                let split = self.auto_split(target);
-                self.layout.insert(id, target, split);
-            }
+        if !self.insert_tile(id, target, side) {
+            return tracing::warn!("no output to open a terminal on");
         }
+        self.next_tile += 1;
         self.tiles.insert(id, Tile::default());
 
         let terminal = terminal_command(&self.config.terminal);
@@ -72,26 +70,60 @@ impl Dune {
             }
             Err(err) => {
                 tracing::error!("failed to spawn terminal `{terminal}`: {err}");
-                self.layout.remove(id);
+                self.remove_from_layouts(id);
                 self.tiles.remove(&id);
             }
         }
     }
 
-    /// Split wide tiles side by side and tall tiles stacked.
-    fn auto_split(&self, target: Option<TileId>) -> Split {
-        let rect = target
-            .and_then(|t| self.geometries.iter().find(|(id, _)| *id == t).map(|(_, r)| *r))
-            .or_else(|| self.output_rect());
-        match rect {
-            Some(r) if r.h > r.w => Split::Horizontal,
-            _ => Split::Vertical,
+    /// Put a new tile in a layout: next to `target` on its output when given, else on
+    /// the active output (next to the focused tile when it is there). False when
+    /// there is no output yet.
+    fn insert_tile(&mut self, id: TileId, target: Option<TileId>, side: Option<Side>) -> bool {
+        let explicit = target.filter(|t| self.tiles.contains_key(t)).and_then(|t| Some((self.output_of(t)?, t)));
+        let (name, target) = match explicit {
+            Some((name, t)) => (name, Some(t)),
+            None => {
+                let Some(name) = self.active_output().map(|o| o.name()) else { return false };
+                let focused = self.focused.filter(|f| self.layouts.get(&name).is_some_and(|l| l.contains(*f)));
+                (name, focused)
+            }
+        };
+        // Without a side, a new column opens to the right: the strip grows without end.
+        self.layouts.entry(name).or_default().insert_on(id, target, side.unwrap_or(Side::Right));
+        true
+    }
+
+    fn remove_from_layouts(&mut self, id: TileId) {
+        for layout in self.layouts.values_mut() {
+            layout.remove(id);
+        }
+    }
+
+    /// Name of the output whose layout holds `id`.
+    fn output_of(&self, id: TileId) -> Option<String> {
+        self.layouts.iter().find(|(_, l)| l.contains(id)).map(|(name, _)| name.clone())
+    }
+
+    /// Where new tiles without a target go (see `Dune::active_output`).
+    pub fn active_output(&self) -> Option<Output> {
+        let outputs = || self.space.outputs();
+        self.active_output
+            .as_ref()
+            .and_then(|name| outputs().find(|o| o.name() == *name))
+            .or_else(|| outputs().next())
+            .cloned()
+    }
+
+    /// The pointer moved: the output under it becomes the active one.
+    pub fn pointer_at(&mut self, pos: Point<f64, Logical>) {
+        if let Some(output) = self.space.output_under(pos).next() {
+            self.active_output = Some(output.name());
         }
     }
 
     /// The area tiles get: the output minus the exclusive zones of layers (bars).
-    fn output_rect(&self) -> Option<Rect> {
-        let output = self.space.outputs().next()?;
+    fn output_rect(&self, output: &Output) -> Option<Rect> {
         let geo = self.space.output_geometry(output)?;
         let zone = layer_map_for_output(output).non_exclusive_zone();
         Some(Rect::new(geo.loc.x + zone.loc.x, geo.loc.y + zone.loc.y, zone.size.w, zone.size.h))
@@ -122,11 +154,11 @@ impl Dune {
             }
             (id, "swallow")
         } else {
-            let target = self.focused;
-            let split = self.auto_split(target);
             let id = self.next_tile;
+            if !self.insert_tile(id, None, None) {
+                return tracing::warn!("no output to place a window on");
+            }
             self.next_tile += 1;
-            self.layout.insert(id, target, split);
             self.tiles.insert(id, Tile::default());
             (id, "new tile")
         };
@@ -170,8 +202,9 @@ impl Dune {
         } else {
             tracing::info!(tile = id, "window closed, tile removed");
             self.directions.remove(&id);
-            let next = neighbor_or_first(&self.geometries, id, self.layout.tiles());
-            self.layout.remove(id);
+            let order = self.output_of(id).map(|name| self.layouts[&name].tiles()).unwrap_or_default();
+            let next = neighbor_or_first(&self.geometries, id, order);
+            self.remove_from_layouts(id);
             self.tiles.remove(&id);
             if self.focused == Some(id) {
                 self.focused = next;
@@ -182,22 +215,67 @@ impl Dune {
         self.update_focus();
     }
 
-    /// Lay out every tile and send the new sizes to the clients.
+    /// Lay out every tile on its output and send the new sizes to the clients.
     pub fn arrange(&mut self) {
-        let Some(area) = self.output_rect() else {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let Some(first) = outputs.first() else {
             return;
         };
-        tracing::debug!(?area, "arranging tiles");
+        // Tiles of a monitor that went away move to the first one.
+        let gone: Vec<String> = self.layouts.keys().filter(|n| !outputs.iter().any(|o| o.name() == **n)).cloned().collect();
+        for name in gone {
+            let moved = self.layouts.remove(&name).unwrap().tiles();
+            tracing::info!("output {name} is gone, moving its {} tile(s) to {}", moved.len(), first.name());
+            let layout = self.layouts.entry(first.name()).or_default();
+            for id in moved {
+                let last = layout.tiles().last().copied();
+                layout.insert(id, last, Split::Vertical);
+            }
+        }
+
+        // A focused tab (by keyboard, click or after a close) opens.
+        if let Some(id) = self.focused {
+            self.layouts.values_mut().for_each(|l| l.open_tab(id));
+        }
+
         let tiles = &self.tiles;
-        self.geometries = self
-            .layout
-            .geometries(area, GAP, &|id| tiles.get(&id).is_some_and(|t| !t.stack.is_empty()));
+        let visible = |id| tiles.get(&id).is_some_and(|t: &Tile| !t.stack.is_empty());
+        let mut geometries = Vec::new();
+        let mut shown = Vec::new();
+        let mut tabs = Vec::new();
+        for output in &outputs {
+            let Some(area) = self.output_rect(output) else { continue };
+            let Some(layout) = self.layouts.get_mut(&output.name()) else { continue };
+            tracing::debug!(output = output.name(), ?area, "arranging tiles");
+            for (id, rect) in layout.geometries(area, GAP, &visible, self.focused) {
+                if layout.is_tab(id) {
+                    tabs.push(id);
+                }
+                if let Some(part) = rect.intersection(&area) {
+                    shown.push((id, part));
+                }
+                geometries.push((id, rect));
+            }
+        }
+        tracing::debug!(?geometries, shown = ?shown.iter().map(|(id, _)| id).collect::<Vec<_>>(), ?tabs, "arranged");
+        self.geometries = geometries;
+        self.shown = shown;
+        self.tabs = tabs;
 
         for (id, rect) in &self.geometries {
             let Some(window) = self.tiles[id].top().cloned() else {
                 continue;
             };
-            self.space.map_element(window.clone(), (rect.x, rect.y), false);
+            // Columns scrolled off the output are not drawn (nor shown on a neighbour);
+            // a tab shows a bar instead of its window, which keeps its last size.
+            if self.tabs.contains(id) {
+                self.space.unmap_elem(&window);
+                continue;
+            } else if !self.shown.iter().any(|(t, _)| t == id) {
+                self.space.unmap_elem(&window);
+            } else {
+                self.space.map_element(window.clone(), (rect.x, rect.y), false);
+            }
             let toplevel = window.toplevel().unwrap();
             toplevel.with_pending_state(|state| {
                 state.size = Some((rect.w, rect.h).into());
@@ -235,6 +313,9 @@ impl Dune {
     pub fn focus_tile(&mut self, id: TileId) {
         if self.tiles.contains_key(&id) {
             self.focused = Some(id);
+            self.active_output = self.output_of(id).or(self.active_output.take());
+            // The view slides to show the newly focused column.
+            self.arrange();
             self.update_focus();
         }
     }
@@ -248,14 +329,79 @@ impl Dune {
     pub fn swap_direction(&mut self, dir: Direction) {
         let Some(from) = self.focused else { return };
         if let Some(other) = neighbor(&self.geometries, from, dir) {
-            self.layout.swap(from, other);
+            // Tiles on different monitors trade places between their layouts too.
+            for layout in self.layouts.values_mut() {
+                layout.swap(from, other);
+            }
             self.arrange();
+        } else if let Some(output) = self.output_toward(from, dir) {
+            // Nothing that way on this monitor: the tile moves to the next monitor, at
+            // the edge facing the one it comes from.
+            let tiles = self.layouts.get(&output).map(Layout::tiles).unwrap_or_default();
+            let (target, side) = match dir {
+                Direction::Right | Direction::Down => (tiles.first().copied(), Side::Left),
+                Direction::Left | Direction::Up => (tiles.last().copied(), Side::Right),
+            };
+            self.move_tile(from, &output, target, side);
         }
     }
 
-    pub fn resize_focused(&mut self, delta: f64) {
+    /// The output next to the one holding `id`, in `dir`.
+    fn output_toward(&self, id: TileId, dir: Direction) -> Option<String> {
+        let name = self.output_of(id)?;
+        let geo = |o: &Output| self.space.output_geometry(o);
+        let cur = geo(self.space.outputs().find(|o| o.name() == name)?)?;
+        let rects: Vec<(TileId, Rect)> = self
+            .space
+            .outputs()
+            .enumerate()
+            .filter_map(|(i, o)| geo(o).map(|g| (i as TileId, Rect::new(g.loc.x, g.loc.y, g.size.w, g.size.h))))
+            .collect();
+        let me = rects.iter().find(|(_, r)| (r.x, r.y) == (cur.loc.x, cur.loc.y))?.0;
+        let next = neighbor(&rects, me, dir)?;
+        self.space.outputs().nth(next as usize).map(|o| o.name())
+    }
+
+    /// Take `id` out of its layout and put it on `side` of `target` in the layout of
+    /// `output` (at the end of it without a target); it stays focused.
+    pub fn move_tile(&mut self, id: TileId, output: &str, target: Option<TileId>, side: Side) {
+        if target == Some(id) || !self.tiles.contains_key(&id) {
+            return;
+        }
+        self.remove_from_layouts(id);
+        self.layouts.entry(output.to_string()).or_default().insert_on(id, target, side);
+        self.focus_tile(id);
+    }
+
+    /// A Mod+drag ended at `pos`: the tile goes next to the tile under it (on the side
+    /// nearest to the pointer), or at the end of the output there when it has no tile.
+    pub fn drop_tile(&mut self, id: TileId, pos: Point<f64, Logical>) {
+        let under = self.shown.iter().find(|(t, r)| *t != id && r.contains(pos.x, pos.y)).copied();
+        if let Some((target, rect)) = under {
+            if let Some(output) = self.output_of(target) {
+                self.move_tile(id, &output, Some(target), drop_side(&rect, pos.x, pos.y));
+            }
+            return;
+        }
+        let output = self.space.output_under(pos).next().map(|o| o.name());
+        if let Some(output) = output {
+            // Dropped on the tile itself or on its own empty space: nothing moves.
+            if self.output_of(id).as_deref() != Some(output.as_str()) {
+                self.move_tile(id, &output, None, Side::Right);
+            }
+        }
+    }
+
+    /// Apply a layout change to the focused tile's layout, then lay everything out again.
+    pub fn change_focused(&mut self, change: impl Fn(&mut Layout, TileId)) {
         if let Some(id) = self.focused {
-            self.layout.resize(id, delta);
+            self.change_tile(id, change);
+        }
+    }
+
+    pub fn change_tile(&mut self, id: TileId, change: impl Fn(&mut Layout, TileId)) {
+        if let Some(layout) = self.layouts.values_mut().find(|l| l.contains(id)) {
+            change(layout, id);
             self.arrange();
         }
     }
@@ -267,7 +413,19 @@ impl Dune {
     }
 
     pub fn tile_at(&self, x: f64, y: f64) -> Option<TileId> {
-        self.geometries.iter().find(|(_, r)| r.contains(x, y)).map(|(id, _)| *id)
+        self.shown.iter().find(|(_, r)| r.contains(x, y)).map(|(id, _)| *id)
+    }
+
+    /// What a tab says: the title of the tile's window, else its app id.
+    pub fn tile_title(&self, id: TileId) -> String {
+        let surface = self.tiles.get(&id).and_then(|t| t.top()).and_then(|w| w.toplevel()).map(|t| t.wl_surface().clone());
+        let title = surface.and_then(|surface| {
+            with_states(&surface, |states| {
+                let data = states.data_map.get::<XdgToplevelSurfaceData>()?.lock().unwrap();
+                data.title.clone().filter(|t| !t.is_empty()).or_else(|| data.app_id.clone())
+            })
+        });
+        title.unwrap_or_else(|| format!("tile {id}"))
     }
 
     /// Pid of the process behind a Wayland client.

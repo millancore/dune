@@ -28,7 +28,7 @@ impl WlrLayerShellHandler for Dune {
         let Some(output) = output
             .as_ref()
             .and_then(Output::from_resource)
-            .or_else(|| self.space.outputs().next().cloned())
+            .or_else(|| self.active_output())
         else {
             return;
         };

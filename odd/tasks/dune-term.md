@@ -62,6 +62,14 @@ shell; unset → runs in place as usual. One-shot: the indicator resets once use
 - [x] P3c.3 dune-term: on Enter at the prompt query the indicator; split the typed line / `@app` to that side
 - [x] P3c.4 Tests: unit (layout before, key specs, protocol) + one e2e run (indicator + Enter -> new tile)
 - [x] P3b.5 Investigate intermittent e2e failures (keys not triggering @ in ~3/7 runs); one run at a time
+### Phase 3d — `:` trigger (user request 2026-10-19)
+`@` did not open the picker in the TTY session (cause not found: no compositor binding takes Shift+2 and nested
+e2e opens it). User chose `:` as the trigger instead; bare `:v` / `:h` (picker input `v`/`h`) still open an empty split.
+- [x] P3d.1 `picker::TRIGGER = ':'` used by at.rs, dune-term + dune-shell drawing, debug trace; picker resolves bare
+  `v`/`h` to an empty split; parse_split_command rejects `:app...` lines but keeps `:v`
+- [x] P3d.2 Tests updated (unit, e2e_nested, shell_wrapper); installed to ~/.cargo/bin
+- [ ] P3d.3 User checks `:` in the TTY session (if it still fails there, the cause is TTY-specific, not the key)
+
 ### Phase 4 — GPU
 - [ ] P4.1 wgpu renderer
 
@@ -121,5 +129,8 @@ shell; unset → runs in place as usual. One-shot: the indicator resets once use
 - P3b.5 (intermittent e2e) still open: this single run passed.
 - Note: nested in niri, Super+arrows are grabbed by niri; configure e.g. direction_right = ctrl+alt+Right to try there.
 
+- P3d (2026-10-19): cargo test --workspace 28+32+14 pass; shell_wrapper.py all pass (bash, zsh); e2e_nested 3 runs:
+  2 all pass, 1 dvorak run failed (desktop entry + clipboard, known intermittent P3b.5).
+
 ## Next step
-User tries the indicator; P3b.5 if failures show up; then phase 4 or dune README/tty backend.
+User tries `:` in the TTY session (P3d.3); user tries the indicator; P3b.5 if failures show up; then phase 4 or dune README/tty backend.

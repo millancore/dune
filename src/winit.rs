@@ -1,15 +1,9 @@
-use std::time::Duration;
-
 use smithay::{
     backend::{
         renderer::{
             damage::OutputDamageTracker,
             ImportDma,
             gles::GlesRenderer,
-            element::{
-                Kind,
-                solid::{SolidColorBuffer, SolidColorRenderElement},
-            },
         },
         egl::EGLDevice,
         winit::{self, WinitEvent},
@@ -17,20 +11,11 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::EventLoop,
     utils::{Rectangle, Transform},
-    desktop::layer_map_for_output,
     wayland::dmabuf::DmabufFeedbackBuilder,
 };
 
-use crate::{
-    Dune,
-    layout::Side,
-    tiling::{BORDER, GAP},
-};
+use crate::{Dune, render::BACKGROUND, state::Backend};
 
-const BACKGROUND: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
-const FOCUS_COLOR: [f32; 4] = [0.36, 0.62, 0.95, 1.0];
-/// The direction indicator: a bar on the side where the next command will open.
-const DIRECTION_COLOR: [f32; 4] = [0.98, 0.62, 0.22, 1.0];
 
 pub fn init_winit(event_loop: &mut EventLoop<Dune>, state: &mut Dune) -> Result<(), Box<dyn std::error::Error>> {
     let (mut backend, winit) = winit::init::<GlesRenderer>()?;
@@ -75,11 +60,7 @@ pub fn init_winit(event_loop: &mut EventLoop<Dune>, state: &mut Dune) -> Result<
     }
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
-    // Top, bottom, left, right edges of the focus border.
-    let mut borders: [SolidColorBuffer; 4] = Default::default();
-    let mut direction_bars: std::collections::HashMap<crate::layout::TileId, SolidColorBuffer> = Default::default();
-
-    state.backend = Some(backend);
+    state.backend = Backend::Winit(backend);
     let injected_input_only =
         std::env::var("DUNE_DEBUG").as_deref() == Ok("1") && std::env::var("DUNE_TEST_INPUT").as_deref() == Ok("injected");
 
@@ -94,84 +75,19 @@ pub fn init_winit(event_loop: &mut EventLoop<Dune>, state: &mut Dune) -> Result<
             WinitEvent::Input(_) if injected_input_only => {}
             WinitEvent::Input(event) => state.process_input_event(event),
             WinitEvent::Redraw => {
-                let backend = state.backend.as_mut().unwrap();
-                let size = backend.window_size();
-                let damage = Rectangle::from_size(size);
-
-                let mut elements = Vec::new();
-                // Indicator bars first: elements earlier in the list are drawn on top.
-                direction_bars.retain(|tile, _| state.directions.contains_key(tile));
-                for (tile, side) in &state.directions {
-                    let Some(rect) = state.geometries.iter().find(|(t, _)| t == tile).map(|(_, r)| *r) else {
-                        continue;
-                    };
-                    let (x, y, w, h) = match side {
-                        Side::Left => (rect.x - GAP, rect.y, GAP, rect.h),
-                        Side::Right => (rect.x + rect.w, rect.y, GAP, rect.h),
-                        Side::Up => (rect.x, rect.y - GAP, rect.w, GAP),
-                        Side::Down => (rect.x, rect.y + rect.h, rect.w, GAP),
-                    };
-                    let buffer = direction_bars.entry(*tile).or_default();
-                    buffer.update((w, h), DIRECTION_COLOR);
-                    elements.push(SolidColorRenderElement::from_buffer(buffer, (x, y), 1.0, 1.0, Kind::Unspecified));
-                }
-                if let Some(rect) = state
-                    .focused
-                    .and_then(|id| state.geometries.iter().find(|(t, _)| *t == id))
-                    .map(|(_, r)| *r)
-                {
-                    let b = BORDER.min(GAP);
-                    let edges = [
-                        (rect.x - b, rect.y - b, rect.w + 2 * b, b),
-                        (rect.x - b, rect.y + rect.h, rect.w + 2 * b, b),
-                        (rect.x - b, rect.y, b, rect.h),
-                        (rect.x + rect.w, rect.y, b, rect.h),
-                    ];
-                    for (buffer, (x, y, w, h)) in borders.iter_mut().zip(edges) {
-                        buffer.update((w, h), FOCUS_COLOR);
-                        elements.push(SolidColorRenderElement::from_buffer(
-                            buffer,
-                            (x, y),
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
-                        ));
-                    }
-                }
-
+                // The backend is lent out while the scene is built from the rest of the state.
+                let Backend::Winit(mut backend) = std::mem::replace(&mut state.backend, Backend::None) else { return };
+                let damage = Rectangle::from_size(backend.window_size());
                 {
                     let (renderer, mut framebuffer) = backend.bind().unwrap();
-                    smithay::desktop::space::render_output(
-                        &output,
-                        renderer,
-                        &mut framebuffer,
-                        1.0,
-                        0,
-                        [&state.space],
-                        &elements,
-                        &mut damage_tracker,
-                        BACKGROUND,
-                    )
-                    .unwrap();
+                    // The host draws the pointer.
+                    let elements = state.output_elements(renderer, &output, false);
+                    damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, BACKGROUND).unwrap();
                 }
                 backend.submit(Some(&[damage])).unwrap();
-
-                state.space.elements().for_each(|window| {
-                    window.send_frame(&output, state.start_time.elapsed(), Some(Duration::ZERO), |_, _| {
-                        Some(output.clone())
-                    })
-                });
-                for layer in layer_map_for_output(&output).layers() {
-                    layer.send_frame(&output, state.start_time.elapsed(), Some(Duration::ZERO), |_, _| {
-                        Some(output.clone())
-                    });
-                }
-
-                state.space.refresh();
-                state.popups.cleanup();
-                let _ = state.display_handle.flush_clients();
-
-                state.backend.as_ref().unwrap().window().request_redraw();
+                backend.window().request_redraw();
+                state.backend = Backend::Winit(backend);
+                state.post_render(&output);
             }
             WinitEvent::CloseRequested => {
                 state.loop_signal.stop();

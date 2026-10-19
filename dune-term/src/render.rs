@@ -7,7 +7,7 @@ use alacritty_terminal::{
     vte::ansi::{CursorShape, Rgb},
 };
 
-use dune_common::picker::{HINT, Picker};
+use dune_common::picker::{HINT, Picker, TRIGGER};
 
 use crate::{
     font::{Font, Style},
@@ -212,10 +212,10 @@ pub fn panel_place(cursor: (usize, usize), grid: (usize, usize), height: usize, 
     (left, top, width)
 }
 
-/// The `@` line at the cursor and the panel of suggestions next to it.
+/// The `:` line at the cursor and the panel of suggestions next to it.
 fn draw_picker(canvas: &mut Canvas, font: &mut Font, picker: &Picker, cursor: (usize, usize), grid: (usize, usize), fg: Rgb) {
     // The line being typed, with its own cursor.
-    let line = format!("@{}", picker.input());
+    let line = format!("{}{}", TRIGGER, picker.input());
     let len = line.chars().count();
     cells(canvas, font, cursor, (len + 1).min(grid.0.saturating_sub(cursor.0)), INPUT_BG);
     put_text(canvas, font, cursor, &line, fg, Style::Bold);

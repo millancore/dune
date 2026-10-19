@@ -1,6 +1,6 @@
-//! The `@` layer: what happens between the keyboard and the shell of a terminal tile.
+//! The `:` layer: what happens between the keyboard and the shell of a terminal tile.
 //!
-//! `@` typed at an empty prompt opens the picker; everything else goes to the shell.
+//! `:` typed at an empty prompt opens the picker; everything else goes to the shell.
 //! "At the prompt" means the shell itself is the foreground process group of its
 //! terminal (no program running) — the caller checks that — and nothing was typed
 //! since the last Enter, which this layer tracks.
@@ -28,7 +28,7 @@ pub struct AtLayer {
     tile: Option<TileId>,
     shell_pid: u32,
     send: Box<dyn Fn(&Request) -> bool>,
-    /// The applications `@` offers (read when the picker opens, so new ones show up).
+    /// The applications `:` offers (read when the picker opens, so new ones show up).
     apps: Box<dyn Fn() -> Vec<App>>,
     /// Takes (reads and clears) the tile's direction indicator, kept by dune.
     take_direction: Box<dyn Fn() -> Option<Side>>,
@@ -36,10 +36,10 @@ pub struct AtLayer {
     typed: bool,
     /// The shell was at its prompt the last time we looked.
     was_idle: bool,
-    /// An `@prog` was started and the compositor is waiting for its window.
+    /// A `:prog` was started and the compositor is waiting for its window.
     swallowing: bool,
     picker: Option<Picker>,
-    /// Command to run once the shell is ready (tiles opened with `@prog:v`).
+    /// Command to run once the shell is ready (tiles opened with `:prog:v`).
     run_first: Option<String>,
     last_output: Option<Instant>,
 }
@@ -83,7 +83,7 @@ impl AtLayer {
         }
     }
 
-    /// Whether the `@` layer applies: only inside dune.
+    /// Whether the `:` layer applies: only inside dune.
     pub fn enabled() -> bool {
         std::env::var_os("DUNE_SOCKET").is_some()
     }
@@ -160,7 +160,7 @@ impl AtLayer {
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
-            if b == b'@' && !self.typed {
+            if b == picker::TRIGGER as u8 && !self.typed {
                 let mut out = bytes[..i].to_vec();
                 self.picker = Some(Picker::new((self.apps)(), self.shell_cwd()));
                 out.extend(self.feed_picker(&bytes[i + 1..]));
@@ -179,7 +179,7 @@ impl AtLayer {
             match b {
                 b'\r' | b'\n' => {
                     self.typed = false;
-                    // A builtin started with `@` (no program ran) ends here.
+                    // A builtin started with `:` (no program ran) ends here.
                     self.end_swallow();
                 }
                 0x03 | 0x15 => self.typed = false, // Ctrl-C / Ctrl-U clear the line
@@ -207,7 +207,7 @@ impl AtLayer {
         Vec::new()
     }
 
-    /// Run a finished `@` line: on the side it names (`:v`/`:h`), else on the side the
+    /// Run a finished `:` line: on the side it names (`:v`/`:h`), else on the side the
     /// direction indicator points to, else in place.
     fn run_line(&mut self, line: Line) -> Vec<u8> {
         match line.split.map(Side::from).or_else(|| (self.take_direction)()) {
@@ -259,7 +259,7 @@ impl AtLayer {
 pub const WRAPPER_NAME: &str = "dune-shell";
 
 /// When `$SHELL` is dune's wrapper, the user's real shell (`DUNE_USER_SHELL`, or
-/// `/bin/sh`): a terminal that does the `@` layer itself starts that directly.
+/// `/bin/sh`): a terminal that does the `:` layer itself starts that directly.
 pub fn wrapped_user_shell() -> Option<PathBuf> {
     let shell = PathBuf::from(std::env::var_os("SHELL")?);
     if shell.file_name()? != WRAPPER_NAME {
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn ordinary_typing_passes_through() {
         let (mut at, sent) = layer(None);
-        assert_eq!(at.input(b"echo a@b\r", true), b"echo a@b\r");
+        assert_eq!(at.input(b"echo a:b\r", true), b"echo a:b\r");
         assert!(at.picker().is_none());
         assert!(sent.borrow().is_empty());
     }
@@ -354,14 +354,14 @@ mod tests {
     #[test]
     fn at_while_a_program_runs_is_for_the_program() {
         let (mut at, _) = layer(None);
-        assert_eq!(at.input(b"@", false), b"@");
+        assert_eq!(at.input(b":", false), b":");
         assert!(at.picker().is_none());
     }
 
     #[test]
     fn at_on_an_empty_prompt_opens_the_picker() {
         let (mut at, _) = layer(None);
-        assert_eq!(at.input(b"@ls", true), b"");
+        assert_eq!(at.input(b":ls", true), b"");
         assert_eq!(at.picker().unwrap().input(), "ls");
         // Escape closes it and the prompt stays empty.
         assert_eq!(at.input(b"\x1b", true), b"");
@@ -372,19 +372,19 @@ mod tests {
     fn terminal_replies_do_not_count_as_typing() {
         let (mut at, _) = layer(None);
         at.input(b"\x1b[12;40R\x1b[I", true);
-        at.input(b"@", true);
+        at.input(b":", true);
         assert!(at.picker().is_some());
         // But an arrow key (history) does.
         let (mut at, _) = layer(None);
         at.input(b"\x1b[A", true);
-        at.input(b"@", true);
+        at.input(b":", true);
         assert!(at.picker().is_none());
     }
 
     #[test]
     fn in_place_run_swallows_until_the_prompt_returns() {
         let (mut at, sent) = layer(None);
-        assert_eq!(at.input(b"@sleep 1\r", true), b"sleep 1\r");
+        assert_eq!(at.input(b":sleep 1\r", true), b"sleep 1\r");
         assert_eq!(sent.borrow()[0], Request::Swallow { tile: 7, shell_pid: 4242 });
         at.tick(false); // the program runs
         at.tick(true); // and ends
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn split_asks_the_compositor() {
         let (mut at, sent) = layer(None);
-        assert_eq!(at.input(b"@vim:v notes.md\r", true), b"");
+        assert_eq!(at.input(b":vim:v notes.md\r", true), b"");
         assert_eq!(
             sent.borrow()[0],
             Request::Open { side: Some(Side::Right), from: Some(7), cwd: None, command: "vim notes.md".into() }
@@ -405,20 +405,20 @@ mod tests {
     #[test]
     fn at_launches_desktop_apps() {
         let (mut at, sent) = layer(None);
-        assert_eq!(at.input(b"@fire https://a\r", true), b"firefox https://a\r");
+        assert_eq!(at.input(b":fire https://a\r", true), b"firefox https://a\r");
         assert_eq!(sent.borrow()[0], Request::Swallow { tile: 7, shell_pid: 4242 });
     }
 
     #[test]
     fn the_direction_indicator_sends_at_apps_aside() {
         let (mut at, sent) = layer_pointing(None, Some(Side::Left));
-        assert_eq!(at.input(b"@fire\r", true), b""); // nothing runs here
+        assert_eq!(at.input(b":fire\r", true), b""); // nothing runs here
         assert_eq!(
             sent.borrow()[0],
             Request::Open { side: Some(Side::Left), from: Some(7), cwd: None, command: "firefox".into() }
         );
         // Used once: the next one runs in place.
-        assert_eq!(at.input(b"@fire\r", true), b"firefox\r");
+        assert_eq!(at.input(b":fire\r", true), b"firefox\r");
     }
 
     #[test]

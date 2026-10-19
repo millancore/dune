@@ -429,7 +429,7 @@ impl App {
         debug(format_args!(
             "key {:?} at_prompt={at_prompt} picker={} -> shell {:?}",
             String::from_utf8_lossy(&typed),
-            self.at.as_ref().unwrap().picker().map_or("-".into(), |p| format!("@{}", p.input())),
+            self.at.as_ref().unwrap().picker().map_or("-".into(), |p| format!("{}{}", dune_common::picker::TRIGGER, p.input())),
             String::from_utf8_lossy(&bytes)
         ));
         self.request_redraw(); // the picker may have opened, changed or closed

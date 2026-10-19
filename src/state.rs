@@ -3,7 +3,7 @@ use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc};
 use smithay::{
     backend::{renderer::gles::GlesRenderer, winit::WinitGraphicsBackend},
     desktop::{PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
-    input::{Seat, SeatState, keyboard::XkbConfig},
+    input::{Seat, SeatState, pointer::CursorImageStatus},
     reexports::{
         calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic},
         wayland_server::{
@@ -52,12 +52,24 @@ pub struct Dune {
     pub loop_signal: LoopSignal,
 
     // Tiling
-    pub layout: Layout,
+    /// One layout per output, by output name.
+    pub layouts: HashMap<String, Layout>,
+    /// The output new tiles go to when they have no target: the last one the pointer
+    /// entered or a tile was focused on.
+    pub active_output: Option<String>,
     pub tiles: HashMap<TileId, Tile>,
     pub focused: Option<TileId>,
     pub next_tile: TileId,
     /// Geometries from the last `arrange`, used for borders, focus and hit testing.
     pub geometries: Vec<(TileId, Rect)>,
+    /// The part of each tile that is on its output; tiles scrolled away are missing.
+    pub shown: Vec<(TileId, Rect)>,
+    /// Tiles folded into a tab: their bar is drawn, their window is not.
+    pub tabs: Vec<TileId>,
+    /// Mod+right button drag resizing a tile: the tile and the last pointer position.
+    pub resize_drag: Option<(TileId, Point<f64, Logical>)>,
+    /// Mod+left button drag moving a tile: it is dropped where the button is released.
+    pub move_drag: Option<TileId>,
     /// Tiles waiting for the window of an `@prog`, with the pid of the shell that started it.
     pub swallows: HashMap<TileId, u32>,
     /// Per-tile direction indicator: where the next command typed there opens.
@@ -86,8 +98,33 @@ pub struct Dune {
 
     /// GPU buffers from clients (linux-dmabuf); the global is created with the backend.
     pub dmabuf_state: DmabufState,
-    /// The window we render into (nested), set by `winit::init_winit`.
-    pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
+    /// Where we draw: a window in another session, or the real hardware.
+    pub backend: Backend,
+    pub decorations: crate::render::Decorations,
+    pub tab_titles: crate::tab_title::TabTitles,
+    /// The pointer image: clients choose it; dune draws it on a real session.
+    pub cursor_status: CursorImageStatus,
+    pub cursor: crate::cursor::Cursor,
+}
+
+pub enum Backend {
+    /// Not set up yet.
+    None,
+    /// Nested in another compositor (or X11).
+    Winit(WinitGraphicsBackend<GlesRenderer>),
+    /// A real session on a TTY.
+    Udev(crate::udev::UdevData),
+}
+
+impl Backend {
+    /// The renderer of the primary GPU.
+    pub fn renderer(&mut self) -> Option<&mut GlesRenderer> {
+        match self {
+            Backend::None => None,
+            Backend::Winit(backend) => Some(backend.renderer()),
+            Backend::Udev(udev) => udev.renderer.as_mut(),
+        }
+    }
 }
 
 impl Dune {
@@ -111,14 +148,7 @@ impl Dune {
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
         // Keys arrive as raw keycodes (also when nested), so the layout must be ours.
         let config = crate::config::load();
-        let xkb_config = XkbConfig {
-            rules: &config.keyboard_rules,
-            model: &config.keyboard_model,
-            layout: &config.keyboard_layout,
-            variant: &config.keyboard_variant,
-            options: Some(config.keyboard_options.clone()).filter(|o| !o.is_empty()),
-        };
-        if let Err(err) = seat.add_keyboard(xkb_config, 200, 25) {
+        if let Err(err) = seat.add_keyboard(config.xkb(), 200, 25) {
             tracing::error!("invalid keyboard layout in the dune config ({err:?}), falling back to the default");
             seat.add_keyboard(Default::default(), 200, 25).unwrap();
         }
@@ -136,11 +166,16 @@ impl Dune {
             loop_signal,
             socket_name,
 
-            layout: Layout::default(),
+            layouts: HashMap::new(),
+            active_output: None,
             tiles: HashMap::new(),
             focused: None,
             next_tile: 1,
             geometries: Vec::new(),
+            shown: Vec::new(),
+            tabs: Vec::new(),
+            resize_drag: None,
+            move_drag: None,
             swallows: HashMap::new(),
             directions: HashMap::new(),
             shell_wrapper: None,
@@ -155,12 +190,16 @@ impl Dune {
             data_device_state,
             popups,
             seat,
+            tab_titles: crate::tab_title::TabTitles::new(&config.font_family),
             config,
             layer_shell_state,
             viewporter_state,
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
-            backend: None,
+            backend: Backend::None,
+            decorations: Default::default(),
+            cursor_status: CursorImageStatus::default_named(),
+            cursor: crate::cursor::Cursor::load(),
         }
     }
 

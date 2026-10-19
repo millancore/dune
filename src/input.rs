@@ -1,16 +1,21 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent, InputTime, KeyState,
+        PointerMotionEvent,
         KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
         keyboard::{FilterResult, Keycode, Keysym, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    utils::SERIAL_COUNTER,
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
-use crate::{config::Config, layout::Direction, state::Dune};
+use crate::{
+    config::Config,
+    layout::{Direction, Layout},
+    state::Dune,
+};
 
 /// Compositor keybindings, all behind the modifier chosen with `DUNE_MOD`.
 #[derive(Debug, Clone, Copy)]
@@ -18,11 +23,28 @@ enum Action {
     NewTerminal,
     Focus(Direction),
     Swap(Direction),
-    Grow,
-    Shrink,
+    /// Column width / tile height, as a share of the output.
+    Width(f64),
+    Height(f64),
+    CycleWidth,
+    FullWidth,
     Close,
     Quit,
     Direction(Direction),
+    /// Ctrl+Alt+F1..F12 on a real session.
+    SwitchVt(i32),
+}
+
+/// How much one press of the resize keys changes a width or height.
+const RESIZE_STEP: f64 = 0.05;
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+/// Scroll distance of one wheel notch (as smithay reports it).
+const SCROLL_NOTCH: f64 = 15.0;
+
+/// Width/height change for a Super+scroll: a wheel notch is one resize step, up grows.
+fn scroll_resize_delta(vertical_scroll: f64) -> f64 {
+    -vertical_scroll / SCROLL_NOTCH * RESIZE_STEP
 }
 
 fn modifier_held(modifier: &str, mods: &ModifiersState) -> bool {
@@ -34,6 +56,11 @@ fn modifier_held(modifier: &str, mods: &ModifiersState) -> bool {
 }
 
 fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Action> {
+    // The keymap turns Ctrl+Alt+Fn into XF86Switch_VT_n.
+    let vt = sym.raw().wrapping_sub(Keysym::XF86_Switch_VT_1.raw());
+    if vt < 12 {
+        return Some(Action::SwitchVt(vt as i32 + 1));
+    }
     // Direction indicator keys first: they may use the same modifier as the rest.
     if let Some((side, _)) = config.direction_keys.iter().find(|(_, key)| key.matches(mods, sym)) {
         return Some(Action::Direction(*side));
@@ -54,25 +81,115 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
     }
     match sym {
         Keysym::Return => Some(Action::NewTerminal),
-        Keysym::equal | Keysym::plus => Some(Action::Grow),
-        Keysym::minus => Some(Action::Shrink),
+        Keysym::equal | Keysym::plus if mods.shift => Some(Action::Height(RESIZE_STEP)),
+        Keysym::minus | Keysym::underscore if mods.shift => Some(Action::Height(-RESIZE_STEP)),
+        Keysym::equal | Keysym::plus => Some(Action::Width(RESIZE_STEP)),
+        Keysym::minus => Some(Action::Width(-RESIZE_STEP)),
+        Keysym::r => Some(Action::CycleWidth),
+        Keysym::f => Some(Action::FullWidth),
         Keysym::q => Some(Action::Close),
         Keysym::e if mods.shift => Some(Action::Quit),
         _ => None,
     }
 }
 
+/// The closest point to `pos` inside one of `outputs` (pointer motion stays on the screens).
+fn clamp_to(outputs: &[Rectangle<i32, Logical>], pos: Point<f64, Logical>) -> Point<f64, Logical> {
+    if outputs.iter().any(|g| g.to_f64().contains(pos)) {
+        return pos;
+    }
+    outputs
+        .iter()
+        .map(|g| {
+            let g = g.to_f64();
+            let x = pos.x.clamp(g.loc.x, g.loc.x + g.size.w - 1.0);
+            let y = pos.y.clamp(g.loc.y, g.loc.y + g.size.h - 1.0);
+            Point::from((x, y))
+        })
+        .min_by(|a, b| {
+            let d = |p: &Point<f64, Logical>| (p.x - pos.x).powi(2) + (p.y - pos.y).powi(2);
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap_or(pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_stays_on_the_screens() {
+        // Two monitors side by side, of different heights (like 2560x1080 + 1920x1080, shorter).
+        let outputs = [Rectangle::new((0, 0).into(), (2560, 1080).into()), Rectangle::new((2560, 0).into(), (1920, 900).into())];
+        let p = |x: f64, y: f64| Point::<f64, Logical>::from((x, y));
+        assert_eq!(clamp_to(&outputs, p(100.0, 100.0)), p(100.0, 100.0));
+        assert_eq!(clamp_to(&outputs, p(-50.0, 100.0)), p(0.0, 100.0));
+        assert_eq!(clamp_to(&outputs, p(3000.0, 1000.0)), p(3000.0, 899.0)); // below the short monitor
+        assert_eq!(clamp_to(&outputs, p(9000.0, -5.0)), p(4479.0, 0.0));
+    }
+
+    #[test]
+    fn scroll_resize_steps() {
+        assert_eq!(scroll_resize_delta(-15.0), RESIZE_STEP); // one notch up grows
+        assert_eq!(scroll_resize_delta(30.0), -2.0 * RESIZE_STEP);
+    }
+
+    #[test]
+    fn vt_switch_keys() {
+        let config = crate::config::Config {
+            keyboard_rules: String::new(),
+            keyboard_model: String::new(),
+            keyboard_layout: String::new(),
+            keyboard_variant: String::new(),
+            keyboard_options: String::new(),
+            terminal: String::new(),
+            modifier: "alt".into(),
+            direction_keys: Vec::new(),
+            xwayland: String::new(),
+            outputs: Default::default(),
+            input: Default::default(),
+            font_family: String::new(),
+        };
+        let mods = ModifiersState { ctrl: true, alt: true, ..Default::default() };
+        assert!(matches!(action_for(&config, &mods, Keysym::XF86_Switch_VT_3), Some(Action::SwitchVt(3))));
+        assert!(matches!(action_for(&config, &mods, Keysym::XF86_Switch_VT_12), Some(Action::SwitchVt(12))));
+        assert!(action_for(&config, &mods, Keysym::F3).is_none());
+    }
+}
+
 impl Dune {
+    /// The closest point to `pos` that is on some output.
+    fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        let geos: Vec<_> = self.space.outputs().filter_map(|o| self.space.output_geometry(o)).collect();
+        clamp_to(&geos, pos)
+    }
+
+    /// Mod+right drag: the tile under the pointer follows it, right/down growing it.
+    fn drag_resize(&mut self, pos: Point<f64, Logical>) {
+        let Some((id, last)) = self.resize_drag else { return };
+        self.resize_drag = Some((id, pos));
+        let output = self.space.outputs().find(|o| self.layouts.get(&o.name()).is_some_and(|l| l.contains(id)));
+        let Some(area) = output.and_then(|o| self.space.output_geometry(o)) else { return };
+        let (dx, dy) = ((pos.x - last.x) / area.size.w as f64, (pos.y - last.y) / area.size.h as f64);
+        self.change_tile(id, |l, id| {
+            l.resize_width(id, dx);
+            l.resize_height(id, dy);
+        });
+    }
+
     fn run_action(&mut self, action: Action) {
         match action {
             Action::NewTerminal => self.spawn_terminal(None, None, None, None),
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
-            Action::Grow => self.resize_focused(0.05),
-            Action::Shrink => self.resize_focused(-0.05),
+            Action::Width(delta) => self.change_focused(|l, id| l.resize_width(id, delta)),
+            Action::Height(delta) => self.change_focused(|l, id| l.resize_height(id, delta)),
+            Action::CycleWidth => self.change_focused(Layout::cycle_width),
+            Action::FullWidth => self.change_focused(Layout::toggle_full_width),
             Action::Close => self.close_focused(),
             Action::Quit => self.loop_signal.stop(),
             Action::Direction(side) => self.toggle_direction(side),
+            Action::SwitchVt(vt) => self.change_vt(vt),
         }
     }
 
@@ -108,11 +225,30 @@ impl Dune {
             InputEvent::Keyboard { event, .. } => {
                 self.handle_key(event.key_code(), event.state(), Event::time(&event));
             }
-            InputEvent::PointerMotion { .. } => {}
+            InputEvent::PointerMotion { event, .. } => {
+                // Relative motion (mice, touchpads on a real session), kept on the screens.
+                let pointer = self.seat.get_pointer().unwrap();
+                let pos = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                self.pointer_at(pos);
+                self.drag_resize(pos);
+                let under = self.surface_under(pos);
+                pointer.motion(
+                    self,
+                    under,
+                    &MotionEvent {
+                        location: pos,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time(),
+                    },
+                );
+                pointer.frame(self);
+            }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output = self.space.outputs().next().unwrap();
                 let output_geo = self.space.output_geometry(output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                self.pointer_at(pos);
+                self.drag_resize(pos);
 
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
@@ -133,6 +269,43 @@ impl Dune {
                 let pointer = self.seat.get_pointer().unwrap();
                 let serial = SERIAL_COUNTER.next_serial();
                 let button_state = event.state();
+
+                // Mod+right button drags resize the tile instead of reaching the client.
+                let mods = self.seat.get_keyboard().unwrap().modifier_state();
+                if event.button_code() == BTN_RIGHT {
+                    if button_state == ButtonState::Released && self.resize_drag.take().is_some() {
+                        return;
+                    }
+                    let pos = pointer.current_location();
+                    if button_state == ButtonState::Pressed
+                        && modifier_held(&self.config.modifier, &mods)
+                        && let Some(id) = self.tile_at(pos.x, pos.y)
+                    {
+                        self.focus_tile(id);
+                        self.resize_drag = Some((id, pos));
+                        return;
+                    }
+                }
+
+                // Mod+left button drags move the tile: it lands where the button is released,
+                // on this monitor or another one.
+                if event.button_code() == BTN_LEFT {
+                    let pos = pointer.current_location();
+                    if button_state == ButtonState::Released
+                        && let Some(id) = self.move_drag.take()
+                    {
+                        self.drop_tile(id, pos);
+                        return;
+                    }
+                    if button_state == ButtonState::Pressed
+                        && modifier_held(&self.config.modifier, &mods)
+                        && let Some(id) = self.tile_at(pos.x, pos.y)
+                    {
+                        self.focus_tile(id);
+                        self.move_drag = Some(id);
+                        return;
+                    }
+                }
 
                 // Click to focus.
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
@@ -188,6 +361,22 @@ impl Dune {
                     if event.amount(Axis::Vertical) == Some(0.0) {
                         frame = frame.stop(Axis::Vertical);
                     }
+                }
+
+                // Super+scroll resizes the tile under the pointer: the column's width, or with
+                // Shift its height. Always Super, whatever the bindings modifier.
+                let mods = self.seat.get_keyboard().unwrap().modifier_state();
+                if mods.logo && vertical_amount != 0.0 {
+                    let pos = self.seat.get_pointer().unwrap().current_location();
+                    if let Some(id) = self.tile_at(pos.x, pos.y).or(self.focused) {
+                        let delta = scroll_resize_delta(vertical_amount);
+                        if mods.shift {
+                            self.change_tile(id, |l, id| l.resize_height(id, delta));
+                        } else {
+                            self.change_tile(id, |l, id| l.resize_width(id, delta));
+                        }
+                    }
+                    return;
                 }
 
                 let pointer = self.seat.get_pointer().unwrap();

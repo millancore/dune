@@ -1,5 +1,6 @@
-//! The terminal font: faces (regular, bold, italic), per-character fallback fonts,
-//! cell metrics and a cache of rasterized glyphs.
+//! A monospace font: faces (regular, bold, italic), per-character fallback fonts,
+//! cell metrics and a cache of rasterized glyphs. dune-term draws its cells with it,
+//! the compositor its tab titles.
 
 use std::collections::HashMap;
 
@@ -231,7 +232,7 @@ impl Font {
 
 fn load_face(path: &str, index: u32) -> Option<FontRef<'static>> {
     let data = std::fs::read(path).ok()?;
-    // Fonts live as long as the terminal.
+    // Fonts live as long as the program.
     let data: &'static [u8] = Box::leak(data.into_boxed_slice());
     FontRef::from_index(data, index as usize)
 }

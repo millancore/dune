@@ -4,7 +4,7 @@
 
 mod app;
 mod config;
-mod font;
+use dune_common::font;
 mod keys;
 mod palette;
 mod render;

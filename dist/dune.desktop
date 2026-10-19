@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Dune
+Comment=Terminal-first tiling Wayland compositor
+Exec=dune-session
+Type=Application
+DesktopNames=dune
