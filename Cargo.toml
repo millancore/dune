@@ -1,0 +1,26 @@
+[workspace]
+members = ["dune-common", "dune-term"]
+
+[package]
+name = "dune"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal-first tiling Wayland compositor built on Smithay"
+
+[dependencies]
+dune-common = { path = "dune-common" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay"
+rev = "023b78b1c5a05ca512767cacc07efca55fae8be4"
+default-features = false
+features = ["backend_winit", "backend_drm", "wayland_frontend", "desktop"]
+
+[dependencies.nix]
+version = "0.31"
+features = ["term", "process", "signal", "poll", "fs"]
+
+[dependencies.libc]
+version = "0.2"

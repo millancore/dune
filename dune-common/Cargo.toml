@@ -1,0 +1,7 @@
+[package]
+name = "dune-common"
+version = "0.1.0"
+edition = "2024"
+description = "Code shared by the dune compositor and dune-term: the @ layer and the control protocol"
+
+[dependencies]
