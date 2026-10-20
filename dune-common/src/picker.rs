@@ -1,7 +1,7 @@
 //! The launcher's line editor, and the `cmd:v` / `cmd:h` split lines typed in terminals.
 //!
 //! Pure logic: it turns keys into an edited line plus a list of suggestions; the
-//! compositor's launcher draws them.
+//! launcher of dune-finder draws them.
 
 use std::{
     cmp::Reverse,
@@ -133,7 +133,7 @@ pub struct Picker {
     candidates: Vec<Candidate>,
     apps: Vec<App>,
     cwd: PathBuf,
-    /// With nothing typed, list every app (the compositor's launcher) instead of nothing.
+    /// With nothing typed, list every app (dune-finder's launcher) instead of nothing.
     browse: bool,
     /// Times each app (by id) was launched: the most used come first.
     uses: HashMap<String, u32>,
@@ -177,6 +177,13 @@ impl Picker {
         self.selected
     }
 
+    /// Highlight suggestion `i` (one clicked); out of the list it changes nothing.
+    pub fn select(&mut self, i: usize) {
+        if i < self.candidates.len() {
+            self.selected = i;
+        }
+    }
+
     /// Id of the app the last Enter ran; None when it ran a typed command.
     pub fn chosen(&self) -> Option<&str> {
         self.chosen.as_deref()
@@ -216,7 +223,7 @@ impl Picker {
         Outcome::Continue
     }
 
-    /// Browsing (the compositor's launcher), a last word starting with `@` says where
+    /// Browsing (dune-finder's launcher), a last word starting with `@` says where
     /// the app opens: `firefox @2`. It is not part of the command.
     pub fn dest(&self) -> Option<&str> {
         self.dest_start().map(|i| self.input[i..].trim_start())

@@ -17,9 +17,10 @@ use smithay::{
     },
 };
 
-use dune_common::protocol::{Request, Side, direction_answer};
+use dune_common::protocol::{Request, Side, WindowInfo, direction_answer};
 
 use crate::{
+    config::TerminalHere,
     launcher::Spot,
     layout::{Direction, Layout, Rect, Split, TileId, column_zone, drop_column, drop_side, drop_zone, neighbor, past_edges},
     state::{Dune, Tile},
@@ -72,6 +73,41 @@ impl Dune {
             self.tiles.remove(&id);
             None
         }
+    }
+
+    /// Mod+v / Mod+s / Mod+Shift+t: a terminal to the right of the focused tile, below it or
+    /// as a new tab of its container (a floating one has no tabs: to its right), in the
+    /// folder the focused window's shell is in; without a focused window, where a terminal
+    /// opens and in `$HOME`.
+    pub fn terminal_here(&mut self, here: TerminalHere) {
+        let target = self.focused.filter(|f| self.tiles.contains_key(f));
+        let cwd = target.and_then(|t| self.tile_cwd(t));
+        if here == TerminalHere::Tab
+            && let Some(id) = target.and_then(|t| self.tab_tile(t))
+        {
+            if !self.start_terminal(id, cwd, None, None) {
+                self.remove_from_layouts(id);
+                self.tiles.remove(&id);
+                self.arrange();
+            }
+            return;
+        }
+        let side = match here {
+            TerminalHere::Below => Side::Down,
+            TerminalHere::Right | TerminalHere::Tab => Side::Right,
+        };
+        self.spawn_terminal(target, Some(side), cwd, None);
+    }
+
+    /// The folder tile `id`'s window works in: that of the newest process at the bottom of
+    /// its client's (the shell in a terminal, or what runs in it).
+    fn tile_cwd(&self, id: TileId) -> Option<PathBuf> {
+        let surface = self.tiles.get(&id)?.top()?.toplevel()?.wl_surface().clone();
+        let mut pid = self.client_pid(&surface)?;
+        while let Some(child) = newest_child(pid) {
+            pid = child;
+        }
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     /// Start a terminal for tile `id` (its `DUNE_TILE`), running `run` like `spawn_terminal`.
@@ -735,9 +771,7 @@ impl Dune {
         match self.tiles.get(&id).and_then(|t| t.top()) {
             Some(window) => window.toplevel().unwrap().send_close(),
             None if self.tiles.get(&id).is_some_and(|t| t.reserved) => {
-                if self.launcher.slot().is_some_and(|(slot, _)| slot == id) {
-                    self.launcher.close();
-                }
+                self.forget_finder_slot(id);
                 self.drop_empty(id, None);
             }
             None => {}
@@ -767,7 +801,7 @@ impl Dune {
     }
 
     /// Pid of the process behind a Wayland client.
-    fn client_pid(&self, surface: &WlSurface) -> Option<u32> {
+    pub fn client_pid(&self, surface: &WlSurface) -> Option<u32> {
         let client = self.display_handle.get_client(surface.id()).ok()?;
         let creds = client.get_credentials(&self.display_handle).ok()?;
         u32::try_from(creds.pid).ok()
@@ -786,7 +820,24 @@ impl Dune {
                 self.swallows.remove(&tile);
             }
             // The indicator is used once: asking for it clears it.
-            Request::Direction { tile } => return Some(direction_answer(self.directions.remove(&tile))),
+            Request::Direction { tile } => {
+                return Some(direction_answer(self.directions.remove(&tile)));
+            }
+            Request::Windows => return Some(WindowInfo::encode_all(&self.window_list())),
+            Request::GoTo { tile } => {
+                self.go_to(tile);
+                return Some("ok".into());
+            }
+            Request::Launch {
+                dest,
+                target,
+                slot,
+                terminal,
+                command,
+            } => {
+                self.finder_launch(dest, target, slot, command, terminal);
+                return Some("ok".into());
+            }
             Request::Keys(keys) => {
                 if std::env::var("DUNE_DEBUG").as_deref() != Ok("1") {
                     tracing::warn!("ignoring key injection: DUNE_DEBUG=1 is not set");
@@ -822,11 +873,10 @@ fn neighbor_or_first(geoms: &[(TileId, Rect)], id: TileId, order: Vec<TileId>) -
 /// The terminal to run. dune's own `dune-term` is looked up next to the dune binary
 /// first, so it is found even when its directory is not on the session's `PATH`.
 fn terminal_command(configured: &str) -> String {
-    if configured == "dune-term"
-        && let Some(sibling) = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dune-term")))
-        && sibling.is_file()
-    {
-        return sibling.to_string_lossy().into_owned();
+    if configured == "dune-term" {
+        return crate::launcher::sibling_command(configured)
+            .to_string_lossy()
+            .into_owned();
     }
     configured.to_string()
 }
@@ -860,10 +910,25 @@ fn is_descendant(mut pid: u32, ancestor: u32) -> bool {
 }
 
 fn parent_pid(pid: u32) -> Option<u32> {
+    stat_field(pid, 4)?.parse().ok()
+}
+
+/// The child process of `pid` (of any of its threads) started last.
+fn newest_child(pid: u32) -> Option<u32> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    tasks
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|children| children.split_whitespace().filter_map(|c| c.parse::<u32>().ok()).collect::<Vec<_>>())
+        .max_by_key(|child| stat_field(*child, 22).and_then(|t| t.parse::<u64>().ok()).unwrap_or(0))
+}
+
+/// Field `n` (from 1, as `man proc` numbers them) of `/proc/<pid>/stat`.
+fn stat_field(pid: u32, n: usize) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name is in parentheses and may contain spaces: parse after the last `)`.
+    // The command name (field 2) is in parentheses and may contain spaces: parse after the last `)`.
     let after = &stat[stat.rfind(')')? + 1..];
-    after.split_whitespace().nth(1)?.parse().ok()
+    after.split_whitespace().nth(n.checked_sub(3)?).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -879,5 +944,19 @@ mod tests {
         assert!(!is_descendant(me, child.id()));
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn newest_child_is_the_last_started() {
+        // A shell of its own (other tests start children of this process too): `sleep 7`
+        // starts after `sleep 8` (start times tick in 1/100 s).
+        let mut sh = std::process::Command::new("sh").args(["-c", "sleep 8 & sleep 0.05; sleep 7 & wait"]).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let newest = newest_child(sh.id()).unwrap();
+        assert_eq!(std::fs::read_to_string(format!("/proc/{newest}/cmdline")).unwrap(), "sleep\07\0");
+        assert_eq!(newest_child(newest), None);
+        let _ = std::process::Command::new("pkill").args(["-P", &sh.id().to_string()]).status();
+        sh.kill().unwrap();
+        sh.wait().unwrap();
     }
 }

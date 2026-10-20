@@ -62,9 +62,6 @@ impl Dune {
         if (&self.config.font_family, self.config.tab_widths) != (&old.font_family, old.tab_widths) {
             self.tab_titles = crate::tab_title::TabTitles::new(&self.config.font_family, self.config.tab_widths);
         }
-        if (&self.config.font_family, &self.config.icon_theme) != (&old.font_family, &old.icon_theme) {
-            self.launcher = crate::launcher::Launcher::new(&self.config.font_family, &self.config.icon_theme);
-        }
         if self.config.input != old.input {
             self.configure_input_devices();
         }

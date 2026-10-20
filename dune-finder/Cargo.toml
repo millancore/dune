@@ -1,0 +1,11 @@
+[package]
+name = "dune-finder"
+version = "0.1.0"
+edition = "2024"
+description = "The launcher, window switcher and file finder of the dune compositor"
+
+[dependencies]
+dune-common = { path = "../dune-common" }
+nucleo-matcher = "0.3.1"
+resvg = { version = "0.48.1", default-features = false }
+smithay-client-toolkit = "0.21"

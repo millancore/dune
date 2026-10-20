@@ -1,5 +1,5 @@
 [workspace]
-members = ["dune-common", "dune-term"]
+members = ["dune-common", "dune-finder", "dune-term"]
 
 [package]
 name = "dune"
@@ -9,8 +9,6 @@ description = "A terminal-first tiling Wayland compositor built on Smithay"
 
 [dependencies]
 dune-common = { path = "dune-common" }
-nucleo-matcher = "0.3.1"
-resvg = { version = "0.48.1", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 xcursor = "0.3"

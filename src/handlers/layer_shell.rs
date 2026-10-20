@@ -46,6 +46,10 @@ impl WlrLayerShellHandler for Dune {
             let layer = map.layers().find(|l| l.layer_surface() == &surface).cloned();
             if let Some(layer) = layer {
                 map.unmap_layer(&layer);
+                drop(map);
+                if self.is_finder(&layer) {
+                    self.finder_gone(self.client_pid(layer.wl_surface()));
+                }
             }
         }
         if self.layer_focus.as_ref() == Some(surface.wl_surface()) {

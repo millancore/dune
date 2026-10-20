@@ -11,15 +11,20 @@
 //! modifier = alt          # alt, super or ctrl+alt
 //! direction_right = super+ctrl+Right   # direction indicator keys (also _left, _up, _down)
 //! close = super+'         # extra key that closes the focused tile (Mod+q always does)
-//! launcher = super+e      # key that toggles the launcher (default Mod+d)
-//! switcher = super+g      # key that toggles the window switcher (default Mod+/)
+//! launcher = super+e      # key that toggles dune-finder on the apps (default Mod+d)
+//! switcher = super+g      # key that toggles dune-finder on the windows (default Mod+/)
+//! terminal_vertical = super+v    # a terminal to the right of the focused tile, in its folder (default Mod+v)
+//! terminal_horizontal = super+s  # one below it (default Mod+s)
+//! terminal_tab = super+shift+t   # one as a new tab of its container (default Mod+Shift+t)
 //! follow = true           # go to the desktop an app is launched on (`firefox @3`); default false
 //! focus_follows_mouse = true  # the tile under the pointer takes focus (when all of it is on screen); default false
 //! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
-//! font_family = JetBrains Mono   # tab titles and launcher (dune-term reads `~/.config/dune/term`)
+//! font_family = JetBrains Mono   # tab titles and dune-finder (dune-term reads `~/.config/dune/term`)
 //! tab_min_width = 200     # px a tab shrinks to before its bar scrolls; default 200
 //! tab_max_width = 220     # px a tab grows to while there is room; default 220
-//! icon_theme = Papirus-Dark      # launcher icons; default: the desktop's (gsettings / GTK)
+//! icon_theme = Papirus-Dark      # dune-finder icons; default: the desktop's (gsettings / GTK)
+//! file_manager = yazi     # terminal file manager dune-finder's `#` opens with Mod+Enter; default yazi
+//! file_manager_terminal = foot  # terminal it runs in (foot shows yazi's image previews); default `terminal`
 //! border_color = none     # border of tiles without focus: RRGGBB or RRGGBBAA (no `#`), or none; default ffffff
 //! exec = waybar           # run when dune starts; one line per program, as many as needed
 //!
@@ -37,11 +42,20 @@
 //!
 //! The pointer pushing on against the left or right edge of the screens slides the strip
 //! that way; it stays there until focus moves. A mark at the middle of an edge (`‹3`, `2›`)
-//! tells how many tiles are past it. Mod+/ lists every window to go to.
+//! tells how many tiles are past it.
 //!
-//! Mod+Enter opens an empty container with the launcher in it: Enter right away puts a
-//! terminal (`terminal`) there, a program chosen or typed goes there instead. Mod+d is the
-//! launcher on its own.
+//! dune-finder (a program of its own, installed next to dune) is the launcher and the
+//! window list: Mod+d shows the apps, Mod+/ every window to go to; `/` typed first in the
+//! apps turns it into the windows, Backspace with nothing typed turns it back. A click
+//! chooses a row, the wheel moves through them, a click away closes it. Mod+Enter opens an
+//! empty container with dune-finder for it: Enter right away puts a terminal (`terminal`)
+//! there, a program chosen or typed goes there instead. `#` typed first shows the files of
+//! the home folder: Enter opens a folder or a file (`xdg-open`), Mod+Enter the
+//! `file_manager` at it.
+//!
+//! With Mod held, the pointer near an edge of a tile lights a band along that edge;
+//! a Mod+click there opens an empty container on that side with a compact dune-finder (no
+//! list until something is typed). A Mod+click elsewhere floats the tile.
 //!
 //! Tabs belong to columns (each tab with its own splits) and have keys (their only settings
 //! are `tab_min_width` and `tab_max_width`):
@@ -49,9 +63,13 @@
 //! column that way as a tab (or leaves a tabbed one), Mod+t sends a tile out of its split
 //! into a tab of its own (a lone tile: a bar with it as the one tab), a click on a tab
 //! shows it, a Mod+drag let go on a tab bar adds the tile there as a tab, a tab Mod+dragged
-//! along its own bar moves to the place it is let go, and the launcher opens an app as a tab with
+//! along its own bar moves to the place it is let go, and dune-finder opens an app as a tab with
 //! Ctrl+T or `@t`. The tab bar sits at the top left of its column (see
 //! `layout::split_tab_bar`; its placement may become a setting).
+//!
+//! Night light has no settings here: programs like wlsunset (the waybar night-light
+//! module runs it) set the monitors' gamma through wlr-gamma-control (see `gamma`), on
+//! the real session only.
 //!
 //! Saving the file applies it live (see `reload`), except monitor modes, `off`, `xwayland`
 //! and `exec` (programs start once, with dune).
@@ -108,6 +126,15 @@ impl KeySpec {
     pub fn matches(&self, mods: &ModifiersState, key: Keysym) -> bool {
         key == self.key && mods.logo == self.logo && mods.alt == self.alt && mods.ctrl == self.ctrl && mods.shift == self.shift
     }
+}
+
+/// Where the terminal keys (`terminal_vertical`, `_horizontal`, `_tab`) open a terminal,
+/// next to the focused tile and in the folder its shell is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalHere {
+    Right,
+    Below,
+    Tab,
 }
 
 /// A monitor mode written like `2560x1080@60` (the refresh rate is optional).
@@ -169,6 +196,8 @@ pub struct Config {
     pub launcher_key: Option<KeySpec>,
     /// The key that toggles the window switcher, instead of Mod+/.
     pub switcher_key: Option<KeySpec>,
+    /// Keys set for the terminal actions, instead of Mod+v / Mod+s / Mod+Shift+t.
+    pub terminal_keys: Vec<(TerminalHere, KeySpec)>,
     /// Show the desktop the launcher opens an app on, instead of staying here.
     pub follow: bool,
     /// The tile under the pointer takes focus as the pointer moves.
@@ -182,8 +211,12 @@ pub struct Config {
     pub font_family: String,
     /// How narrow and how wide tabs get in their bars.
     pub tab_widths: TabWidths,
-    /// Icon theme for the launcher; empty: the one GTK apps use.
+    /// Icon theme for dune-finder; empty: the one GTK apps use.
     pub icon_theme: String,
+    /// The terminal file manager dune-finder opens a folder or file in (`yazi PATH`).
+    pub file_manager: String,
+    /// The terminal `file_manager` runs in (`foot yazi PATH`); empty: `terminal`.
+    pub file_manager_terminal: String,
     /// The border of tiles without focus (premultiplied RGBA); `None`: not drawn.
     pub border_color: Option<[f32; 4]>,
     /// Shell commands run when dune starts (`exec` lines, in order).
@@ -313,6 +346,21 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             }
             parsed
         }),
+        terminal_keys: [
+            (TerminalHere::Right, "terminal_vertical"),
+            (TerminalHere::Below, "terminal_horizontal"),
+            (TerminalHere::Tab, "terminal_tab"),
+        ]
+        .into_iter()
+        .filter_map(|(here, key)| {
+            let spec = file.get(key)?;
+            let parsed = KeySpec::parse(spec);
+            if parsed.is_none() {
+                tracing::warn!("ignoring `{key} = {spec}`: not a key like super+v");
+            }
+            Some((here, parsed?))
+        })
+        .collect(),
         follow: flag(file, "follow"),
         focus_follows_mouse: flag(file, "focus_follows_mouse"),
         outputs: outputs(file),
@@ -320,6 +368,15 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
         font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
         tab_widths: tab_widths(file),
         icon_theme: file.get("icon_theme").cloned().unwrap_or_default(),
+        file_manager: file
+            .get("file_manager")
+            .cloned()
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| "yazi".into()),
+        file_manager_terminal: file
+            .get("file_manager_terminal")
+            .cloned()
+            .unwrap_or_default(),
         border_color: border_color(file),
         exec: Vec::new(),
     }
@@ -523,10 +580,37 @@ mod tests {
     }
 
     #[test]
+    fn file_manager() {
+        assert_eq!(resolve(&parse(""), &|_| None).file_manager, "yazi");
+        assert_eq!(
+            resolve(&parse("file_manager = lf\n"), &|_| None).file_manager,
+            "lf"
+        );
+        assert_eq!(resolve(&parse(""), &|_| None).file_manager_terminal, "");
+        assert_eq!(
+            resolve(&parse("file_manager_terminal = foot\n"), &|_| None).file_manager_terminal,
+            "foot"
+        );
+    }
+
+    #[test]
     fn launcher_key() {
         assert_eq!(resolve(&parse(""), &|_| None).launcher_key, None);
         let c = resolve(&parse("launcher = super+e\n"), &|_| None);
         assert_eq!(c.launcher_key, KeySpec::parse("super+e"));
+    }
+
+    #[test]
+    fn terminal_keys() {
+        assert!(resolve(&parse(""), &|_| None).terminal_keys.is_empty());
+        let c = resolve(&parse("terminal_vertical = super+ctrl+v\nterminal_tab = super+n\nterminal_horizontal = nope+s\n"), &|_| None);
+        assert_eq!(
+            c.terminal_keys,
+            vec![
+                (TerminalHere::Right, KeySpec::parse("super+ctrl+v").unwrap()),
+                (TerminalHere::Tab, KeySpec::parse("super+n").unwrap()),
+            ]
+        );
     }
 
     #[test]

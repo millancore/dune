@@ -1,4 +1,4 @@
-//! Application icons for the launcher: looked up in the freedesktop icon theme
+//! Application icons for dune-finder: looked up in the freedesktop icon theme
 //! (with the themes it inherits, then hicolor and `/usr/share/pixmaps`) and drawn
 //! with resvg, SVG or PNG, to a square of the size asked.
 
@@ -82,6 +82,11 @@ impl Icons {
             self.cache.insert(key.clone(), icon);
         }
         self.cache.get(&key)?.as_ref()
+    }
+
+    /// The icon `get` drew for `name` at `size`, without drawing it now.
+    pub fn cached(&self, name: &str, size: u32) -> Option<&Icon> {
+        self.cache.get(&(name.to_string(), size))?.as_ref()
     }
 
     fn find(&self, name: &str, size: u32) -> Option<PathBuf> {

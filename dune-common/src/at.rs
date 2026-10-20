@@ -290,13 +290,18 @@ mod tests {
         let log = sent.clone();
         let send = Box::new(move |req: &Request| {
             log.borrow_mut().push(match req {
-                Request::Open { side, from, command, .. } => {
-                    Request::Open { side: *side, from: *from, cwd: None, command: command.clone() }
-                }
-                Request::Direction { tile } => Request::Direction { tile: *tile },
-                Request::Swallow { tile, shell_pid } => Request::Swallow { tile: *tile, shell_pid: *shell_pid },
-                Request::Unswallow { tile } => Request::Unswallow { tile: *tile },
-                Request::Keys(k) => Request::Keys(k.clone()),
+                Request::Open {
+                    side,
+                    from,
+                    command,
+                    ..
+                } => Request::Open {
+                    side: *side,
+                    from: *from,
+                    cwd: None,
+                    command: command.clone(),
+                },
+                other => other.clone(),
             });
             true
         });

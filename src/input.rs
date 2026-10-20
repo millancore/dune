@@ -17,15 +17,16 @@ use smithay::{
 };
 
 use crate::{
-    config::Config,
-    layout::{Direction, Layout, TileId},
+    config::{Config, TerminalHere},
+    launcher::FinderMode,
+    layout::{Direction, Layout, Rect, Side, TileId, split_band, split_edge},
     state::{Dune, MoveDrag},
 };
 
 /// Compositor keybindings, all behind the modifier chosen with `DUNE_MOD`.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    /// Mod+Enter: an empty container with the launcher in it.
+    /// Mod+Enter: an empty container, dune-finder to choose what goes in it.
     EmptyContainer,
     Focus(Direction),
     Swap(Direction),
@@ -43,16 +44,13 @@ enum Action {
     Close,
     Quit,
     Direction(Direction),
-    /// Mod+d, or the `launcher` key: show the launcher (again: hide it).
+    /// Mod+d, or the `launcher` key: show dune-finder on the apps (again: hide it).
     Launcher,
-    /// A key pressed while the launcher is open, with the character it types.
-    LauncherKey(ModifiersState, Keysym, Option<char>),
-    /// Mod+/, or the `switcher` key: show the window switcher (again: hide it).
+    /// Mod+/, or the `switcher` key: show dune-finder on the windows (again: hide it).
     Switcher,
-    /// A key pressed while the switcher is open, with the character it types.
-    SwitcherKey(ModifiersState, Keysym, Option<char>),
-    /// Keys released while the launcher is open go nowhere.
-    Swallowed,
+    /// Mod+v / Mod+s / Mod+Shift+t, or the `terminal_*` keys: a terminal to the right of the
+    /// focused tile, below it or as a tab of its container, in its folder.
+    Terminal(TerminalHere),
     /// Mod+Tab / Mod+Shift+Tab: the next / previous tab of the focused column.
     CycleTab(i32),
     /// Mod+Ctrl+direction: join the column that way as a tab, or leave a tabbed one.
@@ -132,6 +130,10 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
     if config.switcher_key.is_some_and(|key| key.matches(mods, sym)) {
         return Some(Action::Switcher);
     }
+    if let Some((here, _)) = config.terminal_keys.iter().find(|(_, key)| key.matches(mods, sym)) {
+        return Some(Action::Terminal(*here));
+    }
+    let unset = |here: TerminalHere| !config.terminal_keys.iter().any(|(h, _)| *h == here);
     let modifier = config.modifier.as_str();
     if !modifier_held(modifier, mods) {
         return None;
@@ -177,6 +179,9 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
         Keysym::space if mods.shift => Some(Action::ToggleFloat),
         Keysym::space => Some(Action::Center),
         Keysym::q => Some(Action::Close),
+        Keysym::v if unset(TerminalHere::Right) => Some(Action::Terminal(TerminalHere::Right)),
+        Keysym::s if unset(TerminalHere::Below) => Some(Action::Terminal(TerminalHere::Below)),
+        Keysym::t if mods.shift && unset(TerminalHere::Tab) => Some(Action::Terminal(TerminalHere::Tab)),
         Keysym::t => Some(Action::StackToTabs),
         Keysym::e if mods.shift => Some(Action::Quit),
         _ => None,
@@ -252,6 +257,7 @@ mod tests {
             close_key: None,
             launcher_key: None,
             switcher_key: None,
+            terminal_keys: Vec::new(),
             follow: false,
             focus_follows_mouse: false,
             xwayland: String::new(),
@@ -260,6 +266,8 @@ mod tests {
             font_family: String::new(),
             tab_widths: Default::default(),
             icon_theme: String::new(),
+            file_manager: "yazi".into(),
+            file_manager_terminal: String::new(),
             border_color: None,
             exec: Vec::new(),
         }
@@ -286,6 +294,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_keys() {
+        let mut config = test_config("super");
+        let logo = ModifiersState { logo: true, ..Default::default() };
+        assert!(matches!(action_for(&config, &logo, Keysym::v), Some(Action::Terminal(TerminalHere::Right))));
+        assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
+        // A key set for one replaces its Mod key; the others keep theirs.
+        config.terminal_keys = vec![(TerminalHere::Right, crate::config::KeySpec::parse("super+n").unwrap())];
+        assert!(matches!(action_for(&config, &logo, Keysym::n), Some(Action::Terminal(TerminalHere::Right))));
+        assert!(action_for(&config, &logo, Keysym::v).is_none());
+        assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
+    }
+
+    #[test]
     fn tab_keys() {
         let config = test_config("alt");
         let alt = ModifiersState { alt: true, ..Default::default() };
@@ -297,6 +318,7 @@ mod tests {
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::MoveTab(Direction::Left))));
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::j), Some(Action::MoveTab(Direction::Down))));
         assert!(matches!(action_for(&config, &alt, Keysym::t), Some(Action::StackToTabs)));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::t), Some(Action::Terminal(TerminalHere::Tab))));
         assert!(matches!(action_for(&config, &alt, Keysym::slash), Some(Action::Switcher)));
         assert!(matches!(action_for(&config, &alt_shift, Keysym::Left), Some(Action::Swap(Direction::Left))));
         // With Ctrl in the modifier, Ctrl+direction stays a focus move.
@@ -403,10 +425,11 @@ impl Dune {
 
     /// `focus_follows_mouse`: the tile under the pointer takes focus, unless part of it is
     /// off screen (focusing it would slide the view under the pointer), a button or drag
-    /// is going on, or the launcher or switcher is open.
+    /// is going on, or dune-finder is open.
     fn hover_focus(&mut self, pos: Point<f64, Logical>) {
-        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.launcher.output().is_some() || self.switcher.is_open();
-        if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed() {
+        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.finder.is_some();
+        if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed()
+        {
             return;
         }
         let Some((id, shown)) = self.shown.iter().find(|(_, r)| r.contains(pos.x, pos.y)).copied() else { return };
@@ -414,6 +437,29 @@ impl Dune {
         if whole && self.focused != Some(id) {
             self.focus_tile(id);
         }
+    }
+
+    /// Mod held, no drag going on and the pointer near an edge of a tile of the strip: that
+    /// tile, the side, and the band along that edge to light (`split_hint_at`).
+    pub fn split_hint(&self) -> Option<(TileId, Side, Rect)> {
+        if self.resize_drag.is_some() || self.finder.is_some() || self.move_drag.is_some_and(|d| d.moved) {
+            return None;
+        }
+        let mods = self.seat.get_keyboard()?.modifier_state();
+        if !modifier_held(&self.config.modifier, &mods) {
+            return None;
+        }
+        self.split_hint_at(self.seat.get_pointer()?.current_location())
+    }
+
+    /// The tile of the strip under `pos`, if `pos` is near one of its edges (`split_edge`).
+    fn split_hint_at(&self, pos: Point<f64, Logical>) -> Option<(TileId, Side, Rect)> {
+        let (id, rect) = self.shown.iter().find(|(_, r)| r.contains(pos.x, pos.y)).copied()?;
+        if self.is_floating(id) {
+            return None;
+        }
+        let side = split_edge(&rect, pos.x, pos.y)?;
+        Some((id, side, split_band(&rect, side)))
     }
 
     /// Mod+left drag: past a few pixels it is a drag, not a click; a float follows the pointer.
@@ -431,11 +477,8 @@ impl Dune {
     fn run_action(&mut self, action: Action) {
         match action {
             Action::EmptyContainer => self.open_empty_container(),
-            Action::Launcher => self.toggle_launcher(),
-            Action::LauncherKey(mods, sym, text) => self.launcher_key(mods, sym, text),
-            Action::Switcher => self.toggle_switcher(),
-            Action::SwitcherKey(mods, sym, text) => self.switcher_key(mods, sym, text),
-            Action::Swallowed => {}
+            Action::Launcher => self.toggle_finder(FinderMode::Apps),
+            Action::Switcher => self.toggle_finder(FinderMode::Windows),
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
             Action::Width(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_width(id, delta)),
@@ -455,6 +498,7 @@ impl Dune {
             Action::CycleTab(delta) => self.cycle_tab(delta),
             Action::MoveTab(dir) => self.move_tab(dir),
             Action::StackToTabs => self.stack_to_tabs(),
+            Action::Terminal(here) => self.terminal_here(here),
             Action::Desk(n) => self.show_desk(n),
             Action::SendToDesk(n) => self.send_to_desk(n),
             Action::SwitchVt(vt) => self.change_vt(vt),
@@ -466,6 +510,8 @@ impl Dune {
         let serial = SERIAL_COUNTER.next_serial();
         let pressed = state == KeyState::Pressed;
         let config = self.config.clone();
+        // While dune-finder is open, Mod+Enter is its own (files: the file manager).
+        let finder_open = self.finder.is_some();
 
         let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
             self,
@@ -473,34 +519,13 @@ impl Dune {
             state,
             serial,
             time,
-            |state, mods, handle| {
-                if state.launcher.is_open() {
-                    // The launcher takes the keyboard; its own key still closes it.
-                    let sym = handle.modified_sym();
-                    let action = match action_for(&config, mods, handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym)) {
-                        Some(Action::Launcher) if pressed => Action::Launcher,
-                        _ if pressed => Action::LauncherKey(*mods, sym, sym.key_char()),
-                        _ => Action::Swallowed,
-                    };
-                    return FilterResult::Intercept(action);
-                }
-                if state.switcher.is_open() {
-                    // The switcher takes the keyboard too; its own key still closes it.
-                    let sym = handle.modified_sym();
-                    let action = match action_for(&config, mods, handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym)) {
-                        Some(Action::Switcher) if pressed => Action::Switcher,
-                        _ if pressed => Action::SwitcherKey(*mods, sym, sym.key_char()),
-                        _ => Action::Swallowed,
-                    };
-                    return FilterResult::Intercept(action);
-                }
-                match handle
-                    .raw_latin_sym_or_raw_current_sym()
-                    .and_then(|sym| action_for(&config, mods, sym))
-                {
-                    Some(action) if pressed => FilterResult::Intercept(action),
-                    _ => FilterResult::Forward,
-                }
+            |_, mods, handle| match handle
+                .raw_latin_sym_or_raw_current_sym()
+                .and_then(|sym| action_for(&config, mods, sym))
+            {
+                Some(Action::EmptyContainer) if finder_open => FilterResult::Forward,
+                Some(action) if pressed => FilterResult::Intercept(action),
+                _ => FilterResult::Forward,
             },
         );
         if let Some(action) = action {
@@ -597,6 +622,13 @@ impl Dune {
                 let serial = SERIAL_COUNTER.next_serial();
                 let button_state = event.state();
 
+                // A click away from dune-finder closes it, and goes no further.
+                if button_state == ButtonState::Pressed
+                    && self.finder_under(pointer.current_location()) == Some(false)
+                {
+                    return self.close_finder();
+                }
+
                 // Mod+right button drags resize the tile instead of reaching the client.
                 let mods = self.seat.get_keyboard().unwrap().modifier_state();
                 if event.button_code() == BTN_RIGHT {
@@ -618,14 +650,18 @@ impl Dune {
                 // on this monitor or another one; a float just goes where it is dragged. Let go
                 // on a tab bar, either one joins that container as a tab. A tab grabbed in its
                 // bar and let go there takes the place under the pointer.
-                // A Mod+click without moving floats the tile, or puts a float back.
+                // A Mod+click without moving floats the tile, or puts a float back; near an
+                // edge of a tile of the strip (`split_hint`), it opens an empty split there.
                 if event.button_code() == BTN_LEFT {
                     let pos = pointer.current_location();
                     if button_state == ButtonState::Released
                         && let Some(drag) = self.move_drag.take()
                     {
                         if !drag.moved {
-                            self.toggle_floating(drag.tile);
+                            match drag.split {
+                                Some(side) => self.open_empty_split(drag.tile, side),
+                                None => self.toggle_floating(drag.tile),
+                            }
                         } else if drag.from.is_none() {
                             self.drop_tile(drag.tile, pos);
                         } else if let Some(target) = self.drop_spot(drag.tile, pos).filter(|s| s.tab).and_then(|s| s.target) {
@@ -638,15 +674,19 @@ impl Dune {
                         && modifier_held(&self.config.modifier, &mods)
                         && let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y))
                     {
+                        let split = self.split_hint_at(pos).filter(|(t, ..)| *t == id).map(|(_, side, _)| side);
                         self.focus_tile(id);
                         let from = self.float_rect(id);
-                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from });
+                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from, split });
                         return;
                     }
                 }
 
-                // A click on the "+" of a tab bar: a new empty tab there, with the launcher.
-                if event.button_code() == BTN_LEFT && button_state == ButtonState::Pressed && !pointer.is_grabbed() {
+                // A click on the "+" of a tab bar: a new empty tab there, with dune-finder.
+                if event.button_code() == BTN_LEFT
+                    && button_state == ButtonState::Pressed
+                    && !pointer.is_grabbed()
+                {
                     let pos = pointer.current_location();
                     if let Some(target) = self.plus_at(pos.x, pos.y) {
                         return self.open_empty_tab(target);

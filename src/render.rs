@@ -14,7 +14,7 @@ use smithay::{
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
         },
     },
-    desktop::layer_map_for_output,
+    desktop::{PopupManager, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     output::Output,
     reexports::wayland_server::Resource,
@@ -37,6 +37,8 @@ const DIRECTION_COLOR: [f32; 4] = [0.98, 0.62, 0.22, 1.0];
 const DROP_COLOR: [f32; 4] = [0.36 * 0.35, 0.62 * 0.35, 0.95 * 0.35, 0.35];
 /// How far the marks of tiles past a screen edge float in from it, in pixels.
 const EDGE_MARK_INSET: i32 = 4;
+/// How thick the edge a Mod+click would split is drawn.
+const SPLIT_EDGE_WIDTH: i32 = 3;
 /// Darkens the tile being dragged (premultiplied, translucent).
 const DRAGGED_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
 
@@ -59,6 +61,8 @@ pub struct Decorations {
     /// While a tile is dragged: the spot it will land on, and the tile itself.
     drop: SolidColorBuffer,
     dragged: SolidColorBuffer,
+    /// The edge of the split a Mod+click there would open.
+    split_edge: SolidColorBuffer,
 }
 
 impl Dune {
@@ -79,9 +83,27 @@ impl Dune {
     }
 
     /// While a tile of the strip is dragged: where it will land, then the tile darkened.
-    /// (A dragged float just follows the pointer.)
+    /// (A dragged float just follows the pointer.) With Mod held near an edge of a tile
+    /// instead: the band along that edge, its outer edge lit (`split_hint`).
     fn drag_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
+        if let Some((_, side, zone)) = self.split_hint() {
+            let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
+            let t = SPLIT_EDGE_WIDTH;
+            let edge = match side {
+                Side::Left => Rect::new(zone.x, zone.y, t, zone.h),
+                Side::Right => Rect::new(zone.x + zone.w - t, zone.y, t, zone.h),
+                Side::Up => Rect::new(zone.x, zone.y, zone.w, t),
+                Side::Down => Rect::new(zone.x, zone.y + zone.h - t, zone.w, t),
+            };
+            let decorations = &mut self.decorations;
+            decorations.split_edge.update((edge.w, edge.h), FOCUS_COLOR);
+            decorations.drop.update((zone.w, zone.h), DROP_COLOR);
+            return vec![
+                SolidColorRenderElement::from_buffer(&decorations.split_edge, place(edge.x, edge.y), 1.0, 1.0, Kind::Unspecified),
+                SolidColorRenderElement::from_buffer(&decorations.drop, place(zone.x, zone.y), 1.0, 1.0, Kind::Unspecified),
+            ];
+        }
         let Some(id) = self.move_drag.map(|d| d.tile).filter(|id| !self.is_floating(*id)) else { return Vec::new() };
         let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
         let pos = self.seat.get_pointer().unwrap().current_location();
@@ -248,11 +270,19 @@ impl Dune {
         R: Renderer + ImportAll + ImportMem,
         R::TextureId: Clone + Send + 'static,
     {
-        let mut elements = if with_pointer { self.pointer_elements(renderer, output) } else { Vec::new() };
-        elements.extend(self.launcher_elements(renderer, output));
-        elements.extend(self.switcher_elements(renderer, output));
-        elements.extend(self.drag_elements(output).into_iter().map(OutputRenderElements::Solid));
-        elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay, Layer::Top]));
+        let mut elements = if with_pointer {
+            self.pointer_elements(renderer, output)
+        } else {
+            Vec::new()
+        };
+        elements.extend(
+            self.drag_elements(output)
+                .into_iter()
+                .map(OutputRenderElements::Solid),
+        );
+        elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay, Layer::Top], true));
+        // The tooltips and menus of a bar under the windows still show over them.
+        elements.extend(self.layer_popup_elements(renderer, output, &[Layer::Bottom, Layer::Background]));
         elements.extend(self.edge_mark_elements(renderer, output));
         // Floats, front to back, each with its border over its window, above the strip.
         let floats: Vec<TileId> = self.floating.get(&output.name()).into_iter().flatten().rev().map(|(t, _)| *t).collect();
@@ -265,7 +295,7 @@ impl Dune {
         let tabs = self.tab_elements(renderer, output);
         elements.extend(tabs);
         elements.extend(self.window_elements(renderer, output, &tiled));
-        elements.extend(self.layer_elements(renderer, output, &[Layer::Bottom, Layer::Background]));
+        elements.extend(self.layer_elements(renderer, output, &[Layer::Bottom, Layer::Background], false));
         elements
     }
 
@@ -291,48 +321,6 @@ impl Dune {
             }
         }
         elements
-    }
-
-    /// The launcher panel, centered across `output` a quarter of the way down, or in the
-    /// middle of the empty container it was opened in.
-    fn launcher_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
-        if self.launcher.output() != Some(output.name().as_str()) {
-            return Vec::new();
-        }
-        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
-        // Opened in an empty container: in the middle of it, as long as it is on screen.
-        let slot = self.launcher.slot().and_then(|(slot, _)| self.shown.iter().find(|(t, _)| *t == slot)).map(|(_, r)| *r);
-        let width = slot.map_or(geo.size.w, |r| r.w);
-        let Some((buffer, (w, h))) = self.launcher.image(width - 2 * GAP) else { return Vec::new() };
-        let (x, y) = match slot {
-            Some(r) => (r.x + (r.w - w) / 2, r.y + ((r.h - h) / 2).max(0)),
-            None => (geo.loc.x + (geo.size.w - w) / 2, geo.loc.y + ((geo.size.h - h) / 4).max(0)),
-        };
-        let at = Point::<f64, Physical>::from(((x - geo.loc.x) as f64, (y - geo.loc.y) as f64));
-        MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
-            .map(|e| vec![OutputRenderElements::Image(e)])
-            .unwrap_or_default()
-    }
-
-    /// The switcher panel, centered across `output` a quarter of the way down.
-    fn switcher_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
-        if self.switcher.output() != Some(output.name().as_str()) {
-            return Vec::new();
-        }
-        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
-        let Some((buffer, (w, h))) = self.switcher.image(geo.size.w - 2 * GAP) else { return Vec::new() };
-        let at = Point::<f64, Physical>::from((((geo.size.w - w) / 2) as f64, ((geo.size.h - h) / 4).max(0) as f64));
-        MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
-            .map(|e| vec![OutputRenderElements::Image(e)])
-            .unwrap_or_default()
     }
 
     /// Whether `tile` belongs to the layout or the floats of `output`.
@@ -363,8 +351,9 @@ impl Dune {
         elements
     }
 
-    /// Layer surfaces (bars, launchers, wallpapers) of `output` on `layers`, front first.
-    fn layer_elements<R>(&self, renderer: &mut R, output: &Output, layers: &[Layer]) -> Vec<OutputRenderElements<R>>
+    /// Layer surfaces (bars, launchers, wallpapers) of `output` on `layers`, front first;
+    /// with their popups, or without them when those are drawn apart (`layer_popup_elements`).
+    fn layer_elements<R>(&self, renderer: &mut R, output: &Output, layers: &[Layer], popups: bool) -> Vec<OutputRenderElements<R>>
     where
         R: Renderer + ImportAll + ImportMem,
         R::TextureId: Clone + Send + 'static,
@@ -374,9 +363,35 @@ impl Dune {
         for layer in layers {
             for surface in map.layers_on(*layer).rev() {
                 let Some(geo) = map.layer_geometry(surface) else { continue };
-                let surfaces: Vec<WaylandSurfaceRenderElement<R>> =
-                    surface.render_elements(renderer, geo.loc.to_physical(1), Scale::from(1.0), 1.0);
+                let at = geo.loc.to_physical(1);
+                let surfaces: Vec<WaylandSurfaceRenderElement<R>> = if popups {
+                    surface.render_elements(renderer, at, Scale::from(1.0), 1.0)
+                } else {
+                    render_elements_from_surface_tree(renderer, surface.wl_surface(), at, 1.0, 1.0, Kind::Unspecified)
+                };
                 elements.extend(surfaces.into_iter().map(OutputRenderElements::Surface));
+            }
+        }
+        elements
+    }
+
+    /// The popups (tooltips, menus) of the layer surfaces of `output` on `layers`, front first.
+    fn layer_popup_elements<R>(&self, renderer: &mut R, output: &Output, layers: &[Layer]) -> Vec<OutputRenderElements<R>>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Clone + Send + 'static,
+    {
+        let map = layer_map_for_output(output);
+        let mut elements = Vec::new();
+        for layer in layers {
+            for surface in map.layers_on(*layer).rev() {
+                let Some(geo) = map.layer_geometry(surface) else { continue };
+                for (popup, offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
+                    let at = (geo.loc + offset - popup.geometry().loc).to_physical(1);
+                    let surfaces: Vec<WaylandSurfaceRenderElement<R>> =
+                        render_elements_from_surface_tree(renderer, popup.wl_surface(), at, 1.0, 1.0, Kind::Unspecified);
+                    elements.extend(surfaces.into_iter().map(OutputRenderElements::Surface));
+                }
             }
         }
         elements

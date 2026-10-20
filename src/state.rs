@@ -26,7 +26,7 @@ use smithay::{
     },
 };
 
-use crate::layout::{Layout, Rect, TileId};
+use crate::layout::{Layout, Rect, Side, TileId};
 
 /// One slot of the layout. `stack[0]` is the tile's terminal; programs started from it
 /// with `@prog` are pushed on top and "swallow" it until they close. The last window
@@ -54,6 +54,8 @@ pub struct MoveDrag {
     pub moved: bool,
     /// Where a floating tile was when the drag started.
     pub from: Option<Rect>,
+    /// Pressed near this edge of the tile (`split_edge`): a click there opens a split.
+    pub split: Option<Side>,
 }
 
 pub struct Dune {
@@ -127,7 +129,7 @@ pub struct Dune {
 
     pub layer_shell_state: WlrLayerShellState,
     pub viewporter_state: ViewporterState,
-    /// A layer (launcher) that asked for the keyboard; it has it until it closes.
+    /// A layer (dune-finder, a launcher) that asked for the keyboard; it has it until it closes.
     pub layer_focus: Option<WlSurface>,
 
     /// GPU buffers from clients (linux-dmabuf); the global is created with the backend.
@@ -146,11 +148,11 @@ pub struct Dune {
     pub tab_titles: crate::tab_title::TabTitles,
     /// Bars told about the desktops (ext-workspace-v1).
     pub workspaces: crate::workspaces::WorkspaceState,
-    /// The Mod+d launcher panel.
-    pub launcher: crate::launcher::Launcher,
-    /// The Mod+/ panel to go to any window.
-    pub switcher: crate::switcher::Switcher,
-    /// Tiles focused, the latest first: the switcher lists them in this order.
+    /// Night light: gamma ramps clients set per monitor (wlr-gamma-control).
+    pub gamma: crate::gamma::GammaState,
+    /// dune-finder (Mod+d, Mod+/, Mod+Enter) while it runs.
+    pub finder: Option<crate::launcher::FinderRun>,
+    /// Tiles focused, the latest first: dune-finder lists windows in this order.
     pub recent: Vec<TileId>,
     /// How far the pointer has pushed against a screen edge (see `input::edge_slide`).
     pub edge_push: f64,
@@ -212,6 +214,7 @@ impl Dune {
         // Clients scaling their buffers (xwayland-satellite requires it).
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let workspaces = crate::workspaces::WorkspaceState::new(&dh);
+        let gamma = crate::gamma::GammaState::new(&dh);
         let popups = PopupManager::default();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -283,11 +286,11 @@ impl Dune {
             popups,
             seat,
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family, config.tab_widths),
-            launcher: crate::launcher::Launcher::new(&config.font_family, &config.icon_theme),
-            switcher: crate::switcher::Switcher::new(&config.font_family, &config.icon_theme),
+            finder: None,
             recent: Vec::new(),
             edge_push: 0.0,
             workspaces,
+            gamma,
             config,
             layer_shell_state,
             viewporter_state,
@@ -341,16 +344,19 @@ impl Dune {
         let output = self.space.outputs().find(|o| self.space.output_geometry(o).is_some_and(|g| g.to_f64().contains(pos)))?;
         let output_loc = self.space.output_geometry(output)?.loc;
         let layers = layer_map_for_output(output);
-        let layer_surface_under = |layer: Layer| {
+        let layer_surface_under = |layer: Layer, kind: WindowSurfaceType| {
             let local = pos - output_loc.to_f64();
             layers.layer_under(layer, local).and_then(|l| {
                 let geo = layers.layer_geometry(l)?;
-                l.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL)
+                l.surface_under(local - geo.loc.to_f64(), kind)
                     .map(|(s, p)| (s, (p + geo.loc + output_loc).to_f64()))
             })
         };
-        layer_surface_under(Layer::Overlay)
-            .or_else(|| layer_surface_under(Layer::Top))
+        // The popups of a bar under the windows are drawn over them (see `output_elements`).
+        layer_surface_under(Layer::Overlay, WindowSurfaceType::ALL)
+            .or_else(|| layer_surface_under(Layer::Top, WindowSurfaceType::ALL))
+            .or_else(|| layer_surface_under(Layer::Bottom, WindowSurfaceType::POPUP))
+            .or_else(|| layer_surface_under(Layer::Background, WindowSurfaceType::POPUP))
             .or_else(|| {
                 self.space.element_under(pos).and_then(|(window, location)| {
                     window
@@ -358,8 +364,8 @@ impl Dune {
                         .map(|(s, p)| (s, (p + location).to_f64()))
                 })
             })
-            .or_else(|| layer_surface_under(Layer::Bottom))
-            .or_else(|| layer_surface_under(Layer::Background))
+            .or_else(|| layer_surface_under(Layer::Bottom, WindowSurfaceType::ALL))
+            .or_else(|| layer_surface_under(Layer::Background, WindowSurfaceType::ALL))
     }
 }
 

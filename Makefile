@@ -1,6 +1,6 @@
 # dune: build, check and install.
 #
-#   make install          dune, dune-term and dune-session into ~/.cargo/bin, plus the
+#   make install          dune, dune-term, dune-finder and dune-session into ~/.cargo/bin, plus the
 #                         portal settings into ~/.config (no root needed)
 #   make install-session  the "Dune" entry of the login screen (asks for sudo)
 #   make check            tests and clippy for the whole workspace
@@ -29,6 +29,7 @@ install: install-bin install-portals
 install-bin:
 	$(CARGO) install --path . --locked
 	$(CARGO) install --path dune-term --locked
+	$(CARGO) install --path dune-finder --locked
 	install -Dm755 dist/dune-session $(BINDIR)/dune-session
 
 # Screen sharing and screenshots through xdg-desktop-portal-wlr (see dist/dune-portals.conf).
@@ -45,6 +46,7 @@ install-session:
 uninstall:
 	-$(CARGO) uninstall dune
 	-$(CARGO) uninstall dune-term
+	-$(CARGO) uninstall dune-finder
 	rm -f $(BINDIR)/dune-session
 	rm -f $(CONFIGDIR)/xdg-desktop-portal/dune-portals.conf $(CONFIGDIR)/xdg-desktop-portal-wlr/dune
 	@echo "The login entry stays; remove it with: sudo rm $(SESSIONDIR)/dune.desktop"

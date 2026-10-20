@@ -1024,6 +1024,38 @@ pub fn drop_side(rect: &Rect, x: f64, y: f64) -> Side {
         .unwrap()
 }
 
+/// Pixels in from a tile's edge where Mod and the pointer offer a split on that side.
+pub const SPLIT_EDGE: f64 = 48.0;
+
+/// The side of `rect` whose edge (x, y) is near: within `SPLIT_EDGE` of it, and a quarter
+/// of the tile at most (small tiles keep a middle). None in the middle.
+pub fn split_edge(rect: &Rect, x: f64, y: f64) -> Option<Side> {
+    let side = drop_side(rect, x, y);
+    let (from_edge, size) = match side {
+        Side::Left => (x - rect.x as f64, rect.w),
+        Side::Right => ((rect.x + rect.w) as f64 - x, rect.w),
+        Side::Up => (y - rect.y as f64, rect.h),
+        Side::Down => ((rect.y + rect.h) as f64 - y, rect.h),
+    };
+    (from_edge < split_reach(size)).then_some(side)
+}
+
+/// How far in from an edge a split is offered on a tile `size` pixels across.
+fn split_reach(size: i32) -> f64 {
+    SPLIT_EDGE.min(size as f64 / 4.0)
+}
+
+/// The band along `side` of `rect` where a split is offered (`split_edge`), lit with Mod.
+pub fn split_band(rect: &Rect, side: Side) -> Rect {
+    let reach = |size: i32| (split_reach(size).ceil() as i32).max(1);
+    match side {
+        Side::Left => Rect::new(rect.x, rect.y, reach(rect.w), rect.h),
+        Side::Right => Rect::new(rect.x + rect.w - reach(rect.w), rect.y, reach(rect.w), rect.h),
+        Side::Up => Rect::new(rect.x, rect.y, rect.w, reach(rect.h)),
+        Side::Down => Rect::new(rect.x, rect.y + rect.h - reach(rect.h), rect.w, reach(rect.h)),
+    }
+}
+
 /// Share of a tile's width, at its left and right edges, where a dropped tile opens a
 /// column of its own instead of sharing the tile's row.
 const COLUMN_EDGE: f64 = 0.2;
@@ -1471,6 +1503,32 @@ mod tests {
         assert!(!drop_column(&r, 110.0, Side::Up));
         assert_eq!(column_zone(&r, Side::Left), Rect::new(100, 0, 80, 200));
         assert_eq!(column_zone(&r, Side::Right), Rect::new(420, 0, 80, 200));
+    }
+
+    #[test]
+    fn splits_are_offered_near_the_edges() {
+        let r = Rect::new(100, 0, 400, 200);
+        assert_eq!(split_edge(&r, 110.0, 100.0), Some(Side::Left));
+        assert_eq!(split_edge(&r, 490.0, 100.0), Some(Side::Right));
+        assert_eq!(split_edge(&r, 300.0, 5.0), Some(Side::Up));
+        assert_eq!(split_edge(&r, 300.0, 195.0), Some(Side::Down));
+        assert_eq!(split_edge(&r, 300.0, 100.0), None);
+        assert_eq!(split_edge(&r, 160.0, 100.0), None); // past SPLIT_EDGE
+        // A small tile: a quarter of it at most.
+        let small = Rect::new(0, 0, 80, 80);
+        assert_eq!(split_edge(&small, 19.0, 40.0), Some(Side::Left));
+        assert_eq!(split_edge(&small, 25.0, 40.0), None);
+    }
+
+    #[test]
+    fn split_bands_are_where_splits_are_offered() {
+        let r = Rect::new(100, 0, 400, 200);
+        assert_eq!(split_band(&r, Side::Left), Rect::new(100, 0, 48, 200));
+        assert_eq!(split_band(&r, Side::Right), Rect::new(452, 0, 48, 200));
+        assert_eq!(split_band(&r, Side::Up), Rect::new(100, 0, 400, 48));
+        assert_eq!(split_band(&r, Side::Down), Rect::new(100, 152, 400, 48));
+        // A small tile: a quarter of it.
+        assert_eq!(split_band(&Rect::new(0, 0, 80, 200), Side::Left), Rect::new(0, 0, 20, 200));
     }
 
     #[test]

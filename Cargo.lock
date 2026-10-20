@@ -382,8 +382,6 @@ dependencies = [
  "dune-common",
  "libc",
  "nix",
- "nucleo-matcher",
- "resvg",
  "smithay",
  "smithay-drm-extras",
  "tracing",
@@ -397,6 +395,16 @@ version = "0.1.0"
 dependencies = [
  "fontdb",
  "swash",
+]
+
+[[package]]
+name = "dune-finder"
+version = "0.1.0"
+dependencies = [
+ "dune-common",
+ "nucleo-matcher",
+ "resvg",
+ "smithay-client-toolkit",
 ]
 
 [[package]]

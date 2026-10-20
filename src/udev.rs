@@ -34,7 +34,7 @@ use smithay::{
             EventLoop, RegistrationToken,
             timer::{TimeoutAction, Timer},
         },
-        drm::control::{ModeTypeFlags, connector, crtc},
+        drm::control::{Device as _, ModeTypeFlags, connector, crtc},
         input::{Device as InputDevice, DeviceConfigError, Libinput},
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
@@ -50,6 +50,7 @@ use smithay_drm_extras::{
 use crate::{
     Dune,
     config::{InputConfig, OutputMode},
+    gamma::linear_ramps,
     render::{BACKGROUND, OutputRenderElements},
     state::Backend,
 };
@@ -78,6 +79,36 @@ impl UdevData {
     pub fn render_node(&self) -> Option<DrmNode> {
         self.gpu.as_ref().map(|gpu| gpu.render_node)
     }
+
+    /// Entries in each gamma ramp of `output`'s CRTC.
+    pub fn gamma_size(&self, output: &Output) -> Option<u32> {
+        let gpu = self.gpu.as_ref()?;
+        let (crtc, _) = gpu.surfaces.iter().find(|(_, s)| s.output == *output)?;
+        match gpu.manager.device().get_crtc(*crtc) {
+            Ok(info) => Some(info.gamma_length()),
+            Err(err) => {
+                tracing::warn!("cannot read the gamma size of {}: {err}", output.name());
+                None
+            }
+        }
+    }
+
+    /// Set the gamma ramps of `output`'s CRTC, or a linear ramp with None. They are
+    /// kept to set again when the session comes back.
+    pub fn set_gamma(&mut self, output: &Output, ramps: Option<&[u16]>) -> Result<(), String> {
+        let active = self.session.is_active();
+        let gpu = self.gpu.as_mut().ok_or("no GPU")?;
+        let (crtc, surface) = gpu
+            .surfaces
+            .iter_mut()
+            .find(|(_, s)| s.output == *output)
+            .ok_or_else(|| format!("{} is not a monitor of the GPU", output.name()))?;
+        surface.gamma = ramps.map(<[u16]>::to_vec);
+        if !active {
+            return Ok(()); // set when the session comes back
+        }
+        apply_gamma(gpu.manager.device(), *crtc, surface.gamma.as_deref())
+    }
 }
 
 struct Gpu {
@@ -96,6 +127,28 @@ struct Surface {
     drm_output: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
     /// A frame is on its way to the screen (since then); wait for its vblank before the next.
     queued: Option<Instant>,
+    /// Gamma ramps a client set (night light), None for linear.
+    gamma: Option<Vec<u16>>,
+}
+
+/// Set the CRTC's gamma ramps (red, green and blue one after another), or a linear ramp
+/// with None, through the legacy ioctl.
+fn apply_gamma(device: &DrmDevice, crtc: crtc::Handle, ramps: Option<&[u16]>) -> Result<(), String> {
+    let size = device.get_crtc(crtc).map_err(|e| e.to_string())?.gamma_length() as usize;
+    let linear;
+    let ramps = match ramps {
+        Some(ramps) => ramps,
+        None => {
+            linear = linear_ramps(size);
+            &linear
+        }
+    };
+    if size == 0 || ramps.len() != 3 * size {
+        return Err(format!("{} gamma entries for a CRTC with {size} per ramp", ramps.len()));
+    }
+    let (red, rest) = ramps.split_at(size);
+    let (green, blue) = rest.split_at(size);
+    device.set_gamma(crtc, red, green, blue).map_err(|e| e.to_string())
 }
 
 pub fn init_udev(event_loop: &mut EventLoop<'static, Dune>, state: &mut Dune) -> Result<(), Box<dyn std::error::Error>> {
@@ -175,6 +228,14 @@ pub fn init_udev(event_loop: &mut EventLoop<'static, Dune>, state: &mut Dune) ->
                     }
                     for surface in gpu.surfaces.values_mut() {
                         surface.queued = None;
+                    }
+                    // Night light again, in case another session changed the ramps.
+                    for (crtc, surface) in &gpu.surfaces {
+                        if let Some(ramps) = &surface.gamma
+                            && let Err(err) = apply_gamma(gpu.manager.device(), *crtc, Some(ramps))
+                        {
+                            tracing::warn!("cannot set the gamma of {} again: {err}", surface.output.name());
+                        }
                     }
                 }
             }
@@ -449,7 +510,7 @@ impl Dune {
             }
         };
         tracing::info!("monitor {name}: {}x{}@{}", mode.size().0, mode.size().1, mode.vrefresh());
-        gpu.surfaces.insert(crtc, Surface { output: output.clone(), global, drm_output, queued: None });
+        gpu.surfaces.insert(crtc, Surface { output: output.clone(), global, drm_output, queued: None, gamma: None });
         self.space.map_output(&output, (0, 0));
     }
 
@@ -459,6 +520,7 @@ impl Dune {
             tracing::info!("monitor {} disconnected", surface.output.name());
             self.space.unmap_output(&surface.output);
             self.display_handle.remove_global::<Dune>(surface.global);
+            self.gamma_output_removed(&surface.output);
         }
     }
 
