@@ -19,6 +19,9 @@ use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
 };
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+};
 
 impl SeatHandler for Dune {
     type KeyboardFocus = WlSurface;
@@ -36,7 +39,8 @@ impl SeatHandler for Dune {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
-        set_data_device_focus(dh, seat, client);
+        set_data_device_focus(dh, seat, client.clone());
+        set_primary_focus(dh, seat, client);
     }
 }
 
@@ -51,6 +55,13 @@ impl SelectionHandler for Dune {
 impl DataDeviceHandler for Dune {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
+    }
+}
+
+/// Primary selection: selected text, pasted with the middle button.
+impl PrimarySelectionHandler for Dune {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
 
@@ -111,6 +122,25 @@ impl DmabufHandler for Dune {
     }
 }
 
-impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Dune {}
+//
+// Pointer constraints: a game locks or confines the pointer to its window
+//
+
+use smithay::input::pointer::PointerHandle;
+use smithay::wayland::pointer_constraints::{PointerConstraintsHandler, with_pointer_constraint};
+
+impl PointerConstraintsHandler for Dune {
+    /// A constraint on the surface under the pointer starts right away; others when the
+    /// pointer gets there (see the pointer motion handling).
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+}
 
 smithay::delegate_dispatch2!(Dune);

@@ -19,7 +19,7 @@ use smithay::{
         viewporter::ViewporterState,
         shell::wlr_layer::{Layer, WlrLayerShellState},
         output::OutputManagerState,
-        selection::data_device::DataDeviceState,
+        selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::xdg::{XdgShellState, decoration::XdgDecorationState},
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -34,6 +34,8 @@ use crate::layout::{Layout, Rect, TileId};
 #[derive(Debug, Default)]
 pub struct Tile {
     pub stack: Vec<Window>,
+    /// An empty container (Mod+Enter): it takes its place before any window is in it.
+    pub reserved: bool,
 }
 
 impl Tile {
@@ -78,6 +80,8 @@ pub struct Dune {
     pub shown: Vec<(TileId, Rect)>,
     /// Tiles folded into a tab: their bar is drawn, their window is not.
     pub tabs: Vec<TileId>,
+    /// Bars of the tabbed containers on the outputs (shown ones only), from the last `arrange`.
+    pub tab_bars: Vec<crate::layout::TabBar>,
     /// Mod+right button drag resizing a tile: the tile and the last pointer position.
     pub resize_drag: Option<(TileId, Point<f64, Logical>)>,
     /// Mod+left button drag moving a tile: it is dropped where the button is released.
@@ -110,6 +114,7 @@ pub struct Dune {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Dune>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -172,6 +177,11 @@ impl Dune {
         let popups = PopupManager::default();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // Games (through xwayland-satellite too) read raw mouse motion and lock or confine
+        // the pointer while playing.
+        smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+        smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
@@ -204,6 +214,7 @@ impl Dune {
             geometries: Vec::new(),
             shown: Vec::new(),
             tabs: Vec::new(),
+            tab_bars: Vec::new(),
             resize_drag: None,
             move_drag: None,
             floating: HashMap::new(),
@@ -224,6 +235,7 @@ impl Dune {
             output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
             popups,
             seat,
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family),

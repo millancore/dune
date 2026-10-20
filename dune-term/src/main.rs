@@ -8,6 +8,7 @@ use dune_common::font;
 mod keys;
 mod palette;
 mod render;
+mod status;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

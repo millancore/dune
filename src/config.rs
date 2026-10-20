@@ -13,6 +13,7 @@
 //! close = super+'         # extra key that closes the focused tile (Mod+q always does)
 //! launcher = super+e      # key that toggles the launcher (default Mod+d)
 //! follow = true           # go to the desktop an app is launched on (`firefox @3`); default false
+//! focus_follows_mouse = true  # the tile under the pointer takes focus (when all of it is on screen); default false
 //! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
 //! font_family = JetBrains Mono   # tab titles and launcher (dune-term reads `~/.config/dune/term`)
 //! icon_theme = Papirus-Dark      # launcher icons; default: the desktop's (gsettings / GTK)
@@ -29,6 +30,17 @@
 //! output.HDMI-A-1.position = 0,0        # top-left corner; unset ones go to the right of the rest
 //! output.DP-1.off = true                # leave this monitor dark
 //! ```
+//!
+//! Mod+Enter opens an empty container with the launcher in it: Enter right away puts a
+//! terminal (`terminal`) there, a program chosen or typed goes there instead. Mod+d is the
+//! launcher on its own.
+//!
+//! Tabbed containers have keys, no settings yet: Mod+Tab / Mod+Shift+Tab show the next /
+//! previous tab, Mod+Ctrl+direction joins the container that way as a tab (or leaves a
+//! tabbed one), a click on a tab shows it, a Mod+drag let go on a tab bar adds the tile
+//! there as a tab, and the launcher opens an app as a tab with
+//! Ctrl+T or `@t`. The tab bar sits at the top left of its container (see
+//! `layout::split_tab_bar`; its placement may become a setting).
 //!
 //! Saving the file applies it live (see `reload`), except monitor modes, `off`, `xwayland`
 //! and `exec` (programs start once, with dune).
@@ -146,6 +158,8 @@ pub struct Config {
     pub launcher_key: Option<KeySpec>,
     /// Show the desktop the launcher opens an app on, instead of staying here.
     pub follow: bool,
+    /// The tile under the pointer takes focus as the pointer moves.
+    pub focus_follows_mouse: bool,
     /// `satellite` (default) or `off`.
     pub xwayland: String,
     /// Monitors by connector name, like `HDMI-A-1`.
@@ -275,13 +289,8 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             }
             parsed
         }),
-        follow: file.get("follow").is_some_and(|value| {
-            let parsed = bool_value(value);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `follow = {value}`: not true or false");
-            }
-            parsed.unwrap_or(false)
-        }),
+        follow: flag(file, "follow"),
+        focus_follows_mouse: flag(file, "focus_follows_mouse"),
         outputs: outputs(file),
         input: input(file),
         font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
@@ -295,6 +304,17 @@ fn number(file: &HashMap<String, String>, key: &str, default: i32, range: std::o
     value.parse().ok().filter(|v| range.contains(v)).unwrap_or_else(|| {
         tracing::warn!("ignoring `{key} = {value}`: not a number from {} to {}", range.start(), range.end());
         default
+    })
+}
+
+/// A `true`/`false` setting, false when missing or not one.
+fn flag(file: &HashMap<String, String>, key: &str) -> bool {
+    file.get(key).is_some_and(|value| {
+        let parsed = bool_value(value);
+        if parsed.is_none() {
+            tracing::warn!("ignoring `{key} = {value}`: not true or false");
+        }
+        parsed.unwrap_or(false)
     })
 }
 
@@ -418,6 +438,8 @@ mod tests {
         assert!(!resolve(&parse(""), &|_| None).follow);
         assert!(resolve(&parse("follow = true\n"), &|_| None).follow);
         assert!(!resolve(&parse("follow = maybe\n"), &|_| None).follow);
+        assert!(!resolve(&parse(""), &|_| None).focus_follows_mouse);
+        assert!(resolve(&parse("focus_follows_mouse = true\n"), &|_| None).focus_follows_mouse);
     }
 
     #[test]

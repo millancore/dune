@@ -69,6 +69,14 @@ impl Dune {
         self.geometries.iter().find(|(t, _)| *t == tile).map(|(_, r)| *r)
     }
 
+    /// `rect` of the shown tab `tile` grown to take in its container's bar, if it has one.
+    fn with_tab_bar(&self, tile: TileId, rect: Rect) -> Rect {
+        match self.tab_bars.iter().find(|b| b.active == tile) {
+            Some(bar) => Rect::new(rect.x, bar.rect.y, rect.w, rect.y + rect.h - bar.rect.y),
+            None => rect,
+        }
+    }
+
     /// While a tile of the strip is dragged: where it will land, then the tile darkened.
     /// (A dragged float just follows the pointer.)
     fn drag_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
@@ -99,8 +107,12 @@ impl Dune {
             return Vec::new();
         };
         // Only tiles that are on screen get decorations.
-        let rects: HashMap<TileId, Rect> =
-            self.tiles.keys().filter(|t| only(**t)).filter_map(|t| Some((*t, self.shown_rect(*t, output)?))).collect();
+        let rects: HashMap<TileId, Rect> = self
+            .tiles
+            .keys()
+            .filter(|t| only(**t))
+            .filter_map(|t| Some((*t, self.with_tab_bar(*t, self.shown_rect(*t, output)?))))
+            .collect();
         let tile_rect = |tile: &TileId| rects.get(tile).copied();
         let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
 
@@ -154,6 +166,22 @@ impl Dune {
             let title = self.tile_title(tile);
             let buffer = self.tab_titles.bar(tile, &title, (rect.w, rect.h));
             let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
+            if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
+                elements.push(OutputRenderElements::Image(e));
+            }
+        }
+
+        // Tabbed containers' bars.
+        let actives: Vec<TileId> = self.tab_bars.iter().map(|b| b.active).collect();
+        self.tab_titles.retain_strips(&actives);
+        for bar in self.tab_bars.clone() {
+            if !self.on_output(bar.active, output) {
+                continue;
+            }
+            let titles = bar.tabs.iter().map(|t| self.tile_title(*t)).collect();
+            let shown = bar.tabs.iter().position(|t| *t == bar.active).unwrap_or(0);
+            let buffer = self.tab_titles.strip(bar.active, titles, shown, (bar.rect.w, bar.rect.h));
+            let at = Point::<f64, Physical>::from(((bar.rect.x - geo.loc.x) as f64, (bar.rect.y - geo.loc.y) as f64));
             if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
                 elements.push(OutputRenderElements::Image(e));
             }
@@ -235,7 +263,8 @@ impl Dune {
         elements
     }
 
-    /// The launcher panel, centered across `output` a quarter of the way down.
+    /// The launcher panel, centered across `output` a quarter of the way down, or in the
+    /// middle of the empty container it was opened in.
     fn launcher_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
     where
         R: Renderer + ImportAll + ImportMem,
@@ -245,8 +274,15 @@ impl Dune {
             return Vec::new();
         }
         let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
-        let Some((buffer, (w, h))) = self.launcher.image(geo.size.w - 2 * GAP) else { return Vec::new() };
-        let at = Point::<f64, Physical>::from((((geo.size.w - w) / 2) as f64, ((geo.size.h - h) / 4).max(0) as f64));
+        // Opened in an empty container: in the middle of it, as long as it is on screen.
+        let slot = self.launcher.slot().and_then(|(slot, _)| self.shown.iter().find(|(t, _)| *t == slot)).map(|(_, r)| *r);
+        let width = slot.map_or(geo.size.w, |r| r.w);
+        let Some((buffer, (w, h))) = self.launcher.image(width - 2 * GAP) else { return Vec::new() };
+        let (x, y) = match slot {
+            Some(r) => (r.x + (r.w - w) / 2, r.y + ((r.h - h) / 2).max(0)),
+            None => (geo.loc.x + (geo.size.w - w) / 2, geo.loc.y + ((geo.size.h - h) / 4).max(0)),
+        };
+        let at = Point::<f64, Physical>::from(((x - geo.loc.x) as f64, (y - geo.loc.y) as f64));
         MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
             .map(|e| vec![OutputRenderElements::Image(e)])
             .unwrap_or_default()

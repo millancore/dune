@@ -509,7 +509,10 @@ impl Dune {
 
         let Backend::Udev(udev) = &mut self.backend else { unreachable!() };
         let surface = udev.gpu.as_mut().and_then(|g| g.surfaces.get_mut(&crtc)).unwrap();
-        match surface.drm_output.render_frame(&mut renderer, &elements, BACKGROUND, FrameFlags::DEFAULT) {
+        // No overlay planes: a game scanned out on one covered the composited pointer
+        // (niri leaves them off by default too).
+        let flags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
+        match surface.drm_output.render_frame(&mut renderer, &elements, BACKGROUND, flags) {
             Ok(result) if !result.is_empty => match surface.drm_output.queue_frame(()) {
                 Ok(()) => surface.queued = Some(Instant::now()),
                 Err(err) => tracing::warn!("cannot show frame on {}: {err}", output.name()),

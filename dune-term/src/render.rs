@@ -17,6 +17,14 @@ const SELECTION: Rgb = Rgb { r: 0x3e, g: 0x44, b: 0x51 };
 /// Space around the grid, in pixels.
 pub const PADDING: u32 = 4;
 
+/// The status bar: space above and below its text, and its colors.
+const BAR_PADDING: u32 = 3;
+const BAR_BACKGROUND: Rgb = Rgb { r: 0x17, g: 0x1a, b: 0x21 };
+const BAR_PATH: Rgb = Rgb { r: 0xb8, g: 0xc0, b: 0xd0 };
+const BAR_BRANCH: Rgb = Rgb { r: 0xa3, g: 0xbe, b: 0x8c };
+/// Branch icon: the Powerline one when a font has it.
+const BRANCH_ICONS: [char; 2] = ['\u{e0a0}', '⎇'];
+
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u8],
     pub width: u32,
@@ -82,8 +90,14 @@ fn argb(c: Rgb) -> [u8; 4] {
     [c.b, c.g, c.r, 0xff]
 }
 
-/// Columns and lines that fit in a window of this size.
-pub fn grid_size(font: &Font, width: u32, height: u32) -> (usize, usize) {
+/// Height of the status bar, in pixels.
+pub fn bar_height(font: &Font) -> u32 {
+    font.cell_height + 2 * BAR_PADDING
+}
+
+/// Columns and lines that fit in a window of this size, above the status bar if any.
+pub fn grid_size(font: &Font, width: u32, height: u32, status_bar: bool) -> (usize, usize) {
+    let height = if status_bar { height.saturating_sub(bar_height(font)) } else { height };
     let cols = width.saturating_sub(2 * PADDING) / font.cell_width;
     let lines = height.saturating_sub(2 * PADDING) / font.cell_height;
     (cols.max(2) as usize, lines.max(1) as usize)
@@ -160,6 +174,46 @@ pub fn draw<T: EventListener>(canvas: &mut Canvas, term: &Term<T>, font: &mut Fo
     }
 }
 
+/// Draw the status bar along the bottom: `path` on the left, `branch` (if any) on the right.
+pub fn draw_status_bar(canvas: &mut Canvas, font: &mut Font, path: &str, branch: Option<&str>) {
+    let bar = bar_height(font);
+    let top = canvas.height.saturating_sub(bar) as i32;
+    canvas.rect(0, top, canvas.width, bar, BAR_BACKGROUND);
+    let y = top + BAR_PADDING as i32;
+    let cols = (canvas.width.saturating_sub(2 * PADDING) / font.cell_width) as usize;
+
+    let branch = branch.map(|b| {
+        let icon = BRANCH_ICONS.into_iter().find(|c| font.glyph(*c, Style::Regular).is_some());
+        match icon {
+            Some(icon) => format!("{icon} {b}"),
+            None => b.to_string(),
+        }
+    });
+    let branch_cols = branch.as_ref().map_or(0, |b| b.chars().count() + 1);
+    // The branch goes first when there is no room for both.
+    let branch = branch.map(|b| crate::status::cut_left(&b, cols));
+    let path = crate::status::cut_left(path, cols.saturating_sub(branch_cols));
+
+    text(canvas, font, PADDING as i32, y, &path, BAR_PATH);
+    if let Some(branch) = branch {
+        let x = PADDING + (cols - branch.chars().count()) as u32 * font.cell_width;
+        text(canvas, font, x as i32, y, &branch, BAR_BRANCH);
+    }
+}
+
+/// One line of text, a cell per character, its cell row starting at (x, y).
+fn text(canvas: &mut Canvas, font: &mut Font, x: i32, y: i32, text: &str, color: Rgb) {
+    let (cw, baseline) = (font.cell_width as i32, font.baseline);
+    for (i, c) in text.chars().enumerate() {
+        if let Some(glyph) = font.glyph(c, Style::Regular) {
+            let gx = x + i as i32 * cw + glyph.left;
+            let gy = y + baseline - glyph.top;
+            let tint = (!glyph.color).then_some(color);
+            canvas.mask(gx, gy, glyph.width, glyph.height, &glyph.data, tint);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::{
@@ -220,6 +274,26 @@ mod tests {
             .chain(cell(&p, &f, 1).iter())
             .any(|[b, g, r, _]| (*r as i32 - *b as i32).abs() > 60 || (*g as i32 - *b as i32).abs() > 60);
         assert!(colorful, "no colored pixels where the emoji should be");
+    }
+
+    #[test]
+    fn status_bar_leaves_room_and_is_drawn_at_the_bottom() {
+        let mut font = Font::load("monospace", 20.0).unwrap();
+        let w = 2 * PADDING + COLS as u32 * font.cell_width;
+        let h = 2 * PADDING + 5 * font.cell_height + bar_height(&font);
+        assert_eq!(grid_size(&font, w, h, true).1, 5);
+        assert!(grid_size(&font, w, h, false).1 > 5);
+
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        draw_status_bar(&mut Canvas { pixels: &mut pixels, width: w, height: h }, &mut font, "~/src/dune", Some("main"));
+        let row = |y: u32| &pixels[(y * w * 4) as usize..((y + 1) * w * 4) as usize];
+        // Bar background on the last row, text colors inside the bar, nothing above it.
+        assert_eq!(&row(h - 1)[..4], &argb(BAR_BACKGROUND));
+        let bar_top = h - bar_height(&font);
+        let inside: Vec<u8> = (bar_top..h).flat_map(|y| row(y).to_vec()).collect();
+        assert!(inside.chunks_exact(4).any(|p| p == argb(BAR_BRANCH)));
+        assert!(inside.chunks_exact(4).any(|p| p == argb(BAR_PATH)));
+        assert!(row(bar_top - 1).iter().all(|b| *b == 0));
     }
 
     #[test]

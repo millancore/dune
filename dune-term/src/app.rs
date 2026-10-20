@@ -26,13 +26,18 @@ use alacritty_terminal::{
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     data_device_manager::{
-        DataDeviceManagerState, WritePipe,
+        DataDeviceManagerState, ReadPipe, WritePipe,
         data_device::{DataDevice, DataDeviceHandler},
         data_offer::{DataOfferHandler, DragOffer},
         data_source::{CopyPasteSource, DataSourceHandler},
     },
     delegate_registry,
     output::{OutputHandler, OutputState},
+    primary_selection::{
+        PrimarySelectionManagerState,
+        device::{PrimarySelectionDevice, PrimarySelectionDeviceHandler},
+        selection::{PrimarySelectionSource, PrimarySelectionSourceHandler},
+    },
     reexports::{
         calloop::{
             EventLoop, LoopHandle,
@@ -47,6 +52,10 @@ use smithay_client_toolkit::{
                 wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_data_source::WlDataSource,
                 wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface,
             },
+        },
+        protocols::wp::primary_selection::zv1::client::{
+            zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+            zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -74,6 +83,7 @@ use crate::{
     font::{Font, points_to_pixels},
     keys::{self, Shortcut},
     render::{self, Canvas, PADDING},
+    status::{self, Status},
 };
 
 const DEFAULT_COLS: u32 = 80;
@@ -140,6 +150,11 @@ pub struct App {
     scroll_rest: f64,
     /// What we offer while we own the clipboard.
     clipboard: Option<(CopyPasteSource, String)>,
+    /// The primary selection (selected text, pasted with the middle button), when
+    /// the compositor has it, and what we offer while we own it.
+    primary_manager: Option<PrimarySelectionManagerState>,
+    primary_device: Option<PrimarySelectionDevice>,
+    primary: Option<(PrimarySelectionSource, String)>,
     pastes: channel::Sender<(String, bool)>,
     paste_target: Option<PasteTarget>,
 
@@ -164,6 +179,10 @@ pub struct App {
     /// When we last wrote to the shell, and when it last printed.
     last_typed: Option<Instant>,
     last_output: Option<Instant>,
+
+    /// What the status bar shows, as last read.
+    status: Option<Status>,
+    home: Option<std::path::PathBuf>,
 }
 
 /// How long the shell must be quiet after echoing before a held Enter reads the line,
@@ -185,11 +204,13 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
     let data_device_manager = DataDeviceManagerState::bind(&globals, &qh)?;
+    let primary_manager = PrimarySelectionManagerState::bind(&globals, &qh).ok();
 
     let config = crate::config::load();
     let font = Font::load(&config.font_family, points_to_pixels(config.font_size))?;
     let width = DEFAULT_COLS * font.cell_width + 2 * PADDING;
-    let height = DEFAULT_LINES * font.cell_height + 2 * PADDING;
+    let bar = if config.status_bar { render::bar_height(&font) } else { 0 };
+    let height = DEFAULT_LINES * font.cell_height + 2 * PADDING + bar;
 
     let surface = compositor.create_surface(&qh);
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
@@ -201,7 +222,7 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     tty::setup_env();
     let (sender, receiver): (channel::Sender<TermEvent>, Channel<TermEvent>) = channel::channel();
     let proxy = Proxy(sender);
-    let grid = render::grid_size(&font, width, height);
+    let grid = render::grid_size(&font, width, height, config.status_bar);
     let term = Term::new(TermConfig::default(), &TermSize::new(grid.0, grid.1), proxy.clone());
     let term = Arc::new(FairMutex::new(term));
 
@@ -256,6 +277,7 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .insert_source(Timer::from_duration(Duration::from_millis(200)), |_, _, app| {
             app.tick_at();
             app.try_finish_enter();
+            app.refresh_status();
             let next = if app.pending_enter.is_some() {
                 5
             } else if app.at.as_ref().is_some_and(|a| a.waiting()) {
@@ -295,6 +317,9 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         last_click: None,
         scroll_rest: 0.0,
         clipboard: None,
+        primary_manager,
+        primary_device: None,
+        primary: None,
         pastes,
         paste_target: None,
         config,
@@ -310,6 +335,8 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         held_keys: Vec::new(),
         last_typed: None,
         last_output: None,
+        status: None,
+        home: std::env::var_os("HOME").map(std::path::PathBuf::from),
     };
 
     while !app.exit {
@@ -517,6 +544,21 @@ impl App {
         })
     }
 
+    /// Re-read the path and branch of the program in the foreground; redraw on a change.
+    fn refresh_status(&mut self) {
+        if !self.config.status_bar {
+            return;
+        }
+        let pgrp = self.pty_file.as_ref().map_or(-1, |f| unsafe { libc::tcgetpgrp(f.as_raw_fd()) });
+        let pid = if pgrp > 0 { pgrp as u32 } else { self.shell_pid };
+        // A foreground program may have no readable cwd (another user's): keep the shell's.
+        let status = status::read(pid).or_else(|| status::read(self.shell_pid));
+        if status.is_some() && status != self.status {
+            self.status = status;
+            self.request_redraw();
+        }
+    }
+
     fn tick_at(&mut self) {
         if self.at.is_none() {
             return;
@@ -576,7 +618,39 @@ impl App {
         }) else {
             return;
         };
-        let Ok(mut pipe) = offer.receive(mime) else { return };
+        let Ok(pipe) = offer.receive(mime) else { return };
+        self.read_paste(pipe, target);
+    }
+
+    fn set_primary(&mut self, text: String) {
+        let (Some(manager), Some(device)) = (&self.primary_manager, &self.primary_device) else { return };
+        let source = manager.create_selection_source(&self.qh, TEXT_MIMES);
+        source.set_selection(device, self.last_serial);
+        self.primary = Some((source, text));
+    }
+
+    /// Middle click: paste the primary selection, or the clipboard without one.
+    fn request_primary(&mut self) {
+        if self.primary_device.is_none() {
+            return self.request_clipboard(PasteTarget::Input);
+        }
+        if let Some((_, text)) = &self.primary {
+            let text = text.clone();
+            self.paste_target = Some(PasteTarget::Input);
+            return self.on_clipboard_text(text, true);
+        }
+        let Some(offer) = self.primary_device.as_ref().and_then(|d| d.data().selection_offer()) else { return };
+        let Some(mime) = offer.with_mime_types(|mimes| {
+            TEXT_MIMES.iter().find(|m| mimes.iter().any(|x| x == *m)).map(|m| m.to_string())
+        }) else {
+            return;
+        };
+        let Ok(pipe) = offer.receive(mime) else { return };
+        self.read_paste(pipe, PasteTarget::Input);
+    }
+
+    /// Read what the selection owner sends on a thread; it comes back to `on_clipboard_text`.
+    fn read_paste(&mut self, mut pipe: ReadPipe, target: PasteTarget) {
         self.paste_target = Some(target);
         let sender = self.pastes.clone();
         std::thread::spawn(move || {
@@ -655,7 +729,7 @@ impl App {
                 }
                 match button {
                     BTN_LEFT => self.start_selection(),
-                    BTN_MIDDLE => self.request_clipboard(PasteTarget::Input),
+                    BTN_MIDDLE => self.request_primary(),
                     _ => {}
                 }
             }
@@ -667,8 +741,13 @@ impl App {
                     }
                     return;
                 }
-                if button == BTN_LEFT {
+                if button == BTN_LEFT && self.selecting {
                     self.selecting = false;
+                    // Selecting copies to the primary selection, as in other terminals.
+                    let text = self.term.lock().selection_to_string();
+                    if let Some(text) = text.filter(|t| !t.is_empty()) {
+                        self.set_primary(text);
+                    }
                 }
             }
             PointerEventKind::Motion { .. } if self.selecting => {
@@ -754,7 +833,7 @@ impl App {
 
     /// Fit the grid to the window after a size or font change.
     fn apply_grid(&mut self) {
-        let grid = render::grid_size(&self.font, self.width, self.height);
+        let grid = render::grid_size(&self.font, self.width, self.height, self.config.status_bar);
         if grid != self.grid {
             self.grid = grid;
             self.term.lock().resize(TermSize::new(grid.0, grid.1));
@@ -789,6 +868,13 @@ impl App {
             let term = self.term.lock();
             let mut canvas = Canvas { pixels, width, height };
             render::draw(&mut canvas, &term, &mut self.font, self.focused);
+            if self.config.status_bar {
+                let (path, branch) = match &self.status {
+                    Some(s) => (status::display_path(&s.cwd, self.home.as_deref()), s.branch.as_deref()),
+                    None => (String::new(), None),
+                };
+                render::draw_status_bar(&mut canvas, &mut self.font, &path, branch);
+            }
         }
 
         let surface = self.window.wl_surface();
@@ -863,6 +949,7 @@ impl SeatHandler for App {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if self.data_device.is_none() {
             self.data_device = Some(self.data_device_manager.get_data_device(qh, &seat));
+            self.primary_device = self.primary_manager.as_ref().map(|m| m.get_selection_device(qh, &seat));
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let keyboard = self.seat_state.get_keyboard_with_repeat(
@@ -972,6 +1059,32 @@ impl DataOfferHandler for App {
     fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
 
     fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+}
+
+impl PrimarySelectionDeviceHandler for App {
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &ZwpPrimarySelectionDeviceV1) {}
+}
+
+impl PrimarySelectionSourceHandler for App {
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &ZwpPrimarySelectionSourceV1, _: String, pipe: WritePipe) {
+        if let Some((ours, text)) = &self.primary
+            && ours.inner() == source
+        {
+            let text = text.clone();
+            std::thread::spawn(move || {
+                let mut file = std::fs::File::from(std::os::fd::OwnedFd::from(pipe));
+                let _ = file.write_all(text.as_bytes());
+            });
+        }
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &ZwpPrimarySelectionSourceV1) {
+        // Someone else selected text.
+        if self.primary.as_ref().is_some_and(|(ours, _)| ours.inner() == source) {
+            self.primary = None;
+        }
+        source.destroy();
+    }
 }
 
 impl DataSourceHandler for App {

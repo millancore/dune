@@ -6,21 +6,27 @@ use smithay::{
     },
     input::{
         keyboard::{FilterResult, Keycode, Keysym, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle, RelativeMotionEvent},
     },
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    wayland::{
+        compositor::RegionAttributes,
+        pointer_constraints::{PointerConstraint, with_pointer_constraint},
+    },
 };
 
 use crate::{
     config::Config,
-    layout::{Direction, Layout},
+    layout::{Direction, Layout, TileId},
     state::{Dune, MoveDrag},
 };
 
 /// Compositor keybindings, all behind the modifier chosen with `DUNE_MOD`.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    NewTerminal,
+    /// Mod+Enter: an empty container with the launcher in it.
+    EmptyContainer,
     Focus(Direction),
     Swap(Direction),
     /// Column width / tile height, as a share of the output.
@@ -43,6 +49,12 @@ enum Action {
     LauncherKey(ModifiersState, Keysym, Option<char>),
     /// Keys released while the launcher is open go nowhere.
     Swallowed,
+    /// Mod+Tab / Mod+Shift+Tab: the next / previous tab of the focused container.
+    CycleTab(i32),
+    /// Mod+Ctrl+direction: join the container that way as a tab, or leave a tabbed one.
+    MoveTab(Direction),
+    /// Mod+t: the windows stacked in the focused tile become tabs of its container.
+    StackToTabs,
     /// Mod+1..9: show that desktop on the active monitor.
     Desk(u8),
     /// Mod+Shift+1..9: send the focused tile to that desktop.
@@ -100,8 +112,15 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
         Keysym::l | Keysym::Right => Some(Direction::Right),
         _ => None,
     };
+    let row_mod = mods.ctrl && modifier != "ctrl+alt";
     if let Some(dir) = dir {
-        return Some(if mods.shift { Action::Swap(dir) } else { Action::Focus(dir) });
+        return Some(if row_mod {
+            Action::MoveTab(dir)
+        } else if mods.shift {
+            Action::Swap(dir)
+        } else {
+            Action::Focus(dir)
+        });
     }
     // The key itself, unshifted: Mod+Shift+1 is `1` with shift held on any layout.
     let digit = sym.raw().wrapping_sub(Keysym::_1.raw());
@@ -109,9 +128,10 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
         let n = digit as u8 + 1;
         return Some(if mods.shift { Action::SendToDesk(n) } else { Action::Desk(n) });
     }
-    let row_mod = mods.ctrl && modifier != "ctrl+alt";
     match sym {
-        Keysym::Return => Some(Action::NewTerminal),
+        Keysym::Return => Some(Action::EmptyContainer),
+        Keysym::ISO_Left_Tab => Some(Action::CycleTab(-1)),
+        Keysym::Tab => Some(Action::CycleTab(if mods.shift { -1 } else { 1 })),
         // Ctrl: the tile's width inside its row (unless Ctrl is part of the modifier).
         Keysym::equal | Keysym::plus if row_mod => Some(Action::RowWidth(RESIZE_STEP)),
         Keysym::minus if row_mod => Some(Action::RowWidth(-RESIZE_STEP)),
@@ -125,6 +145,7 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
         Keysym::space if mods.shift => Some(Action::ToggleFloat),
         Keysym::space => Some(Action::Center),
         Keysym::q => Some(Action::Close),
+        Keysym::t => Some(Action::StackToTabs),
         Keysym::e if mods.shift => Some(Action::Quit),
         _ => None,
     }
@@ -186,6 +207,7 @@ mod tests {
             close_key: None,
             launcher_key: None,
             follow: false,
+            focus_follows_mouse: false,
             xwayland: String::new(),
             outputs: Default::default(),
             input: Default::default(),
@@ -216,6 +238,24 @@ mod tests {
     }
 
     #[test]
+    fn tab_keys() {
+        let config = test_config("alt");
+        let alt = ModifiersState { alt: true, ..Default::default() };
+        let alt_shift = ModifiersState { alt: true, shift: true, ..Default::default() };
+        let alt_ctrl = ModifiersState { alt: true, ctrl: true, ..Default::default() };
+        assert!(matches!(action_for(&config, &alt, Keysym::Tab), Some(Action::CycleTab(1))));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::Tab), Some(Action::CycleTab(-1))));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::ISO_Left_Tab), Some(Action::CycleTab(-1))));
+        assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::MoveTab(Direction::Left))));
+        assert!(matches!(action_for(&config, &alt_ctrl, Keysym::j), Some(Action::MoveTab(Direction::Down))));
+        assert!(matches!(action_for(&config, &alt, Keysym::t), Some(Action::StackToTabs)));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::Left), Some(Action::Swap(Direction::Left))));
+        // With Ctrl in the modifier, Ctrl+direction stays a focus move.
+        let config = test_config("ctrl+alt");
+        assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::Focus(Direction::Left))));
+    }
+
+    #[test]
     fn digits_pick_desktops() {
         let config = test_config("super");
         let logo = ModifiersState { logo: true, ..Default::default() };
@@ -226,6 +266,38 @@ mod tests {
         assert!(action_for(&config, &logo, Keysym::_0).is_none());
         assert!(action_for(&config, &ModifiersState::default(), Keysym::_2).is_none());
     }
+}
+
+/// What an active pointer constraint asks of the pointer.
+enum Constraint {
+    Locked,
+    /// Confined to this region of the surface (all of it without one).
+    Confined(Option<RegionAttributes>),
+}
+
+/// The active constraint of `surface`, when the pointer at `local` (on the surface) is in its region.
+fn active_constraint(surface: &WlSurface, pointer: &PointerHandle<Dune>, local: Point<f64, Logical>) -> Option<Constraint> {
+    with_pointer_constraint(surface, pointer, |constraint| {
+        let constraint = constraint.filter(|c| c.is_active())?;
+        if !constraint.region().is_none_or(|r| r.contains(local.to_i32_round())) {
+            return None;
+        }
+        Some(match &*constraint {
+            PointerConstraint::Locked(_) => Constraint::Locked,
+            PointerConstraint::Confined(confined) => Constraint::Confined(confined.region().cloned()),
+        })
+    })
+}
+
+/// The pointer reached `surface` at `local`: a constraint waiting there starts.
+fn activate_constraint(surface: &WlSurface, pointer: &PointerHandle<Dune>, local: Point<f64, Logical>) {
+    with_pointer_constraint(surface, pointer, |constraint| {
+        if let Some(constraint) = constraint.filter(|c| !c.is_active())
+            && constraint.region().is_none_or(|r| r.contains(local.to_i32_round()))
+        {
+            constraint.activate();
+        }
+    });
 }
 
 impl Dune {
@@ -251,6 +323,37 @@ impl Dune {
         });
     }
 
+    /// A resize key or Super+scroll: a float grows by `dw`/`dh` around its middle, a tile in
+    /// the strip takes `change`.
+    fn resize_tile(&mut self, id: TileId, dw: f64, dh: f64, change: impl Fn(&mut Layout, TileId)) {
+        if self.is_floating(id) {
+            self.scale_float(id, dw, dh);
+        } else {
+            self.change_tile(id, change);
+        }
+    }
+
+    fn resize_focused(&mut self, dw: f64, dh: f64, change: impl Fn(&mut Layout, TileId)) {
+        if let Some(id) = self.focused {
+            self.resize_tile(id, dw, dh, change);
+        }
+    }
+
+    /// `focus_follows_mouse`: the tile under the pointer takes focus, unless part of it is
+    /// off screen (focusing it would slide the view under the pointer), a button or drag
+    /// is going on, or the launcher is open.
+    fn hover_focus(&mut self, pos: Point<f64, Logical>) {
+        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.launcher.output().is_some();
+        if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed() {
+            return;
+        }
+        let Some((id, shown)) = self.shown.iter().find(|(_, r)| r.contains(pos.x, pos.y)).copied() else { return };
+        let whole = self.geometries.iter().any(|(t, r)| *t == id && *r == shown);
+        if whole && self.focused != Some(id) {
+            self.focus_tile(id);
+        }
+    }
+
     /// Mod+left drag: past a few pixels it is a drag, not a click; a float follows the pointer.
     fn drag_move(&mut self, pos: Point<f64, Logical>) {
         let Some(drag) = self.move_drag.as_mut() else { return };
@@ -265,17 +368,15 @@ impl Dune {
 
     fn run_action(&mut self, action: Action) {
         match action {
-            Action::NewTerminal => {
-                self.spawn_terminal(None, None, None, None);
-            }
+            Action::EmptyContainer => self.open_empty_container(),
             Action::Launcher => self.toggle_launcher(),
             Action::LauncherKey(mods, sym, text) => self.launcher_key(mods, sym, text),
             Action::Swallowed => {}
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
-            Action::Width(delta) => self.change_focused(|l, id| l.resize_width(id, delta)),
-            Action::Height(delta) => self.change_focused(|l, id| l.resize_height(id, delta)),
-            Action::RowWidth(delta) => self.change_focused(|l, id| l.resize_row_width(id, delta)),
+            Action::Width(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_width(id, delta)),
+            Action::Height(delta) => self.resize_focused(0.0, delta, |l, id| l.resize_height(id, delta)),
+            Action::RowWidth(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_row_width(id, delta)),
             Action::CycleWidth => self.change_focused(Layout::cycle_width),
             Action::FullWidth => self.change_focused(Layout::toggle_full_width),
             Action::Center => self.change_focused(Layout::toggle_center),
@@ -287,6 +388,9 @@ impl Dune {
             Action::Close => self.close_focused(),
             Action::Quit => self.loop_signal.stop(),
             Action::Direction(side) => self.toggle_direction(side),
+            Action::CycleTab(delta) => self.cycle_tab(delta),
+            Action::MoveTab(dir) => self.move_tab(dir),
+            Action::StackToTabs => self.stack_to_tabs(),
             Action::Desk(n) => self.show_desk(n),
             Action::SendToDesk(n) => self.send_to_desk(n),
             Action::SwitchVt(vt) => self.change_vt(vt),
@@ -338,14 +442,39 @@ impl Dune {
             InputEvent::PointerMotion { event, .. } => {
                 // Relative motion (mice, touchpads on a real session), kept on the screens.
                 let pointer = self.seat.get_pointer().unwrap();
-                let pos = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                let current = pointer.current_location();
+                let before = self.surface_under(current);
+                let constraint = before.as_ref().and_then(|(surface, origin)| active_constraint(surface, &pointer, current - *origin));
+                pointer.relative_motion(
+                    self,
+                    before.clone(),
+                    &RelativeMotionEvent { delta: event.delta(), delta_unaccel: event.delta_unaccel(), time: event.time() },
+                );
+                // A locked pointer stays where it is: the game only gets the raw motion.
+                if matches!(constraint, Some(Constraint::Locked)) {
+                    return pointer.frame(self);
+                }
+                let mut pos = self.clamp_to_outputs(current + event.delta());
+                // A confined one stays on its surface, inside the region.
+                if let (Some(Constraint::Confined(region)), Some((surface, origin))) = (&constraint, &before) {
+                    let inside = |p: Point<f64, Logical>| region.as_ref().is_none_or(|r| r.contains((p - *origin).to_i32_round()));
+                    if !inside(Point::from((pos.x, current.y))) {
+                        pos.x = current.x;
+                    }
+                    if !inside(Point::from((current.x, pos.y))) {
+                        pos.y = current.y;
+                    }
+                    if self.surface_under(pos).is_none_or(|(s, _)| s != *surface) {
+                        return pointer.frame(self);
+                    }
+                }
                 self.pointer_at(pos);
                 self.drag_resize(pos);
                 self.drag_move(pos);
                 let under = self.surface_under(pos);
                 pointer.motion(
                     self,
-                    under,
+                    under.clone(),
                     &MotionEvent {
                         location: pos,
                         serial: SERIAL_COUNTER.next_serial(),
@@ -353,6 +482,10 @@ impl Dune {
                     },
                 );
                 pointer.frame(self);
+                if let Some((surface, origin)) = under {
+                    activate_constraint(&surface, &pointer, pos - origin);
+                }
+                self.hover_focus(pos);
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output = self.space.outputs().next().unwrap();
@@ -376,6 +509,7 @@ impl Dune {
                     },
                 );
                 pointer.frame(self);
+                self.hover_focus(pos);
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
@@ -400,7 +534,8 @@ impl Dune {
                 }
 
                 // Mod+left button drags move the tile: it lands where the button is released,
-                // on this monitor or another one; a float just goes where it is dragged.
+                // on this monitor or another one; a float just goes where it is dragged. Let go
+                // on a tab bar, either one joins that container as a tab.
                 // A Mod+click without moving floats the tile, or puts a float back.
                 if event.button_code() == BTN_LEFT {
                     let pos = pointer.current_location();
@@ -411,6 +546,9 @@ impl Dune {
                             self.toggle_floating(drag.tile);
                         } else if drag.from.is_none() {
                             self.drop_tile(drag.tile, pos);
+                        } else if let Some(target) = self.drop_spot(drag.tile, pos).filter(|s| s.tab).and_then(|s| s.target) {
+                            // A float let go on a tab bar becomes a tab there.
+                            self.join_tab(drag.tile, target);
                         }
                         return;
                     }
@@ -425,10 +563,18 @@ impl Dune {
                     }
                 }
 
+                // A click on the "+" of a tab bar: a new empty tab there, with the launcher.
+                if event.button_code() == BTN_LEFT && button_state == ButtonState::Pressed && !pointer.is_grabbed() {
+                    let pos = pointer.current_location();
+                    if let Some(target) = self.plus_at(pos.x, pos.y) {
+                        return self.open_empty_tab(target);
+                    }
+                }
+
                 // Click to focus.
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
-                    if let Some(id) = self.tile_at(pos.x, pos.y) {
+                    if let Some(id) = self.tab_at(pos.x, pos.y).or_else(|| self.tile_at(pos.x, pos.y)) {
                         if self.focused != Some(id) {
                             self.focus_tile(id);
                         }
@@ -489,9 +635,9 @@ impl Dune {
                     if let Some(id) = self.tile_at(pos.x, pos.y).or(self.focused) {
                         let delta = scroll_resize_delta(vertical_amount);
                         if mods.shift {
-                            self.change_tile(id, |l, id| l.resize_height(id, delta));
+                            self.resize_tile(id, 0.0, delta, |l, id| l.resize_height(id, delta));
                         } else {
-                            self.change_tile(id, |l, id| l.resize_width(id, delta));
+                            self.resize_tile(id, delta, 0.0, |l, id| l.resize_width(id, delta));
                         }
                     }
                     return;

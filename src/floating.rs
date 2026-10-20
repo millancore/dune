@@ -30,6 +30,14 @@ pub fn start_size(area: Rect) -> (i32, i32) {
     ((area.w as f64 * FLOAT_SHARE) as i32, (area.h as f64 * FLOAT_SHARE) as i32)
 }
 
+/// `rect` grown by `dw`/`dh` shares of `area` around its middle, kept inside `area`.
+fn scaled(rect: Rect, area: Rect, dw: f64, dh: f64) -> Rect {
+    let w = (rect.w + (area.w as f64 * dw).round() as i32).clamp(MIN_FLOAT.min(area.w), area.w);
+    let h = (rect.h + (area.h as f64 * dh).round() as i32).clamp(MIN_FLOAT.min(area.h), area.h);
+    let (cx, cy) = (rect.x + rect.w / 2, rect.y + rect.h / 2);
+    keep_inside(Rect::new(cx - w / 2, cy - h / 2, w, h), area)
+}
+
 /// `rect` moved (and shrunk if needed) so that it is all inside `area`.
 pub fn keep_inside(rect: Rect, area: Rect) -> Rect {
     let (w, h) = (rect.w.clamp(MIN_FLOAT.min(area.w), area.w), rect.h.clamp(MIN_FLOAT.min(area.h), area.h));
@@ -118,6 +126,18 @@ impl Dune {
         self.arrange();
     }
 
+    /// A resize key or Super+scroll on a float: it grows (or shrinks) around its middle by
+    /// `dw`/`dh`, shares of its output, like a column's width.
+    pub fn scale_float(&mut self, id: TileId, dw: f64, dh: f64) {
+        let Some(r) = self.float_rect(id) else { return };
+        let area = self.floating.iter().find(|(_, s)| s.iter().any(|(t, _)| *t == id)).and_then(|(name, _)| {
+            self.space.outputs().find(|o| o.name() == *name).and_then(|o| self.output_rect(o))
+        });
+        let Some(area) = area else { return };
+        self.set_float_rect(id, scaled(r, area, dw, dh));
+        self.arrange();
+    }
+
     /// Floats go to the output their middle is on (they may have been dragged to another
     /// one, or their output went away) and are kept inside it.
     pub fn settle_floats(&mut self) {
@@ -195,6 +215,16 @@ mod tests {
         assert_eq!(centered(AREA, 600, 360), Rect::new(300, 120, 600, 360));
         // Never bigger than the output.
         assert_eq!(centered(AREA, 5000, 360), Rect::new(100, 120, 1000, 360));
+    }
+
+    #[test]
+    fn floats_resize_around_their_middle() {
+        let r = Rect::new(300, 120, 600, 360);
+        assert_eq!(scaled(r, AREA, 0.1, 0.0), Rect::new(250, 120, 700, 360));
+        assert_eq!(scaled(r, AREA, 0.0, -0.1), Rect::new(300, 150, 600, 300));
+        // Never smaller than the minimum, never bigger than the output.
+        assert_eq!(scaled(r, AREA, -5.0, 0.0).w, MIN_FLOAT);
+        assert_eq!(scaled(r, AREA, 5.0, 5.0), AREA);
     }
 
     #[test]

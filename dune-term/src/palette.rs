@@ -6,7 +6,7 @@ use alacritty_terminal::{
 };
 
 const FOREGROUND: Rgb = Rgb { r: 0xd8, g: 0xde, b: 0xe9 };
-const BACKGROUND: Rgb = Rgb { r: 0x14, g: 0x14, b: 0x1a };
+const BACKGROUND: Rgb = Rgb { r: 0x1b, g: 0x28, b: 0x38 };
 
 /// The 16 base colors: black, red, green, yellow, blue, magenta, cyan, white, then bright.
 const BASE: [Rgb; 16] = [

@@ -4,6 +4,7 @@
 //! ```text
 //! font_family = JetBrains Mono
 //! font_size = 14          # points
+//! status_bar = true        # bottom bar with the path and git branch
 //! ```
 
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ pub struct Config {
     pub font_family: String,
     /// In points.
     pub font_size: f32,
+    pub status_bar: bool,
 }
 
 impl Default for Config {
@@ -20,6 +22,7 @@ impl Default for Config {
         Config {
             font_family: "monospace".into(),
             font_size: 14.0,
+            status_bar: true,
         }
     }
 }
@@ -46,6 +49,11 @@ fn parse(text: &str) -> Config {
                     config.font_size = size.clamp(4.0, 96.0);
                 }
             }
+            "status_bar" => match value {
+                "true" | "yes" | "on" => config.status_bar = true,
+                "false" | "no" | "off" => config.status_bar = false,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -59,8 +67,10 @@ mod tests {
     #[test]
     fn reads_font_settings_and_ignores_the_rest() {
         let c = parse("keyboard_variant = dvorak\nfont_family = JetBrains Mono  # nice\nfont_size = 17\n");
-        assert_eq!(c, Config { font_family: "JetBrains Mono".into(), font_size: 17.0 });
+        assert_eq!(c, Config { font_family: "JetBrains Mono".into(), font_size: 17.0, status_bar: true });
         assert_eq!(parse("font_size = huge\n"), Config::default());
         assert_eq!(parse("font_size = 500\n").font_size, 96.0);
+        assert!(!parse("status_bar = off\n").status_bar);
+        assert!(parse("status_bar = maybe\n").status_bar);
     }
 }

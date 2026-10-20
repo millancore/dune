@@ -53,6 +53,46 @@ const MIN_ROW_WIDTH: f64 = 0.1;
 const TAB_THRESHOLD: f64 = 0.15;
 /// Height of a tab's bar, in pixels.
 pub const TAB_HEIGHT: i32 = 24;
+/// Widest a tab of a tabbed container gets in its bar, in pixels.
+pub const TAB_MAX_WIDTH: i32 = 220;
+/// Width of the "+" at the end of a tab bar.
+pub const PLUS_WIDTH: i32 = TAB_HEIGHT;
+
+/// The bar of a tabbed container: where it is, its tabs in order and the one shown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabBar {
+    pub rect: Rect,
+    pub tabs: Vec<TileId>,
+    pub active: TileId,
+}
+
+/// A tabbed container's bar and the room left for its shown tab. Every placement of
+/// the bar goes through here (today: along the top).
+pub fn split_tab_bar(rect: Rect) -> (Rect, Rect) {
+    let bar = Rect::new(rect.x, rect.y, rect.w, TAB_HEIGHT.min(rect.h));
+    let content = Rect::new(rect.x, rect.y + bar.h, rect.w, (rect.h - bar.h).max(1));
+    (bar, content)
+}
+
+/// Where each of `n` tabs sits in `bar`: side by side from the left, as wide as
+/// `TAB_MAX_WIDTH` while they fit, sharing the bar (but the "+") when they don't.
+pub fn tab_rects(bar: Rect, n: usize) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let w = tab_width(bar, n);
+    (0..n as i32).map(|i| Rect::new(bar.x + i * w, bar.y, w, bar.h)).collect()
+}
+
+/// The "+" of a bar with `n` tabs, right after the last one: a new empty tab.
+pub fn plus_rect(bar: Rect, n: usize) -> Rect {
+    let x = if n == 0 { bar.x } else { bar.x + n as i32 * tab_width(bar, n) };
+    Rect::new(x.min(bar.x + bar.w - PLUS_WIDTH), bar.y, PLUS_WIDTH.min(bar.w), bar.h)
+}
+
+fn tab_width(bar: Rect, n: usize) -> i32 {
+    ((bar.w - PLUS_WIDTH) / n as i32).clamp(1, TAB_MAX_WIDTH)
+}
 
 /// Tiles side by side in a column, sharing the column's width.
 #[derive(Debug)]
@@ -175,6 +215,8 @@ pub enum Home {
     Row { by: TileId, side: Side, width: f64 },
     /// The open row stacked on the tab of `on`.
     Stacked { on: TileId },
+    /// A tab of the container `with` is in, at `index` among its tabs.
+    Tab { with: TileId, index: usize },
     /// A row of its own in a column: on `side` of `by`, with its share of the height.
     Column { by: TileId, side: Side, height: f64 },
     /// A column of its own, on a side of a neighbouring column (none: alone) and its width.
@@ -188,6 +230,11 @@ pub struct Layout {
     view: i32,
     /// A tile whose column the view keeps centered, until focus goes to another column here.
     centered: Option<TileId>,
+    /// Tabbed containers, their tabs in order (two or more). The one in a row is the
+    /// active tab; the others live only here.
+    groups: Vec<Vec<TileId>>,
+    /// Bars of the tabbed containers, as last laid out by `geometries`.
+    bars: Vec<TabBar>,
 }
 
 impl Layout {
@@ -195,8 +242,13 @@ impl Layout {
         self.find(id).is_some()
     }
 
-    /// Column, row and place in the row of a tile.
+    /// Column, row and place in the row of a tile; a hidden tab is where its container is.
     fn find(&self, id: TileId) -> Option<(usize, usize, usize)> {
+        self.find_slot(id).or_else(|| self.group(id)?.iter().find_map(|t| self.find_slot(*t)))
+    }
+
+    /// Column, row and place in the row of a tile that sits in a row itself.
+    fn find_slot(&self, id: TileId) -> Option<(usize, usize, usize)> {
         self.columns.iter().enumerate().find_map(|(c, col)| {
             col.rows
                 .iter()
@@ -210,9 +262,96 @@ impl Layout {
         Some(&mut self.columns[c])
     }
 
-    /// Ids of all tiles, column by column from the left, top to bottom, left to right.
+    /// Ids of all tiles, column by column from the left, top to bottom, left to right;
+    /// a tabbed container's tabs in their order.
     pub fn tiles(&self) -> Vec<TileId> {
-        self.columns.iter().flat_map(|c| c.tiles()).collect()
+        self.columns
+            .iter()
+            .flat_map(|c| c.tiles())
+            .flat_map(|t| self.group(t).map_or_else(|| vec![t], <[TileId]>::to_vec))
+            .collect()
+    }
+
+    // ---- tabbed containers ----
+
+    fn group_index(&self, id: TileId) -> Option<usize> {
+        self.groups.iter().position(|g| g.contains(&id))
+    }
+
+    /// The tabs of the container `id` is a tab of, in order.
+    pub fn group(&self, id: TileId) -> Option<&[TileId]> {
+        self.group_index(id).map(|g| self.groups[g].as_slice())
+    }
+
+    /// Add `new` as a tab of `target`'s container, after the active tab, and show it.
+    pub fn add_tab(&mut self, new: TileId, target: TileId) -> bool {
+        let Some((c, r, k)) = self.find(target) else { return false };
+        let active = self.columns[c].rows[r].tiles[k];
+        let g = match self.group_index(active) {
+            Some(g) => g,
+            None => {
+                self.groups.push(vec![active]);
+                self.groups.len() - 1
+            }
+        };
+        let at = self.groups[g].iter().position(|t| *t == active).unwrap() + 1;
+        self.groups[g].insert(at, new);
+        self.columns[c].rows[r].tiles[k] = new;
+        true
+    }
+
+    /// Show tab `id` in its container. False when it is not a hidden tab here.
+    pub fn activate_tab(&mut self, id: TileId) -> bool {
+        if self.find_slot(id).is_some() || self.group_index(id).is_none() {
+            return false;
+        }
+        let Some((c, r, k)) = self.find(id) else { return false };
+        self.columns[c].rows[r].tiles[k] = id;
+        true
+    }
+
+    /// The active tab of `id`'s container, if it is a tabbed one.
+    pub fn active_tab(&self, id: TileId) -> Option<TileId> {
+        self.group(id)?.iter().copied().find(|t| self.find_slot(*t).is_some())
+    }
+
+    /// Show the tab `delta` places after the active one of `id`'s container (going
+    /// round); the tab now shown.
+    pub fn cycle_tab(&mut self, id: TileId, delta: i32) -> Option<TileId> {
+        let group = self.group(id)?;
+        let active = self.active_tab(id)?;
+        let i = group.iter().position(|t| *t == active)? as i32;
+        let next = group[(i + delta).rem_euclid(group.len() as i32) as usize];
+        self.activate_tab(next);
+        Some(next)
+    }
+
+    /// The tab that takes `id`'s place when it leaves its container: the next one, else
+    /// the one before.
+    pub fn tab_sibling(&self, id: TileId) -> Option<TileId> {
+        let group = self.group(id)?;
+        let i = group.iter().position(|t| *t == id)?;
+        group.get(i + 1).or_else(|| group.get(i.wrapping_sub(1))).copied()
+    }
+
+    /// Take `id` out of its tabbed container (a sibling shows in its place); false when
+    /// it is in none.
+    fn leave_group(&mut self, id: TileId) -> bool {
+        let Some(g) = self.group_index(id) else { return false };
+        if let Some((c, r, k)) = self.find_slot(id) {
+            let sibling = self.tab_sibling(id).unwrap();
+            self.columns[c].rows[r].tiles[k] = sibling;
+        }
+        self.groups[g].retain(|t| *t != id);
+        if self.groups[g].len() < 2 {
+            self.groups.remove(g);
+        }
+        true
+    }
+
+    /// The tabbed containers' bars, as last laid out by `geometries`.
+    pub fn tab_bars(&self) -> &[TabBar] {
+        &self.bars
     }
 
     /// Insert `new` after `target`: in a new column to its right (`Vertical`) or below it
@@ -290,6 +429,10 @@ impl Layout {
         let (c, r, k) = self.find(id)?;
         let col = &self.columns[c];
         let row = &col.rows[r];
+        if let Some(group) = self.group(id) {
+            let index = group.iter().position(|t| *t == id).unwrap();
+            return Some(Home::Tab { with: self.tab_sibling(id).unwrap(), index });
+        }
         Some(if row.tiles.len() > 1 {
             let (by, side) = if k > 0 { (row.tiles[k - 1], Side::Right) } else { (row.tiles[1], Side::Left) };
             Home::Row { by, side, width: row.widths[k] }
@@ -325,6 +468,13 @@ impl Layout {
             Home::Stacked { on } if here(on) => {
                 self.stack_on(id, on);
             }
+            Home::Tab { with, index } if here(with) => {
+                self.add_tab(id, with);
+                let g = self.group_index(id).unwrap();
+                let group = &mut self.groups[g];
+                group.retain(|t| *t != id);
+                group.insert(index.min(group.len()), id);
+            }
             Home::Column { by, side, height } if here(by) => {
                 self.insert_on(id, Some(by), side);
                 let (c, r, _) = self.find(id).unwrap();
@@ -354,6 +504,9 @@ impl Layout {
 
     /// Remove a tile; an emptied column goes away and the strip closes the gap.
     pub fn remove(&mut self, id: TileId) -> bool {
+        if self.leave_group(id) {
+            return true;
+        }
         let Some((c, r, k)) = self.find(id) else { return false };
         self.columns[c].remove_tile(r, k);
         if self.columns[c].rows.is_empty() {
@@ -364,7 +517,8 @@ impl Layout {
 
     /// Exchange the positions of two tiles.
     pub fn swap(&mut self, x: TileId, y: TileId) {
-        for t in self.columns.iter_mut().flat_map(|c| c.rows.iter_mut()).flat_map(|r| r.tiles.iter_mut()) {
+        let rows = self.columns.iter_mut().flat_map(|c| c.rows.iter_mut()).flat_map(|r| r.tiles.iter_mut());
+        for t in rows.chain(self.groups.iter_mut().flatten()) {
             if *t == x {
                 *t = y;
             } else if *t == y {
@@ -516,7 +670,20 @@ impl Layout {
     /// slide the view so that `focus` (when it is here) is shown whole. Tiles off the
     /// view get rectangles outside `area`; tabs get the rectangle of their bar. Invisible
     /// tiles (e.g. a terminal that has not mapped its window yet) take no space.
-    pub fn geometries(&mut self, area: Rect, gap: i32, sep: i32, visible: &dyn Fn(TileId) -> bool, focus: Option<TileId>) -> Vec<(TileId, Rect)> {
+    pub fn geometries(&mut self, area: Rect, gap: i32, sep: i32, has_window: &dyn Fn(TileId) -> bool, focus: Option<TileId>) -> Vec<(TileId, Rect)> {
+        // What each row slot shows: its tile, or for a tabbed container whose active tab
+        // has no window yet (just launched), another tab that has one.
+        let slots: std::collections::HashMap<TileId, TileId> = self
+            .columns
+            .iter()
+            .flat_map(|c| c.tiles())
+            .filter_map(|t| {
+                let shown = if has_window(t) { Some(t) } else { self.group(t)?.iter().copied().find(|m| has_window(*m)) };
+                shown.map(|s| (t, s))
+            })
+            .collect();
+        let pick = |t: TileId| slots.get(&t).copied();
+        let visible = &|t: TileId| pick(t).is_some();
         let inner_h = area.h - 2 * gap;
         // Columns at strip coordinates: (x, width, column index).
         let mut placed = Vec::new();
@@ -556,6 +723,7 @@ impl Layout {
         }
 
         let mut out = Vec::new();
+        let mut bars = Vec::new();
         for (x, w, c) in placed {
             let col = &self.columns[c];
             let shown: Vec<(usize, f64, bool)> = (0..col.rows.len())
@@ -577,10 +745,22 @@ impl Layout {
                 } else {
                     (space as f64 * h / total).round() as i32
                 };
-                out.extend(row_geometries(&col.rows[*r], Rect::new(area.x + x - self.view, y, w, th), sep, visible));
+                for (t, rect) in row_geometries(&col.rows[*r], Rect::new(area.x + x - self.view, y, w, th), sep, visible) {
+                    let shown = pick(t).unwrap();
+                    let tabs: Vec<TileId> = self.group(t).into_iter().flatten().copied().filter(|m| has_window(*m)).collect();
+                    // A row folded into an accordion tab shows its own bar, not the tabs'.
+                    if tabs.len() > 1 && !tab {
+                        let (bar, content) = split_tab_bar(rect);
+                        bars.push(TabBar { rect: bar, tabs, active: shown });
+                        out.push((shown, content));
+                    } else {
+                        out.push((shown, rect));
+                    }
+                }
                 y += th + sep;
             }
         }
+        self.bars = bars;
         out
     }
 }
@@ -1046,6 +1226,112 @@ mod tests {
     }
 
     /// Take `id` out of `l` and put it back where it was: the layout must not change.
+    /// Tiles 1 and 2 in columns, then 3 and 4 added as tabs of 1.
+    fn tabbed() -> Layout {
+        let mut l = Layout::default();
+        l.insert(1, None, Split::Vertical);
+        l.insert(2, Some(1), Split::Vertical);
+        assert!(l.add_tab(3, 1));
+        assert!(l.add_tab(4, 3));
+        l
+    }
+
+    #[test]
+    fn tabs_share_the_container_and_only_the_active_one_is_laid_out() {
+        let mut l = tabbed();
+        assert_eq!(l.group(1), Some(&[1, 3, 4][..]));
+        assert_eq!(l.tiles(), vec![1, 3, 4, 2]);
+        assert!(l.contains(3) && l.contains(1));
+        let g = geo(&mut l, 4);
+        // The active tab gets the container minus its bar; the others are not laid out.
+        assert_eq!(g, vec![(4, Rect::new(0, TAB_HEIGHT, 500, 600 - TAB_HEIGHT)), (2, Rect::new(500, 0, 500, 600))]);
+        assert_eq!(l.tab_bars(), &[TabBar { rect: Rect::new(0, 0, 500, TAB_HEIGHT), tabs: vec![1, 3, 4], active: 4 }]);
+    }
+
+    #[test]
+    fn switching_tabs() {
+        let mut l = tabbed();
+        assert!(l.activate_tab(1));
+        assert!(!l.activate_tab(1), "already shown");
+        assert!(!l.activate_tab(2), "not a tab");
+        assert_eq!(geo(&mut l, 1)[0].0, 1);
+        assert_eq!(l.cycle_tab(1, 1), Some(3));
+        assert_eq!(l.cycle_tab(3, -2), Some(4));
+        assert_eq!(l.cycle_tab(4, 1), Some(1), "goes round");
+        assert_eq!(l.active_tab(3), Some(1));
+        assert_eq!(l.cycle_tab(2, 1), None);
+    }
+
+    #[test]
+    fn closing_tabs_shows_a_sibling_and_a_last_tab_is_a_plain_tile() {
+        let mut l = tabbed();
+        assert_eq!(l.tab_sibling(4), Some(3), "the one before when last");
+        assert_eq!(l.tab_sibling(3), Some(4));
+        assert!(l.remove(4));
+        assert_eq!(geo(&mut l, 3)[0].0, 3);
+        assert!(l.remove(1), "a hidden tab");
+        assert_eq!(l.group(3), None);
+        assert!(l.tab_bars().len() == 1, "bars are those of the last layout");
+        assert_eq!(geo(&mut l, 3), vec![(3, Rect::new(0, 0, 500, 600)), (2, Rect::new(500, 0, 500, 600))]);
+        assert!(l.tab_bars().is_empty());
+    }
+
+    #[test]
+    fn a_tab_without_a_window_yet_shows_the_tab_that_has_one() {
+        let mut l = tabbed();
+        let shown = l.geometries(AREA, 0, 0, &|t| t != 4, Some(4));
+        // 4 was just launched: 1 keeps showing, with a bar of the tabs that have a window.
+        assert_eq!(shown[0].0, 1);
+        assert_eq!(l.tab_bars()[0].tabs, vec![1, 3]);
+        let alone = l.geometries(AREA, 0, 0, &|t| t == 1 || t == 2, Some(1));
+        assert_eq!(alone[0], (1, Rect::new(0, 0, 500, 600)));
+        assert!(l.tab_bars().is_empty());
+    }
+
+    #[test]
+    fn tabs_swap_and_go_back_to_their_container() {
+        let mut l = tabbed();
+        l.swap(4, 2);
+        assert_eq!(l.group(2), Some(&[1, 3, 2][..]));
+        assert_eq!(geo(&mut l, 2)[0].0, 2);
+        let home = l.home(3).unwrap();
+        assert_eq!(home, Home::Tab { with: 2, index: 1 });
+        l.remove(3);
+        assert!(l.restore(3, home));
+        assert_eq!(l.group(1), Some(&[1, 3, 2][..]));
+        assert_eq!(l.active_tab(1), Some(3));
+    }
+
+    #[test]
+    fn tabs_inside_an_accordion_stack_and_a_row() {
+        let mut l = Layout::default();
+        l.insert(1, None, Split::Vertical);
+        l.insert_on(2, Some(1), Side::Right);
+        assert!(l.add_tab(3, 2));
+        let g = geo(&mut l, 3);
+        assert_eq!(g[1], (3, Rect::new(500, TAB_HEIGHT, 500, 600 - TAB_HEIGHT)));
+        // Stacking on a tabbed container folds it (bar of the accordion, no tab bar).
+        assert!(l.stack_on(5, 3));
+        let g = geo(&mut l, 5);
+        assert_eq!(g.len(), 3);
+        assert!(l.tab_bars().is_empty());
+        assert!(l.is_tab(2) && l.is_tab(3));
+    }
+
+    #[test]
+    fn tab_bar_layout() {
+        let rect = Rect::new(10, 20, 300, 200);
+        assert_eq!(split_tab_bar(rect), (Rect::new(10, 20, 300, TAB_HEIGHT), Rect::new(10, 20 + TAB_HEIGHT, 300, 200 - TAB_HEIGHT)));
+        let bar = Rect::new(0, 0, 1000, TAB_HEIGHT);
+        assert_eq!(tab_rects(bar, 2), vec![Rect::new(0, 0, TAB_MAX_WIDTH, TAB_HEIGHT), Rect::new(TAB_MAX_WIDTH, 0, TAB_MAX_WIDTH, TAB_HEIGHT)]);
+        assert_eq!(plus_rect(bar, 2), Rect::new(2 * TAB_MAX_WIDTH, 0, PLUS_WIDTH, TAB_HEIGHT));
+        // A full bar: the tabs share what the "+" leaves, the "+" at the right end.
+        let full = Rect::new(0, 0, 300 + PLUS_WIDTH, TAB_HEIGHT);
+        assert_eq!(tab_rects(full, 3)[2], Rect::new(200, 0, 100, TAB_HEIGHT));
+        assert_eq!(plus_rect(full, 3), Rect::new(300, 0, PLUS_WIDTH, TAB_HEIGHT));
+        assert!(tab_rects(bar, 0).is_empty());
+    }
+
     fn round_trip(l: &mut Layout, id: TileId) {
         let before = geo(l, id);
         let home = l.home(id).unwrap();

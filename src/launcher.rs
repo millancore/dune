@@ -1,8 +1,11 @@
 //! The launcher (Mod+d): a panel dune draws over everything, like rofi. It searches the
 //! desktop applications with the picker and lets the user choose, before Enter,
-//! where the app opens: on a side of the focused tile, floating, stacked on it, on
+//! where the app opens: on a side of the focused tile, floating, as a tab of it, on
 //! another monitor or desktop (`firefox @2`, see `Dest::with`). Graphical apps start on
 //! their own, like rofi does; console programs get a terminal.
+//!
+//! Mod+Enter opens it inside a new, empty container instead (`Launcher::open_in`):
+//! Enter right away puts a terminal there, anything chosen or typed goes there too.
 
 use std::{
     collections::HashMap,
@@ -26,6 +29,7 @@ use crate::{
     Dune,
     icons::{Icon, Icons},
     layout::{Side, TileId},
+    state::Tile,
 };
 
 /// Text size, in pixels.
@@ -42,8 +46,9 @@ const SELECTED: [u8; 3] = [0x3b, 0x42, 0x61];
 const TEXT: [u8; 3] = [0xd8, 0xdc, 0xe6];
 const DIM: [u8; 3] = [0x7f, 0x84, 0x9c];
 const ACCENT: [u8; 3] = [0xfa, 0x9e, 0x38];
-const HINT: &str = "@3 desk · @m2 monitor · @s stack · @f float · Ctrl+arrows";
-const DEST_HELP: &str = "@: 1-9 desktop · m1-m9 monitor · s stacked · n new · f float";
+const HINT: &str = "@3 desk · @m2 monitor · @t tab · @f float · Ctrl+arrows";
+const DEST_HELP: &str = "@: 1-9 desktop · m1-m9 monitor · t tab · n new · f float";
+const SLOT_HINT: &str = "Enter: terminal · or pick a program · Esc: cancel";
 
 /// Where the launched app goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,8 +77,8 @@ impl Place {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dest {
     pub place: Place,
-    /// On top of the focused tile, which shows again when the app closes.
-    pub stack: bool,
+    /// A tab of the focused tile's container.
+    pub tab: bool,
     /// Monitor number, left to right, from 1.
     pub monitor: Option<u8>,
     pub desk: Option<u8>,
@@ -81,8 +86,8 @@ pub struct Dest {
 
 impl Dest {
     /// `self` changed by an `@` word, its letters in any order: a digit is a desktop,
-    /// `m` and a digit a monitor, `s` stacked on the current tile, `n` a new tile,
-    /// `f` floating. `@3`, `@m2`, `@m23` (monitor 2, desktop 3), `@s`, `@2f`.
+    /// `m` and a digit a monitor, `t` a tab of the current tile's container, `n` a new
+    /// tile, `f` floating. `@3`, `@m2`, `@m23` (monitor 2, desktop 3), `@t`, `@2f`.
     /// None when the word is not one.
     fn with(mut self, word: &str) -> Option<Dest> {
         let mut chars = word.strip_prefix('@')?.chars();
@@ -90,8 +95,8 @@ impl Dest {
         while let Some(c) = chars.next() {
             match c.to_ascii_lowercase() {
                 'm' => self.monitor = Some(digit(chars.next())?),
-                's' => self.stack = true,
-                'n' => self.stack = false,
+                't' => self.tab = true,
+                'n' => self.tab = false,
                 'f' => self.place = Place::Float,
                 c => self.desk = Some(digit(Some(c))?),
             }
@@ -100,8 +105,8 @@ impl Dest {
     }
 
     fn label(&self) -> String {
-        if self.stack {
-            return "opens stacked on this tile".into();
+        if self.tab {
+            return "opens as a tab of this tile".into();
         }
         let mut label = self.place.label().to_string();
         if let Some(m) = self.monitor {
@@ -117,11 +122,13 @@ impl Dest {
 /// Where a launched app's window goes, worked out when Enter was pressed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
-    /// On top of this tile.
-    Stack(TileId),
+    /// A tab of this tile's container.
+    Tab(TileId),
     /// A new tile on desktop `desk` of `output`, next to `target` (at the end without one).
     /// `side` None: a column of its own.
     New { output: String, desk: u8, target: Option<TileId>, side: Option<Side>, float: bool },
+    /// Into this empty container (Mod+Enter).
+    Into(TileId),
 }
 
 /// An app the launcher started, until its first window shows up.
@@ -136,6 +143,20 @@ pub struct Launch {
 /// A launch whose window has not shown up by then is forgotten (the app opened
 /// none, or an already running instance opened it).
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a launch may claim a window that is not provably its own.
+const UNCLAIMED_WINDOW: Duration = Duration::from_secs(20);
+
+/// The launch a window nothing else claims belongs to: the latest one started in the
+/// last `UNCLAIMED_WINDOW`. Its process cannot always be told: an already running
+/// instance opens the window (Vivaldi, 1Password), or it comes through
+/// xwayland-satellite (X11 apps like Spotify), whose pid is satellite's.
+pub fn unclaimed_launch(launches: &HashMap<u64, Launch>, now: Instant) -> Option<u64> {
+    launches
+        .iter()
+        .filter(|(_, l)| now.saturating_duration_since(l.started) < UNCLAIMED_WINDOW)
+        .max_by_key(|(_, l)| l.started)
+        .map(|(n, _)| *n)
+}
 
 /// What a key did to the launcher.
 #[derive(Debug, PartialEq, Eq)]
@@ -146,22 +167,34 @@ pub enum Step {
     /// in a terminal when `terminal` (a console program). `app`: the id of the app
     /// it runs, None for a typed command.
     Open { dest: Dest, target: Option<TileId>, command: String, terminal: bool, app: Option<String> },
+    /// Opened in an empty container: run `command` in it (a plain terminal when empty).
+    Fill { command: String, terminal: bool, app: Option<String> },
 }
 
 struct Session {
     picker: Picker,
-    stack: bool,
+    tab: bool,
     /// Graphical apps (no `Terminal=true`): what they run starts without a terminal.
     gui: Vec<App>,
     place: Place,
     output: String,
     target: Option<TileId>,
+    /// Opened in this empty container (Mod+Enter); `target` is what had focus before.
+    slot: Option<TileId>,
+    /// The list was moved through: Enter with nothing typed runs the highlighted app,
+    /// not a terminal.
+    browsed: bool,
 }
 
 impl Session {
+    /// In an empty container, Enter now gives a terminal.
+    fn enter_is_terminal(&self) -> bool {
+        self.slot.is_some() && !self.browsed && self.picker.input().trim().is_empty()
+    }
+
     /// Where the Ctrl keys say the app goes.
     fn keys_dest(&self) -> Dest {
-        Dest { place: self.place, stack: self.stack, monitor: None, desk: None }
+        Dest { place: self.place, tab: self.tab, monitor: None, desk: None }
     }
 
     /// The Ctrl keys' choice changed by the `@` word typed; None when that word is wrong.
@@ -202,17 +235,35 @@ impl Launcher {
     /// Show the launcher on `output`; apps open next to `target`. `uses`: launches
     /// by app id, the most used are listed first.
     pub fn open(&mut self, apps: Vec<App>, uses: HashMap<String, u32>, output: String, target: Option<TileId>) {
+        self.start(apps, uses, output, target, None);
+    }
+
+    /// Show the launcher inside the empty container `slot` on `output`; what it opens
+    /// goes there. `focused`: what had focus before, back to it when cancelled.
+    pub fn open_in(&mut self, apps: Vec<App>, uses: HashMap<String, u32>, output: String, slot: TileId, focused: Option<TileId>) {
+        self.start(apps, uses, output, focused, Some(slot));
+    }
+
+    fn start(&mut self, apps: Vec<App>, uses: HashMap<String, u32>, output: String, target: Option<TileId>, slot: Option<TileId>) {
         let home = std::env::var_os("HOME").map(Into::into).unwrap_or_else(|| "/".into());
         let gui = apps.iter().filter(|a| !a.terminal).cloned().collect();
         self.session = Some(Session {
             picker: Picker::browser(apps, home, uses),
             gui,
             place: Place::Column,
-            stack: false,
+            tab: false,
             output,
             target,
+            slot,
+            browsed: false,
         });
         self.image = None;
+    }
+
+    /// The empty container it was opened in, and what had focus before.
+    pub fn slot(&self) -> Option<(TileId, Option<TileId>)> {
+        let session = self.session.as_ref()?;
+        session.slot.map(|slot| (slot, session.target))
     }
 
     pub fn close(&mut self) {
@@ -224,7 +275,8 @@ impl Launcher {
     pub fn feed(&mut self, mods: &ModifiersState, sym: Keysym, text: Option<char>) -> Step {
         let Some(session) = self.session.as_mut() else { return Step::Close };
         self.image = None;
-        if mods.ctrl {
+        // In an empty container the place is that container: Ctrl keys choose none.
+        if mods.ctrl && session.slot.is_none() {
             let place = match sym {
                 Keysym::Left => Some(Place::Side(Side::Left)),
                 Keysym::Right => Some(Place::Side(Side::Right)),
@@ -232,8 +284,8 @@ impl Launcher {
                 Keysym::Down => Some(Place::Side(Side::Down)),
                 Keysym::f | Keysym::F if session.place == Place::Float => Some(Place::Column),
                 Keysym::f | Keysym::F => Some(Place::Float),
-                Keysym::s | Keysym::S => {
-                    session.stack = !session.stack;
+                Keysym::t | Keysym::T => {
+                    session.tab = !session.tab;
                     return Step::Continue;
                 }
                 _ => None,
@@ -259,11 +311,24 @@ impl Launcher {
                 _ => Key::Other,
             },
         };
+        if matches!(key, Key::Up | Key::Down | Key::Tab | Key::BackTab) {
+            session.browsed = true;
+        }
+        if key == Key::Enter && session.enter_is_terminal() {
+            self.close();
+            return Step::Fill { command: String::new(), terminal: true, app: None };
+        }
         match session.picker.feed(key) {
             Outcome::Continue => Step::Continue,
             Outcome::Cancel => {
                 self.close();
                 Step::Close
+            }
+            Outcome::Run(line) if session.slot.is_some() => {
+                let terminal = !runs_gui_app(&session.gui, &line.command);
+                let app = session.picker.chosen().map(str::to_string);
+                self.close();
+                Step::Fill { command: line.command, terminal, app }
             }
             Outcome::Run(line) => {
                 let mut dest = session.dest().unwrap_or(session.keys_dest());
@@ -305,17 +370,79 @@ impl Dune {
     /// Mod+d: show the launcher on the active output, or hide it.
     pub fn toggle_launcher(&mut self) {
         if self.launcher.is_open() {
-            return self.launcher.close();
+            let slot = self.launcher.slot();
+            self.launcher.close();
+            if let Some((slot, back)) = slot {
+                self.drop_empty(slot, back);
+            }
+            return;
         }
         let Some(output) = self.active_output() else { return };
         self.launcher.open(desktop::apps(), desktop::launches(), output.name(), self.focused);
     }
 
+    /// Mod+Enter: a new, empty container where a terminal would open, with the launcher
+    /// in it to choose what goes there (Enter right away: a terminal).
+    pub fn open_empty_container(&mut self) {
+        let id = self.next_tile;
+        if !self.insert_tile(id, None, None) {
+            return tracing::warn!("no output to open a container on");
+        }
+        self.next_tile += 1;
+        self.tiles.insert(id, Tile { reserved: true, ..Default::default() });
+        self.launch_in_empty(id);
+    }
+
+    /// The "+" of a tab bar: a new empty tab in `target`'s container, launcher in it.
+    pub fn open_empty_tab(&mut self, target: TileId) {
+        let Some(id) = self.tab_tile(target) else { return };
+        self.tiles.get_mut(&id).unwrap().reserved = true;
+        self.launch_in_empty(id);
+    }
+
+    /// Focus the empty container `id` and open the launcher in it.
+    fn launch_in_empty(&mut self, id: TileId) {
+        let back = self.focused;
+        self.focus_tile(id);
+        let Some(output) = self.output_of(id) else { return };
+        self.launcher.open_in(desktop::apps(), desktop::launches(), output, id, back);
+    }
+
+    /// Take away the empty container `id` if nothing went into it, focusing `back`.
+    pub fn drop_empty(&mut self, id: TileId, back: Option<TileId>) {
+        if !self.tiles.get(&id).is_some_and(|t| t.stack.is_empty()) {
+            return;
+        }
+        self.remove_from_layouts(id);
+        self.tiles.remove(&id);
+        if self.focused == Some(id) {
+            self.focused = back.filter(|b| self.tiles.contains_key(b));
+        }
+        self.arrange();
+        self.update_focus();
+    }
+
     /// A key pressed while the launcher is open; Enter opens the app where it was asked.
     pub fn launcher_key(&mut self, mods: ModifiersState, sym: Keysym, text: Option<char>) {
-        let Step::Open { dest, target, command, terminal, app } = self.launcher.feed(&mods, sym, text) else { return };
-        let Some(spot) = self.spot(dest, target) else {
-            return tracing::warn!("no output to launch `{command}` on");
+        let slot = self.launcher.slot();
+        let (spot, command, terminal, app) = match self.launcher.feed(&mods, sym, text) {
+            Step::Continue => return,
+            Step::Close => {
+                if let Some((slot, back)) = slot {
+                    self.drop_empty(slot, back);
+                }
+                return;
+            }
+            Step::Fill { command, terminal, app } => {
+                let Some((slot, _)) = slot else { return };
+                (Spot::Into(slot), command, terminal, app)
+            }
+            Step::Open { dest, target, command, terminal, app } => {
+                let Some(spot) = self.spot(dest, target) else {
+                    return tracing::warn!("no output to launch `{command}` on");
+                };
+                (spot, command, terminal, app)
+            }
         };
         if let Some(app) = app
             && let Err(err) = desktop::record_launch(&app)
@@ -345,8 +472,8 @@ impl Dune {
     /// Where `dest` puts an app launched while `target` was focused.
     fn spot(&self, dest: Dest, target: Option<TileId>) -> Option<Spot> {
         let target = target.filter(|t| self.tiles.contains_key(t));
-        if dest.stack && let Some(t) = target {
-            return Some(Spot::Stack(t));
+        if dest.tab && let Some(t) = target {
+            return Some(Spot::Tab(t));
         }
         let here = target.and_then(|t| self.output_of(t)).or_else(|| self.active_output().map(|o| o.name()))?;
         let output = dest
@@ -370,18 +497,31 @@ impl Dune {
     fn launch(&mut self, command: String, spot: Spot, terminal: bool) {
         let n = self.next_launch;
         self.next_launch += 1;
+        // A forgotten launch leaves its empty container behind: take it away too.
+        let expired: Vec<TileId> = self
+            .launches
+            .values()
+            .filter(|l| l.started.elapsed() >= LAUNCH_TIMEOUT)
+            .filter_map(|l| match l.spot {
+                Spot::Into(t) => Some(t),
+                _ => None,
+            })
+            .collect();
         self.launches.retain(|_, l| l.started.elapsed() < LAUNCH_TIMEOUT);
+        for tile in expired {
+            self.drop_empty(tile, None);
+        }
 
         if terminal {
-            // The terminal belongs to its tile: a new one stacked on the target or placed now,
-            // or the floating target it stacks inside of.
+            // The terminal belongs to its tile: a new tab of the target or placed now, or
+            // the floating target it stacks inside of.
             let stacked = match &spot {
-                Spot::Stack(t) => self.stack_tile(*t),
-                Spot::New { .. } => None,
+                Spot::Tab(t) => self.tab_tile(*t),
+                Spot::New { .. } | Spot::Into(_) => None,
             };
             let tile = match (&spot, stacked) {
                 (_, Some(id)) => id,
-                (Spot::Stack(t), None) => *t,
+                (Spot::Tab(t) | Spot::Into(t), None) => *t,
                 (Spot::New { output, desk, target, side, float }, None) => {
                     let id = self.next_tile;
                     self.next_tile += 1;
@@ -390,7 +530,7 @@ impl Dune {
                     id
                 }
             };
-            let stack = matches!(spot, Spot::Stack(_)) && stacked.is_none();
+            let stack = matches!(spot, Spot::Tab(_)) && stacked.is_none();
             if self.start_terminal(tile, None, Some(command), stack.then_some(n)) {
                 if stack {
                     self.launches.insert(n, Launch { spot, started: Instant::now(), pid: None });
@@ -398,6 +538,7 @@ impl Dune {
             } else if !stack {
                 self.remove_from_layouts(tile);
                 self.tiles.remove(&tile);
+                self.arrange();
             }
             return;
         }
@@ -465,7 +606,7 @@ fn draw(font: Option<&mut Font>, icons: &mut Icons, session: &Session, (w, h): (
     let (first, rows) = picker.window();
     for (i, candidate) in rows.iter().enumerate() {
         let y = row_y(1 + i as i32);
-        if first + i == picker.selected() {
+        if first + i == picker.selected() && !session.enter_is_terminal() {
             canvas.fill(FRAME, y, w - 2 * FRAME, line, SELECTED);
         }
         if let Some(icon) = candidate.icon.as_deref().and_then(|name| icons.get(name, icon_size)) {
@@ -474,9 +615,13 @@ fn draw(font: Option<&mut Font>, icons: &mut Icons, session: &Session, (w, h): (
         canvas.text(font, text_x, y, line, &candidate.label, TEXT, text_cols);
     }
     let bottom = MAX_ROWS as i32 + 2;
-    let dest = session.dest().map_or_else(|| DEST_HELP.to_string(), |d| d.label());
+    let (dest, hint) = match session.slot {
+        Some(_) if session.enter_is_terminal() => ("opens a terminal here".to_string(), SLOT_HINT),
+        Some(_) => ("opens here".to_string(), SLOT_HINT),
+        None => (session.dest().map_or_else(|| DEST_HELP.to_string(), |d| d.label()), HINT),
+    };
     canvas.text(font, PADDING, row_y(bottom), line, &dest, ACCENT, cols);
-    canvas.text(font, PADDING, row_y(bottom + 1), line, HINT, DIM, cols);
+    canvas.text(font, PADDING, row_y(bottom + 1), line, hint, DIM, cols);
     canvas.pixels
 }
 
@@ -560,6 +705,16 @@ impl Canvas {
 mod tests {
     use super::*;
 
+    #[test]
+    fn unclaimed_windows_go_to_the_latest_recent_launch() {
+        let now = Instant::now();
+        let launch = |ago: u64| Launch { spot: Spot::Into(1), started: now - Duration::from_secs(ago), pid: None };
+        let launches = HashMap::from([(1, launch(10)), (2, launch(3)), (3, launch(30))]);
+        assert_eq!(unclaimed_launch(&launches, now), Some(2));
+        assert_eq!(unclaimed_launch(&HashMap::from([(3, launch(30))]), now), None);
+        assert_eq!(unclaimed_launch(&HashMap::new(), now), None);
+    }
+
     fn launcher() -> Launcher {
         let mut launcher = Launcher::new("monospace", "hicolor");
         let apps = vec![
@@ -570,8 +725,58 @@ mod tests {
         launcher
     }
 
+    /// The launcher of Mod+Enter, in empty container 7 (3 had focus).
+    fn in_slot() -> Launcher {
+        let mut l = launcher();
+        let apps = vec![
+            App { id: "firefox".into(), name: "Firefox".into(), exec: "firefox %u".into(), ..Default::default() },
+            App { id: "nvim".into(), name: "Neovim".into(), exec: "nvim %F".into(), terminal: true, ..Default::default() },
+        ];
+        l.open_in(apps, HashMap::new(), "HDMI-A-1".into(), 7, Some(3));
+        l
+    }
+
+    #[test]
+    fn enter_alone_in_an_empty_container_is_a_terminal() {
+        let mut l = in_slot();
+        assert_eq!(l.slot(), Some((7, Some(3))));
+        assert_eq!(press(&mut l, Keysym::Return, false), Step::Fill { command: String::new(), terminal: true, app: None });
+        assert!(!l.is_open());
+    }
+
+    #[test]
+    fn what_is_chosen_goes_into_the_empty_container() {
+        let mut l = in_slot();
+        // Ctrl keys choose no place there.
+        press(&mut l, Keysym::Left, true);
+        typed(&mut l, "fire");
+        assert_eq!(
+            press(&mut l, Keysym::Return, false),
+            Step::Fill { command: "firefox".into(), terminal: false, app: Some("firefox".into()) }
+        );
+        let mut l = in_slot();
+        typed(&mut l, "htop");
+        assert_eq!(press(&mut l, Keysym::Return, false), Step::Fill { command: "htop".into(), terminal: true, app: None });
+        // Typed and erased: Enter gives a terminal again.
+        let mut l = in_slot();
+        typed(&mut l, "x");
+        press(&mut l, Keysym::BackSpace, false);
+        assert_eq!(press(&mut l, Keysym::Return, false), Step::Fill { command: String::new(), terminal: true, app: None });
+    }
+
+    #[test]
+    fn browsing_in_an_empty_container_runs_the_highlighted_app() {
+        let mut l = in_slot();
+        press(&mut l, Keysym::Down, false);
+        press(&mut l, Keysym::Up, false);
+        assert!(matches!(press(&mut l, Keysym::Return, false), Step::Fill { app: Some(_), .. }));
+        let mut l = in_slot();
+        assert_eq!(press(&mut l, Keysym::Escape, false), Step::Close);
+        assert_eq!(l.slot(), None);
+    }
+
     fn column() -> Dest {
-        Dest { place: Place::Column, stack: false, monitor: None, desk: None }
+        Dest { place: Place::Column, tab: false, monitor: None, desk: None }
     }
 
     fn press(l: &mut Launcher, sym: Keysym, ctrl: bool) -> Step {
@@ -639,15 +844,16 @@ mod tests {
     }
 
     #[test]
-    fn at_words_choose_monitor_desktop_and_stack() {
+    fn at_words_choose_monitor_desktop_and_tab() {
         let r = column();
         assert_eq!(r.with("@3"), Some(Dest { desk: Some(3), ..r }));
         assert_eq!(r.with("@m2"), Some(Dest { monitor: Some(2), ..r }));
         assert_eq!(r.with("@m23"), Some(Dest { monitor: Some(2), desk: Some(3), ..r }));
         assert_eq!(r.with("@3m2"), r.with("@m23"));
-        assert_eq!(r.with("@s"), Some(Dest { stack: true, ..r }));
         assert_eq!(r.with("@2f"), Some(Dest { place: Place::Float, desk: Some(2), ..r }));
-        assert_eq!(Dest { stack: true, ..r }.with("@n"), Some(r));
+        assert_eq!(r.with("@t"), Some(Dest { tab: true, ..r }));
+        assert_eq!(r.with("@s"), None); // stacking is not chosen here
+        assert_eq!(Dest { tab: true, ..r }.with("@n"), Some(r));
         assert_eq!(r.with("@"), Some(r)); // still typing
         assert_eq!(r.with("@0"), None);
         assert_eq!(r.with("@m"), None);
@@ -665,15 +871,15 @@ mod tests {
                 app: Some("firefox".into())
             }
         );
-        // Ctrl+s stacks; `@n` undoes it.
+        // Ctrl+t opens as a tab; `@n` undoes it.
         let mut l = launcher();
-        press(&mut l, Keysym::s, true);
+        press(&mut l, Keysym::t, true);
         typed(&mut l, "fire");
-        assert!(matches!(press(&mut l, Keysym::Return, false), Step::Open { dest: Dest { stack: true, .. }, .. }));
+        assert!(matches!(press(&mut l, Keysym::Return, false), Step::Open { dest: Dest { tab: true, .. }, .. }));
         let mut l = launcher();
-        press(&mut l, Keysym::s, true);
+        press(&mut l, Keysym::t, true);
         typed(&mut l, "fire @n");
-        assert!(matches!(press(&mut l, Keysym::Return, false), Step::Open { dest: Dest { stack: false, .. }, .. }));
+        assert!(matches!(press(&mut l, Keysym::Return, false), Step::Open { dest: Dest { tab: false, .. }, .. }));
     }
 
     #[test]
