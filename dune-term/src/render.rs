@@ -2,24 +2,14 @@
 
 use alacritty_terminal::{
     event::EventListener,
-    grid::Dimensions,
     term::{Term, cell::Flags},
     vte::ansi::{CursorShape, Rgb},
 };
-
-use dune_common::picker::{HINT, Picker, TRIGGER};
 
 use crate::{
     font::{Font, Style},
     palette,
 };
-
-// The @ picker's colors.
-const INPUT_BG: Rgb = Rgb { r: 0x2c, g: 0x31, b: 0x3c };
-const PANEL: Rgb = Rgb { r: 0x1f, g: 0x23, b: 0x2b };
-const ACCENT: Rgb = Rgb { r: 0x61, g: 0xaf, b: 0xef };
-const ACCENT_TEXT: Rgb = Rgb { r: 0x14, g: 0x14, b: 0x1a };
-const DIM: Rgb = Rgb { r: 0x7f, g: 0x84, b: 0x8e };
 
 /// Background of selected text.
 const SELECTION: Rgb = Rgb { r: 0x3e, g: 0x44, b: 0x51 };
@@ -99,9 +89,8 @@ pub fn grid_size(font: &Font, width: u32, height: u32) -> (usize, usize) {
     (cols.max(2) as usize, lines.max(1) as usize)
 }
 
-/// Draw the terminal, and the `@` picker over it when one is open.
-pub fn draw<T: EventListener>(canvas: &mut Canvas, term: &Term<T>, font: &mut Font, focused: bool, picker: Option<&Picker>) {
-    let grid = (term.columns(), term.screen_lines());
+/// Draw the terminal.
+pub fn draw<T: EventListener>(canvas: &mut Canvas, term: &Term<T>, font: &mut Font, focused: bool) {
     let content = term.renderable_content();
     let colors = content.colors;
     let background = palette::background(colors);
@@ -130,8 +119,7 @@ pub fn draw<T: EventListener>(canvas: &mut Canvas, term: &Term<T>, font: &mut Fo
         if selection.is_some_and(|s| s.contains(indexed.point)) {
             bg = SELECTION;
         }
-        // While the picker is open it draws its own cursor.
-        let is_cursor = indexed.point == cursor.point && cursor.shape != CursorShape::Hidden && picker.is_none();
+        let is_cursor = indexed.point == cursor.point && cursor.shape != CursorShape::Hidden;
         let solid_cursor = is_cursor && focused && cursor.shape == CursorShape::Block;
         if solid_cursor {
             (fg, bg) = (bg, cursor_color);
@@ -170,77 +158,6 @@ pub fn draw<T: EventListener>(canvas: &mut Canvas, term: &Term<T>, font: &mut Fo
             }
         }
     }
-
-    if let Some(picker) = picker {
-        let row = (cursor.point.line.0 + offset).max(0) as usize;
-        draw_picker(canvas, font, picker, (cursor.point.column.0, row), grid, palette::foreground(colors));
-    }
-}
-
-/// Text on the grid at a cell, one character per cell; returns the cells used.
-fn put_text(canvas: &mut Canvas, font: &mut Font, (col, row): (usize, usize), text: &str, fg: Rgb, style: Style) -> usize {
-    let (cw, ch, baseline) = (font.cell_width, font.cell_height, font.baseline);
-    let mut n = 0;
-    for c in text.chars() {
-        let x = (PADDING + (col + n) as u32 * cw) as i32;
-        let y = (PADDING + row as u32 * ch) as i32;
-        if c != ' '
-            && let Some(glyph) = font.glyph(c, style)
-        {
-            let color = (!glyph.color).then_some(fg);
-            canvas.mask(x + glyph.left, y + baseline - glyph.top, glyph.width, glyph.height, &glyph.data, color);
-        }
-        n += 1;
-    }
-    n
-}
-
-fn cells(canvas: &mut Canvas, font: &Font, (col, row): (usize, usize), width: usize, color: Rgb) {
-    let x = (PADDING + col as u32 * font.cell_width) as i32;
-    let y = (PADDING + row as u32 * font.cell_height) as i32;
-    canvas.rect(x, y, width as u32 * font.cell_width, font.cell_height, color);
-}
-
-/// Where the suggestion panel goes: below the prompt line when it fits, else above.
-/// Returns (first column, first row, width in cells).
-pub fn panel_place(cursor: (usize, usize), grid: (usize, usize), height: usize, width: usize) -> (usize, usize, usize) {
-    let (col, row) = cursor;
-    let (cols, lines) = grid;
-    let width = width.min(cols);
-    let left = col.min(cols - width);
-    let top = if row + 1 + height <= lines { row + 1 } else { row.saturating_sub(height) };
-    (left, top, width)
-}
-
-/// The `:` line at the cursor and the panel of suggestions next to it.
-fn draw_picker(canvas: &mut Canvas, font: &mut Font, picker: &Picker, cursor: (usize, usize), grid: (usize, usize), fg: Rgb) {
-    // The line being typed, with its own cursor.
-    let line = format!("{}{}", TRIGGER, picker.input());
-    let len = line.chars().count();
-    cells(canvas, font, cursor, (len + 1).min(grid.0.saturating_sub(cursor.0)), INPUT_BG);
-    put_text(canvas, font, cursor, &line, fg, Style::Bold);
-    if cursor.0 + len < grid.0 {
-        cells(canvas, font, (cursor.0 + len, cursor.1), 1, ACCENT);
-    }
-
-    let (first, rows) = picker.window();
-    let hint_len = HINT.chars().count() + 2;
-    let label_len = rows.iter().map(|c| c.label.chars().count() + 4).max().unwrap_or(0);
-    let height = rows.len() + 1;
-    let (left, top, width) = panel_place(cursor, grid, height, label_len.max(hint_len.min(48)));
-
-    for (i, candidate) in rows.iter().enumerate() {
-        let selected = first + i == picker.selected();
-        let at = (left, top + i);
-        cells(canvas, font, at, width, if selected { ACCENT } else { PANEL });
-        let label: String = candidate.label.chars().take(width.saturating_sub(2)).collect();
-        let (color, style) = if selected { (ACCENT_TEXT, Style::Bold) } else { (fg, Style::Regular) };
-        put_text(canvas, font, (left + 1, top + i), &label, color, style);
-    }
-    let hint_row = (left, top + rows.len());
-    cells(canvas, font, hint_row, width, PANEL);
-    let hint: String = HINT.chars().take(width.saturating_sub(2)).collect();
-    put_text(canvas, font, (left + 1, hint_row.1), &hint, DIM, Style::Regular);
 }
 
 #[cfg(test)]
@@ -269,7 +186,7 @@ mod tests {
         }
         let (w, h) = (2 * PADDING + COLS as u32 * font.cell_width, 2 * PADDING + 2 * font.cell_height);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
-        draw(&mut Canvas { pixels: &mut pixels, width: w, height: h }, &term, &mut font, false, None);
+        draw(&mut Canvas { pixels: &mut pixels, width: w, height: h }, &term, &mut font, false);
         (pixels, font)
     }
 
@@ -303,39 +220,6 @@ mod tests {
             .chain(cell(&p, &f, 1).iter())
             .any(|[b, g, r, _]| (*r as i32 - *b as i32).abs() > 60 || (*g as i32 - *b as i32).abs() > 60);
         assert!(colorful, "no colored pixels where the emoji should be");
-    }
-
-    #[test]
-    fn picker_panel_goes_below_or_above() {
-        // Room below: under the prompt line, aligned with the cursor.
-        assert_eq!(panel_place((2, 0), (80, 24), 5, 30), (2, 1, 30));
-        // Bottom line: above it.
-        assert_eq!(panel_place((2, 23), (80, 24), 5, 30), (2, 18, 30));
-        // Near the right edge: shifted left to fit; wider than the grid: clipped.
-        assert_eq!(panel_place((70, 0), (80, 24), 5, 30), (50, 1, 30));
-        assert_eq!(panel_place((0, 0), (20, 24), 5, 30), (0, 1, 20));
-    }
-
-    #[test]
-    fn picker_is_drawn_over_the_terminal() {
-        let mut font = Font::load("monospace", 20.0).unwrap();
-        let term = Term::new(Config::default(), &TermSize::new(COLS, 6), VoidListener);
-        let app = |id: &str, name: &str| dune_common::desktop::App { id: id.into(), name: name.into(), exec: id.into() };
-        let mut picker = Picker::new(vec![app("nvim", "Neovim"), app("nvim-qt", "Neovim Qt")], std::env::temp_dir());
-        for key in dune_common::picker::parse_keys(b"nv") {
-            picker.feed(key);
-        }
-        let (w, h) = (2 * PADDING + COLS as u32 * font.cell_width, 2 * PADDING + 6 * font.cell_height);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        draw(&mut Canvas { pixels: &mut pixels, width: w, height: h }, &term, &mut font, true, Some(&picker));
-        let has = |c: Rgb| pixels.chunks_exact(4).any(|p| p == argb(c));
-        assert!(has(INPUT_BG), "the @ line");
-        assert!(has(ACCENT), "the selected suggestion");
-        assert!(has(PANEL), "the panel");
-        // No picker, none of that.
-        let mut plain = vec![0u8; (w * h * 4) as usize];
-        draw(&mut Canvas { pixels: &mut plain, width: w, height: h }, &term, &mut font, true, None);
-        assert!(!plain.chunks_exact(4).any(|p| p == argb(ACCENT) || p == argb(PANEL)));
     }
 
     #[test]

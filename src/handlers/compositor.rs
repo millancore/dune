@@ -41,6 +41,11 @@ impl CompositorHandler for Dune {
             }
         };
 
+        // A dialog floats before its first configure, so its first size is its float size.
+        let toplevel = self.space.elements().find_map(|w| w.toplevel().filter(|t| t.wl_surface() == surface).cloned());
+        if let Some(toplevel) = toplevel {
+            self.float_if_dialog(&toplevel);
+        }
         xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
         self.layer_commit(surface);
     }

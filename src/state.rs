@@ -42,6 +42,18 @@ impl Tile {
     }
 }
 
+/// A Mod+left button drag of a tile.
+#[derive(Clone, Copy, Debug)]
+pub struct MoveDrag {
+    pub tile: TileId,
+    /// Where the button went down.
+    pub start: Point<f64, Logical>,
+    /// The pointer went far enough to make it a drag rather than a click.
+    pub moved: bool,
+    /// Where a floating tile was when the drag started.
+    pub from: Option<Rect>,
+}
+
 pub struct Dune {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -69,9 +81,21 @@ pub struct Dune {
     /// Mod+right button drag resizing a tile: the tile and the last pointer position.
     pub resize_drag: Option<(TileId, Point<f64, Logical>)>,
     /// Mod+left button drag moving a tile: it is dropped where the button is released.
-    pub move_drag: Option<TileId>,
+    pub move_drag: Option<MoveDrag>,
+    /// Floating tiles of each output, by output name, back to front.
+    pub floating: HashMap<String, Vec<(TileId, Rect)>>,
+    /// Where floating tiles came from in the strip, with the layout's output, to go back.
+    pub float_homes: HashMap<TileId, (String, crate::layout::Home)>,
+    /// The desktop each output shows (1 when missing); `layouts` and `floating` hold it.
+    pub desks: HashMap<String, u8>,
+    /// Desktops not shown, by output name and number.
+    pub hidden: HashMap<(String, u8), crate::desktops::Desk>,
     /// Tiles waiting for the window of an `@prog`, with the pid of the shell that started it.
     pub swallows: HashMap<TileId, u32>,
+    /// Apps the launcher started on their own, by their `DUNE_LAUNCH` number: where their
+    /// first window goes, and when they started.
+    pub launches: HashMap<u64, crate::launcher::Launch>,
+    pub next_launch: u64,
     /// Per-tile direction indicator: where the next command typed there opens.
     pub directions: HashMap<TileId, crate::layout::Side>,
     /// `dune-shell` link given to terminals as `$SHELL`, and the shell it starts.
@@ -102,6 +126,10 @@ pub struct Dune {
     pub backend: Backend,
     pub decorations: crate::render::Decorations,
     pub tab_titles: crate::tab_title::TabTitles,
+    /// Bars told about the desktops (ext-workspace-v1).
+    pub workspaces: crate::workspaces::WorkspaceState,
+    /// The Mod+d launcher panel.
+    pub launcher: crate::launcher::Launcher,
     /// The pointer image: clients choose it; dune draws it on a real session.
     pub cursor_status: CursorImageStatus,
     pub cursor: crate::cursor::Cursor,
@@ -140,6 +168,7 @@ impl Dune {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         // Clients scaling their buffers (xwayland-satellite requires it).
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let workspaces = crate::workspaces::WorkspaceState::new(&dh);
         let popups = PopupManager::default();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -148,9 +177,10 @@ impl Dune {
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
         // Keys arrive as raw keycodes (also when nested), so the layout must be ours.
         let config = crate::config::load();
-        if let Err(err) = seat.add_keyboard(config.xkb(), 200, 25) {
+        let (delay, rate) = (config.repeat_delay, config.repeat_rate);
+        if let Err(err) = seat.add_keyboard(config.xkb(), delay, rate) {
             tracing::error!("invalid keyboard layout in the dune config ({err:?}), falling back to the default");
-            seat.add_keyboard(Default::default(), 200, 25).unwrap();
+            seat.add_keyboard(Default::default(), delay, rate).unwrap();
         }
         seat.add_pointer();
 
@@ -176,7 +206,13 @@ impl Dune {
             tabs: Vec::new(),
             resize_drag: None,
             move_drag: None,
+            floating: HashMap::new(),
+            float_homes: HashMap::new(),
+            desks: HashMap::new(),
+            hidden: HashMap::new(),
             swallows: HashMap::new(),
+            launches: HashMap::new(),
+            next_launch: 1,
             directions: HashMap::new(),
             shell_wrapper: None,
             user_shell: PathBuf::from("/bin/sh"),
@@ -191,6 +227,8 @@ impl Dune {
             popups,
             seat,
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family),
+            launcher: crate::launcher::Launcher::new(&config.font_family, &config.icon_theme),
+            workspaces,
             config,
             layer_shell_state,
             viewporter_state,

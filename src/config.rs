@@ -5,11 +5,18 @@
 //! ```text
 //! keyboard_layout = us
 //! keyboard_variant = dvorak
+//! repeat_delay = 500      # ms a held key waits before repeating
+//! repeat_rate = 25        # repeats per second while held
 //! terminal = dune-term  # or foot, alacritty, ...
 //! modifier = alt          # alt, super or ctrl+alt
-//! direction_right = super+Right   # direction indicator keys (also _left, _up, _down)
+//! direction_right = super+ctrl+Right   # direction indicator keys (also _left, _up, _down)
+//! close = super+'         # extra key that closes the focused tile (Mod+q always does)
+//! launcher = super+e      # key that toggles the launcher (default Mod+d)
+//! follow = true           # go to the desktop an app is launched on (`firefox @3`); default false
 //! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
-//! font_family = JetBrains Mono   # dune-term's font, also used for tab titles
+//! font_family = JetBrains Mono   # tab titles and launcher (dune-term reads `~/.config/dune/term`)
+//! icon_theme = Papirus-Dark      # launcher icons; default: the desktop's (gsettings / GTK)
+//! exec = waybar           # run when dune starts; one line per program, as many as needed
 //!
 //! # Mice and touchpads (on the real session, not nested)
 //! input.left_handed = true      # swap the left and right buttons
@@ -23,7 +30,8 @@
 //! output.DP-1.off = true                # leave this monitor dark
 //! ```
 //!
-//! Saving the file applies it live (see `reload`), except monitor modes, `off` and `xwayland`.
+//! Saving the file applies it live (see `reload`), except monitor modes, `off`, `xwayland`
+//! and `exec` (programs start once, with dune).
 //!
 //! Environment variables win over the file: `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`,
 //! `XKB_DEFAULT_OPTIONS`, `XKB_DEFAULT_MODEL`, `XKB_DEFAULT_RULES`, `DUNE_TERMINAL`, `DUNE_MOD`.
@@ -51,7 +59,12 @@ impl KeySpec {
     pub fn parse(spec: &str) -> Option<KeySpec> {
         let mut parts: Vec<&str> = spec.split('+').map(str::trim).collect();
         let name = parts.pop().filter(|n| !n.is_empty())?;
-        let key = xkb::keysym_from_name(name, xkb::KEYSYM_CASE_INSENSITIVE);
+        let mut key = xkb::keysym_from_name(name, xkb::KEYSYM_CASE_INSENSITIVE);
+        // A single character stands for its own key, like `'` for apostrophe.
+        let mut chars = name.chars();
+        if let (Some(c), None, Keysym::NoSymbol) = (chars.next(), chars.next(), key) {
+            key = xkb::utf32_to_keysym(c as u32);
+        }
         if key == Keysym::NoSymbol {
             return None;
         }
@@ -119,10 +132,20 @@ pub struct Config {
     pub keyboard_layout: String,
     pub keyboard_variant: String,
     pub keyboard_options: String,
+    /// Milliseconds a held key waits before it starts repeating.
+    pub repeat_delay: i32,
+    /// Repeats per second while a key stays held.
+    pub repeat_rate: i32,
     pub terminal: String,
     pub modifier: String,
     /// Keys that point the focused tile's direction indicator at each side.
     pub direction_keys: Vec<(Side, KeySpec)>,
+    /// An extra key that closes the focused tile, besides Mod+q.
+    pub close_key: Option<KeySpec>,
+    /// The key that toggles the launcher, instead of Mod+d.
+    pub launcher_key: Option<KeySpec>,
+    /// Show the desktop the launcher opens an app on, instead of staying here.
+    pub follow: bool,
     /// `satellite` (default) or `off`.
     pub xwayland: String,
     /// Monitors by connector name, like `HDMI-A-1`.
@@ -130,6 +153,10 @@ pub struct Config {
     pub input: InputConfig,
     /// As fontconfig names it; tab titles are written with it.
     pub font_family: String,
+    /// Icon theme for the launcher; empty: the one GTK apps use.
+    pub icon_theme: String,
+    /// Shell commands run when dune starts (`exec` lines, in order).
+    pub exec: Vec<String>,
 }
 
 impl Config {
@@ -148,6 +175,9 @@ impl Config {
         let mut changed = Vec::new();
         if self.xwayland != old.xwayland {
             changed.push("xwayland".to_string());
+        }
+        if self.exec != old.exec {
+            changed.push("exec".to_string());
         }
         let names = self.outputs.keys().chain(old.outputs.keys()).collect::<BTreeSet<_>>();
         for name in names {
@@ -173,7 +203,17 @@ pub fn path() -> Option<PathBuf> {
 
 pub fn load() -> Config {
     let text = path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    resolve(&parse(&text), &|key| std::env::var(key).ok())
+    Config { exec: execs(&text), ..resolve(&parse(&text), &|key| std::env::var(key).ok()) }
+}
+
+/// The `exec` lines: unlike other keys, each one counts.
+fn execs(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split('#').next().unwrap_or("").split_once('=')?;
+            (key.trim() == "exec" && !value.trim().is_empty()).then(|| value.trim().to_string())
+        })
+        .collect()
 }
 
 fn parse(text: &str) -> HashMap<String, String> {
@@ -199,15 +239,17 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
         keyboard_layout: get("XKB_DEFAULT_LAYOUT", "keyboard_layout", ""),
         keyboard_variant: get("XKB_DEFAULT_VARIANT", "keyboard_variant", ""),
         keyboard_options: get("XKB_DEFAULT_OPTIONS", "keyboard_options", ""),
+        repeat_delay: number(file, "repeat_delay", 500, 100..=2000),
+        repeat_rate: number(file, "repeat_rate", 25, 1..=100),
         terminal: get("DUNE_TERMINAL", "terminal", "dune-term"),
         // Nested inside another compositor Super is usually taken by the host.
         modifier: get("DUNE_MOD", "modifier", "alt"),
         xwayland: get("DUNE_XWAYLAND", "xwayland", "satellite"),
         direction_keys: [
-            (Side::Left, "direction_left", "super+Left"),
-            (Side::Right, "direction_right", "super+Right"),
-            (Side::Up, "direction_up", "super+Up"),
-            (Side::Down, "direction_down", "super+Down"),
+            (Side::Left, "direction_left", "super+ctrl+Left"),
+            (Side::Right, "direction_right", "super+ctrl+Right"),
+            (Side::Up, "direction_up", "super+ctrl+Up"),
+            (Side::Down, "direction_down", "super+ctrl+Down"),
         ]
         .into_iter()
         .filter_map(|(side, key, default)| {
@@ -219,10 +261,41 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             Some((side, parsed?))
         })
         .collect(),
+        close_key: file.get("close").and_then(|spec| {
+            let parsed = KeySpec::parse(spec);
+            if parsed.is_none() {
+                tracing::warn!("ignoring `close = {spec}`: not a key like super+q");
+            }
+            parsed
+        }),
+        launcher_key: file.get("launcher").and_then(|spec| {
+            let parsed = KeySpec::parse(spec);
+            if parsed.is_none() {
+                tracing::warn!("ignoring `launcher = {spec}`: not a key like super+d");
+            }
+            parsed
+        }),
+        follow: file.get("follow").is_some_and(|value| {
+            let parsed = bool_value(value);
+            if parsed.is_none() {
+                tracing::warn!("ignoring `follow = {value}`: not true or false");
+            }
+            parsed.unwrap_or(false)
+        }),
         outputs: outputs(file),
         input: input(file),
         font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
+        icon_theme: file.get("icon_theme").cloned().unwrap_or_default(),
+        exec: Vec::new(),
     }
+}
+
+fn number(file: &HashMap<String, String>, key: &str, default: i32, range: std::ops::RangeInclusive<i32>) -> i32 {
+    let Some(value) = file.get(key) else { return default };
+    value.parse().ok().filter(|v| range.contains(v)).unwrap_or_else(|| {
+        tracing::warn!("ignoring `{key} = {value}`: not a number from {} to {}", range.start(), range.end());
+        default
+    })
 }
 
 fn bool_value(value: &str) -> Option<bool> {
@@ -300,6 +373,7 @@ mod tests {
         assert_eq!(KeySpec::parse("Ctrl + Alt + h").unwrap().key, Keysym::h);
         assert!(KeySpec::parse("hyper+Right").is_none());
         assert!(KeySpec::parse("super+NotAKey").is_none());
+        assert_eq!(KeySpec::parse("super+'").unwrap().key, Keysym::apostrophe);
         let mods = |logo, shift| ModifiersState { logo, shift, ..Default::default() };
         assert!(spec.matches(&mods(true, false), Keysym::Right));
         assert!(!spec.matches(&mods(true, true), Keysym::Right));
@@ -311,8 +385,46 @@ mod tests {
         let c = resolve(&parse("direction_left = ctrl+alt+Left\ndirection_up = nonsense+Up\n"), &|_| None);
         let key = |side| c.direction_keys.iter().find(|(s, _)| *s == side).map(|(_, k)| *k);
         assert_eq!(key(Side::Left), KeySpec::parse("ctrl+alt+Left"));
-        assert_eq!(key(Side::Right), KeySpec::parse("super+Right"));
+        assert_eq!(key(Side::Right), KeySpec::parse("super+ctrl+Right"));
         assert_eq!(key(Side::Up), None); // invalid: no binding rather than a wrong one
+    }
+
+    #[test]
+    fn close_key() {
+        assert_eq!(resolve(&parse(""), &|_| None).close_key, None);
+        let c = resolve(&parse("close = super+'\n"), &|_| None);
+        assert_eq!(c.close_key, KeySpec::parse("super+apostrophe"));
+    }
+
+    #[test]
+    fn every_exec_line_counts() {
+        let text = "exec = waybar -c ~/.config/waybar/dune.jsonc\nterminal = foot\nexec = mako  # notifications\nexec =\n";
+        assert_eq!(execs(text), ["waybar -c ~/.config/waybar/dune.jsonc", "mako"]);
+        assert!(execs("").is_empty());
+    }
+
+    #[test]
+    fn key_repeat() {
+        let config = resolve(&parse(""), &|_| None);
+        assert_eq!((config.repeat_delay, config.repeat_rate), (500, 25));
+        let config = resolve(&parse("repeat_delay = 600\nrepeat_rate = 30\n"), &|_| None);
+        assert_eq!((config.repeat_delay, config.repeat_rate), (600, 30));
+        let config = resolve(&parse("repeat_delay = 5\nrepeat_rate = fast\n"), &|_| None);
+        assert_eq!((config.repeat_delay, config.repeat_rate), (500, 25));
+    }
+
+    #[test]
+    fn follow() {
+        assert!(!resolve(&parse(""), &|_| None).follow);
+        assert!(resolve(&parse("follow = true\n"), &|_| None).follow);
+        assert!(!resolve(&parse("follow = maybe\n"), &|_| None).follow);
+    }
+
+    #[test]
+    fn launcher_key() {
+        assert_eq!(resolve(&parse(""), &|_| None).launcher_key, None);
+        let c = resolve(&parse("launcher = super+e\n"), &|_| None);
+        assert_eq!(c.launcher_key, KeySpec::parse("super+e"));
     }
 
     #[test]

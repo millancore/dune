@@ -1,8 +1,9 @@
-//! dune-term settings, read from dune's config file (`~/.config/dune/config`):
+//! dune-term settings, in their own file `~/.config/dune/term`
+//! (or `$XDG_CONFIG_HOME/dune/term`), apart from the compositor's `config`:
 //!
 //! ```text
 //! font_family = JetBrains Mono
-//! font_size = 17          # points
+//! font_size = 14          # points
 //! ```
 
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             font_family: "monospace".into(),
-            font_size: 12.0,
+            font_size: 14.0,
         }
     }
 }
@@ -27,7 +28,7 @@ pub fn load() -> Config {
     let path = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|base| base.join("dune").join("config"));
+        .map(|base| base.join("dune").join("term"));
     let text = path.and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     parse(&text)
 }

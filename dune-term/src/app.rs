@@ -149,7 +149,7 @@ pub struct App {
     pty: EventLoopSender,
     grid: (usize, usize),
 
-    /// dune's `@` layer, when running as a dune tile.
+    /// dune's layer (`dune_common::at`), when running as a dune tile.
     at: Option<AtLayer>,
     /// The PTY (a duplicate of its descriptor) and the shell, to tell whether the
     /// shell is at its prompt.
@@ -206,7 +206,7 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let term = Arc::new(FairMutex::new(term));
 
     let mut options = tty::Options::default();
-    // Inside dune, `$SHELL` is dune's wrapper doing the `@` layer for any terminal;
+    // Inside dune, `$SHELL` is dune's wrapper doing the dune layer for any terminal;
     // dune-term does that layer itself, so it starts the user's shell directly.
     let mut at_layer = None;
     if let Some((program, args)) = command.split_first() {
@@ -250,7 +250,7 @@ pub fn run(command: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e| e.to_string())?;
 
-    // Notice prompts coming back (end of an `@prog`) and run the tile's first command.
+    // Notice prompts coming back (end of a program run in place) and run the tile's first command.
     event_loop
         .handle()
         .insert_source(Timer::from_duration(Duration::from_millis(200)), |_, _, app| {
@@ -403,7 +403,7 @@ impl App {
         }
     }
 
-    /// Typed bytes on their way to the shell, through the `@` layer when in dune.
+    /// Typed bytes on their way to the shell, through the dune layer when in dune.
     fn send_typed(&mut self, bytes: Vec<u8>) {
         // Keys typed while an Enter waits for the shell go after it, in order.
         if self.pending_enter.is_some() {
@@ -419,7 +419,7 @@ impl App {
         }
         // Enter on a typed command line: read the line once the shell has drawn all of
         // it (a busy shell can lag behind fast typing), then decide where it runs.
-        if bytes == b"\r" && at_prompt && at.picker().is_none() && !at.line_is_empty() {
+        if bytes == b"\r" && at_prompt && !at.line_is_empty() {
             self.pending_enter = Some(Instant::now());
             return self.try_finish_enter();
         }
@@ -427,12 +427,10 @@ impl App {
         let typed = bytes.clone();
         let bytes = self.at.as_mut().unwrap().input(&bytes, at_prompt);
         debug(format_args!(
-            "key {:?} at_prompt={at_prompt} picker={} -> shell {:?}",
+            "key {:?} at_prompt={at_prompt} -> shell {:?}",
             String::from_utf8_lossy(&typed),
-            self.at.as_ref().unwrap().picker().map_or("-".into(), |p| format!("{}{}", dune_common::picker::TRIGGER, p.input())),
             String::from_utf8_lossy(&bytes)
         ));
-        self.request_redraw(); // the picker may have opened, changed or closed
         if !bytes.is_empty() {
             self.write(bytes);
         }
@@ -599,11 +597,6 @@ impl App {
     /// Insert text as typed, bracketed when the application asked for it so a shell
     /// doesn't run pasted lines on its own.
     fn paste(&mut self, text: &str) {
-        if let Some(at) = self.at.as_mut().filter(|a| a.picker().is_some()) {
-            let bytes = at.input(text.replace(['\r', '\n'], " ").as_bytes(), true);
-            self.request_redraw();
-            return self.write(bytes);
-        }
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         let bytes = if bracketed {
             // A paste must not be able to end the bracket itself.
@@ -795,8 +788,7 @@ impl App {
         {
             let term = self.term.lock();
             let mut canvas = Canvas { pixels, width, height };
-            let picker = self.at.as_ref().and_then(|a| a.picker());
-            render::draw(&mut canvas, &term, &mut self.font, self.focused, picker);
+            render::draw(&mut canvas, &term, &mut self.font, self.focused);
         }
 
         let surface = self.window.wl_surface();

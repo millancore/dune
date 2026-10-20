@@ -1,10 +1,10 @@
-//! The shell wrapper: dune's `@` layer for terminals other than dune-term.
+//! The shell wrapper: dune's layer for terminals other than dune-term.
 //!
 //! Terminal tiles are started with `SHELL` pointing at dune (as `dune-shell`), so any
 //! terminal emulator runs this instead of the user's shell. It starts the real shell
 //! (`DUNE_USER_SHELL`) on a new PTY and copies bytes both ways, passing what is typed
-//! through the shared `@` layer (`dune_common::at`) and drawing its picker with escape
-//! codes. dune-term does the same natively and runs the shell itself.
+//! through the shared layer (`dune_common::at`). dune-term does the same natively and
+//! runs the shell itself.
 
 use std::{
     ffi::{CString, OsString},
@@ -14,10 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dune_common::{
-    at::AtLayer,
-    picker::{MAX_ROWS, Picker, TRIGGER},
-};
+use dune_common::at::AtLayer;
 use nix::{
     errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -72,7 +69,7 @@ pub fn run(argv0: &str, args: Vec<OsString>) -> ! {
     let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &raw);
 
     let at = AtLayer::from_env(child.as_raw() as u32);
-    let code = Wrapper { child, master, at, drawn: false }.run();
+    let code = Wrapper { child, master, at }.run();
 
     let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &saved);
     std::process::exit(code);
@@ -130,8 +127,6 @@ struct Wrapper {
     child: Pid,
     master: OwnedFd,
     at: AtLayer,
-    /// The picker is on screen (rows reserved below the prompt).
-    drawn: bool,
 }
 
 impl Wrapper {
@@ -184,7 +179,6 @@ impl Wrapper {
                     Ok(n) => {
                         let at_prompt = self.at_prompt();
                         let to_shell = self.at.input(&buf[..n], at_prompt);
-                        self.redraw_picker();
                         write_all(self.master.as_fd(), &to_shell);
                     }
                     Err(_) => {}
@@ -193,7 +187,6 @@ impl Wrapper {
             if signal_ready && let Some(sigfd) = &sigfd {
                 while let Ok(Some(_)) = sigfd.read_signal() {}
                 set_winsize(self.master.as_fd(), &get_winsize(stdin.as_fd()));
-                self.redraw_picker();
                 if let Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) =
                     waitpid(self.child, Some(WaitPidFlag::WNOHANG))
                 {
@@ -215,53 +208,4 @@ impl Wrapper {
     fn at_prompt(&self) -> bool {
         tcgetpgrp(self.master.as_fd()).is_ok_and(|pgrp| pgrp == self.child)
     }
-
-    /// Bring the screen in line with the picker: open, update or clear it.
-    fn redraw_picker(&mut self) {
-        let mut out = std::io::stdout().lock();
-        match self.at.picker() {
-            Some(picker) => {
-                if !self.drawn {
-                    // Make room below the prompt (scrolling if needed), then remember the spot.
-                    let rows = MAX_ROWS + 1;
-                    let _ = write!(out, "{}\x1b[{rows}A\x1b7", "\n".repeat(rows));
-                    self.drawn = true;
-                }
-                let cols = (get_winsize(std::io::stdin().as_fd()).ws_col as usize).max(20);
-                let _ = out.write_all(draw(picker, cols).as_bytes());
-            }
-            None if self.drawn => {
-                let _ = out.write_all(b"\x1b8\x1b[J");
-                self.drawn = false;
-            }
-            None => {}
-        }
-        let _ = out.flush();
-    }
-}
-
-/// The picker as escape codes, drawn from the saved cursor position (the prompt).
-fn draw(picker: &Picker, cols: usize) -> String {
-    let fit = |s: &str, width: usize| s.chars().take(width).collect::<String>();
-
-    let mut s = String::from("\x1b8\x1b[J");
-    let line = format!("{}{}", TRIGGER, picker.input());
-    s += &format!("\x1b[1m{line}\x1b[0m");
-    let (first, rows) = picker.window();
-    for (i, c) in rows.iter().enumerate() {
-        let label = fit(&c.label, cols.saturating_sub(4));
-        if first + i == picker.selected() {
-            s += &format!("\r\n  \x1b[7m {label} \x1b[0m");
-        } else {
-            s += &format!("\r\n   {label}");
-        }
-    }
-    s += &format!("\r\n\x1b[2m  {}\x1b[0m", fit(dune_common::picker::HINT, cols.saturating_sub(2)));
-    // Back to the end of the @ line.
-    s += "\x1b8";
-    let width = line.chars().count();
-    if width > 0 {
-        s += &format!("\x1b[{width}C");
-    }
-    s
 }

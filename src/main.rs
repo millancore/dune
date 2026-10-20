@@ -2,9 +2,13 @@
 
 mod config;
 mod cursor;
+mod desktops;
+mod floating;
 mod handlers;
+mod icons;
 mod input;
 mod ipc;
+mod launcher;
 mod layout;
 mod reload;
 mod render;
@@ -14,6 +18,7 @@ mod tab_title;
 mod tiling;
 mod udev;
 mod winit;
+mod workspaces;
 
 use std::path::{Path, PathBuf};
 
@@ -101,6 +106,14 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
         std::env::set_var("DUNE_SOCKET", &socket);
         std::env::remove_var("DISPLAY");
+        // Clients pick their own cursor size; without these, X11 apps (libXcursor)
+        // derive it from the screen size and draw a huge pointer.
+        if std::env::var_os("XCURSOR_THEME").is_none() {
+            std::env::set_var("XCURSOR_THEME", "default");
+        }
+        if std::env::var_os("XCURSOR_SIZE").is_none() {
+            std::env::set_var("XCURSOR_SIZE", "24");
+        }
     }
     tracing::info!("listening on {name:?}, control socket {socket:?}, shell {:?}", state.user_shell);
 
@@ -122,15 +135,20 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_var("XDG_CURRENT_DESKTOP", "dune");
             std::env::set_var("XDG_SESSION_TYPE", "wayland");
         }
-        let vars = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DUNE_SOCKET"];
+        let vars = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DUNE_SOCKET", "XCURSOR_THEME", "XCURSOR_SIZE"];
         match std::process::Command::new("dbus-update-activation-environment").arg("--systemd").args(vars).status() {
             Ok(status) if status.success() => {}
             other => tracing::warn!("could not export the session environment to systemd/D-Bus: {other:?}"),
         }
     }
 
+    // `exec` lines of the config: bars, notification daemons...
+    for command in &state.config.exec {
+        autostart(command);
+    }
+
     // The basic unit: start with one terminal.
-    state.spawn_terminal(None, None, None, None);
+    let _ = state.spawn_terminal(None, None, None, None);
 
     event_loop.run(None, &mut state, |_| {})?;
 
@@ -143,6 +161,25 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_dir_all(link.parent().unwrap());
     }
     Ok(())
+}
+
+/// Run an `exec` line of the config through the shell, on its own.
+fn autostart(command: &str) {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(command).env_remove("DUNE_TILE").env_remove("DUNE_RUN").env_remove("DUNE_LAUNCH");
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.current_dir(home);
+    }
+    match cmd.spawn() {
+        Ok(mut child) => {
+            tracing::info!("started `{command}`");
+            // Reap it when it exits so it doesn't linger as a zombie.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(err) => tracing::warn!("cannot start `{command}`: {err}"),
+    }
 }
 
 /// Start xwayland-satellite on the first free X display (`:0` is often taken by the

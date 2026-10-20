@@ -54,8 +54,16 @@ impl Dune {
         {
             tracing::error!("invalid keyboard layout in the dune config, keeping the current one");
         }
+        if (config.repeat_delay, config.repeat_rate) != (old.repeat_delay, old.repeat_rate)
+            && let Some(handle) = self.seat.get_keyboard()
+        {
+            handle.change_repeat_info(config.repeat_rate, config.repeat_delay);
+        }
         if self.config.font_family != old.font_family {
             self.tab_titles = crate::tab_title::TabTitles::new(&self.config.font_family);
+        }
+        if (&self.config.font_family, &self.config.icon_theme) != (&old.font_family, &old.icon_theme) {
+            self.launcher = crate::launcher::Launcher::new(&self.config.font_family, &self.config.icon_theme);
         }
         if self.config.input != old.input {
             self.configure_input_devices();

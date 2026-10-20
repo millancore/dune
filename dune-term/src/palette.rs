@@ -32,10 +32,6 @@ pub fn background(colors: &Colors) -> Rgb {
     resolve(Color::Named(NamedColor::Background), colors)
 }
 
-pub fn foreground(colors: &Colors) -> Rgb {
-    resolve(Color::Named(NamedColor::Foreground), colors)
-}
-
 /// A color as set by the application (OSC overrides in `colors`), else our palette.
 pub fn resolve(color: Color, colors: &Colors) -> Rgb {
     match color {
@@ -129,6 +125,6 @@ mod tests {
         let custom = Rgb { r: 9, g: 9, b: 9 };
         colors[NamedColor::Background] = Some(custom);
         assert_eq!(background(&colors), custom);
-        assert_eq!(foreground(&colors), FOREGROUND);
+        assert_eq!(resolve(Color::Named(NamedColor::Foreground), &colors), FOREGROUND);
     }
 }
