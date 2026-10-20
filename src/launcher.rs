@@ -33,19 +33,19 @@ use crate::{
 };
 
 /// Text size, in pixels.
-const FONT_SIZE: f32 = 18.0;
+pub(crate) const FONT_SIZE: f32 = 18.0;
 /// Characters across the panel.
-const COLUMNS: usize = 60;
-const PADDING: i32 = 16;
+pub(crate) const COLUMNS: usize = 60;
+pub(crate) const PADDING: i32 = 16;
 /// Space around an icon, inside its line.
-const ICON_MARGIN: i32 = 2;
-const FRAME: i32 = 2;
-const BACKGROUND: [u8; 3] = [0x1e, 0x20, 0x30];
-const FRAME_COLOR: [u8; 3] = [0x5c, 0x9e, 0xf2];
-const SELECTED: [u8; 3] = [0x3b, 0x42, 0x61];
-const TEXT: [u8; 3] = [0xd8, 0xdc, 0xe6];
-const DIM: [u8; 3] = [0x7f, 0x84, 0x9c];
-const ACCENT: [u8; 3] = [0xfa, 0x9e, 0x38];
+pub(crate) const ICON_MARGIN: i32 = 2;
+pub(crate) const FRAME: i32 = 2;
+pub(crate) const BACKGROUND: [u8; 3] = [0x1e, 0x20, 0x30];
+pub(crate) const FRAME_COLOR: [u8; 3] = [0x5c, 0x9e, 0xf2];
+pub(crate) const SELECTED: [u8; 3] = [0x3b, 0x42, 0x61];
+pub(crate) const TEXT: [u8; 3] = [0xd8, 0xdc, 0xe6];
+pub(crate) const DIM: [u8; 3] = [0x7f, 0x84, 0x9c];
+pub(crate) const ACCENT: [u8; 3] = [0xfa, 0x9e, 0x38];
 const HINT: &str = "@3 desk · @m2 monitor · @t tab · @f float · Ctrl+arrows";
 const DEST_HELP: &str = "@: 1-9 desktop · m1-m9 monitor · t tab · n new · f float";
 const SLOT_HINT: &str = "Enter: terminal · or pick a program · Esc: cancel";
@@ -572,7 +572,7 @@ fn runs_gui_app(gui: &[App], command: &str) -> bool {
 }
 
 /// Height of one line of text.
-fn line_height(font: Option<&Font>) -> i32 {
+pub(crate) fn line_height(font: Option<&Font>) -> i32 {
     font.map_or(24, |f| f.cell_height as i32 + 6)
 }
 
@@ -625,14 +625,14 @@ fn draw(font: Option<&mut Font>, icons: &mut Icons, session: &Session, (w, h): (
     canvas.pixels
 }
 
-struct Canvas {
-    pixels: Vec<u8>,
-    w: i32,
-    h: i32,
+pub(crate) struct Canvas {
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
 }
 
 impl Canvas {
-    fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: [u8; 3]) {
+    pub(crate) fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: [u8; 3]) {
         for py in y.max(0)..(y + h).min(self.h) {
             for px in x.max(0)..(x + w).min(self.w) {
                 let at = ((py * self.w + px) * 4) as usize;
@@ -642,7 +642,7 @@ impl Canvas {
     }
 
     /// Blend `icon` (RGBA premultiplied) with its top-left corner at (x, y).
-    fn image(&mut self, x: i32, y: i32, icon: &Icon) {
+    pub(crate) fn image(&mut self, x: i32, y: i32, icon: &Icon) {
         let size = icon.size as i32;
         for iy in 0..size {
             for ix in 0..size {
@@ -666,7 +666,7 @@ impl Canvas {
 
     /// `text` in a line of `height` pixels starting at (x, y), cut with `…` past `cols`.
     #[allow(clippy::too_many_arguments)]
-    fn text(&mut self, font: &mut Font, x: i32, y: i32, height: i32, text: &str, rgb: [u8; 3], cols: usize) {
+    pub(crate) fn text(&mut self, font: &mut Font, x: i32, y: i32, height: i32, text: &str, rgb: [u8; 3], cols: usize) {
         let mut chars: Vec<char> = text.chars().collect();
         if chars.len() > cols {
             chars.truncate(cols.saturating_sub(1));

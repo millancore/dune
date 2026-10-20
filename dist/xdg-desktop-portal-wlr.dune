@@ -1,0 +1,6 @@
+# xdg-desktop-portal-wlr settings for dune (install as
+# ~/.config/xdg-desktop-portal-wlr/dune): when a page asks to share the screen,
+# click the monitor to share.
+[screencast]
+chooser_type=simple
+chooser_cmd=slurp -f %o -or -c '#89b4faff' -b '#00000066'

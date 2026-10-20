@@ -31,12 +31,12 @@ use crate::{
 
 pub const BACKGROUND: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
 const FOCUS_COLOR: [f32; 4] = [0.36, 0.62, 0.95, 1.0];
-/// The border of every tile that does not have focus.
-const BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The direction indicator: a bar on the side where the next command will open.
 const DIRECTION_COLOR: [f32; 4] = [0.98, 0.62, 0.22, 1.0];
 /// Where a dragged tile will land (premultiplied, translucent).
 const DROP_COLOR: [f32; 4] = [0.36 * 0.35, 0.62 * 0.35, 0.95 * 0.35, 0.35];
+/// How far the marks of tiles past a screen edge float in from it, in pixels.
+const EDGE_MARK_INSET: i32 = 4;
 /// Darkens the tile being dragged (premultiplied, translucent).
 const DRAGGED_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
 
@@ -69,9 +69,10 @@ impl Dune {
         self.geometries.iter().find(|(t, _)| *t == tile).map(|(_, r)| *r)
     }
 
-    /// `rect` of the shown tab `tile` grown to take in its container's bar, if it has one.
-    fn with_tab_bar(&self, tile: TileId, rect: Rect) -> Rect {
-        match self.tab_bars.iter().find(|b| b.active == tile) {
+    /// A tile's `rect` grown to take in its column's bar, when it fills the shown tab's width
+    /// right under it.
+    fn with_tab_bar(&self, rect: Rect) -> Rect {
+        match self.tab_bars.iter().find(|b| b.rect.x == rect.x && b.rect.w == rect.w && b.rect.y + b.rect.h == rect.y) {
             Some(bar) => Rect::new(rect.x, bar.rect.y, rect.w, rect.y + rect.h - bar.rect.y),
             None => rect,
         }
@@ -111,7 +112,7 @@ impl Dune {
             .tiles
             .keys()
             .filter(|t| only(**t))
-            .filter_map(|t| Some((*t, self.with_tab_bar(*t, self.shown_rect(*t, output)?))))
+            .filter_map(|t| Some((*t, self.with_tab_bar(self.shown_rect(*t, output)?))))
             .collect();
         let tile_rect = |tile: &TileId| rects.get(tile).copied();
         let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
@@ -139,7 +140,10 @@ impl Dune {
         let order = self.shown.iter().filter(|(t, _)| Some(*t) == focused).chain(self.shown.iter().filter(|(t, _)| Some(*t) != focused));
         for (tile, _) in order {
             let Some(rect) = tile_rect(tile) else { continue };
-            let color = if self.focused == Some(*tile) { FOCUS_COLOR } else { BORDER_COLOR };
+            // Tiles without focus take `border_color`, and have no border when it is `none`.
+            let Some(color) = (if self.focused == Some(*tile) { Some(FOCUS_COLOR) } else { self.config.border_color }) else {
+                continue;
+            };
             let buffers = decorations.borders.entry(*tile).or_default();
             for (buffer, (x, y, w, h)) in buffers.iter_mut().zip(border_edges(rect)) {
                 buffer.update((w, h), color);
@@ -246,8 +250,10 @@ impl Dune {
     {
         let mut elements = if with_pointer { self.pointer_elements(renderer, output) } else { Vec::new() };
         elements.extend(self.launcher_elements(renderer, output));
+        elements.extend(self.switcher_elements(renderer, output));
         elements.extend(self.drag_elements(output).into_iter().map(OutputRenderElements::Solid));
         elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay, Layer::Top]));
+        elements.extend(self.edge_mark_elements(renderer, output));
         // Floats, front to back, each with its border over its window, above the strip.
         let floats: Vec<TileId> = self.floating.get(&output.name()).into_iter().flatten().rev().map(|(t, _)| *t).collect();
         for float in &floats {
@@ -260,6 +266,30 @@ impl Dune {
         elements.extend(tabs);
         elements.extend(self.window_elements(renderer, output, &tiled));
         elements.extend(self.layer_elements(renderer, output, &[Layer::Bottom, Layer::Background]));
+        elements
+    }
+
+    /// The marks floating at the left and right edges of `output` when tiles of its strip
+    /// are past them, telling how many: `‹3`, `2›`.
+    fn edge_mark_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Clone + Send + 'static,
+    {
+        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
+        let (left, right) = self.edge_counts.get(&output.name()).copied().unwrap_or_default();
+        let mut elements = Vec::new();
+        for (is_left, n) in [(true, left), (false, right)] {
+            if n == 0 {
+                continue;
+            }
+            let (buffer, (w, h)) = self.tab_titles.edge_mark(is_left, n);
+            let x = if is_left { EDGE_MARK_INSET } else { geo.size.w - w - EDGE_MARK_INSET };
+            let at = Point::<f64, Physical>::from((x as f64, ((geo.size.h - h) / 2) as f64));
+            if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
+                elements.push(OutputRenderElements::Image(e));
+            }
+        }
         elements
     }
 
@@ -283,6 +313,23 @@ impl Dune {
             None => (geo.loc.x + (geo.size.w - w) / 2, geo.loc.y + ((geo.size.h - h) / 4).max(0)),
         };
         let at = Point::<f64, Physical>::from(((x - geo.loc.x) as f64, (y - geo.loc.y) as f64));
+        MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
+            .map(|e| vec![OutputRenderElements::Image(e)])
+            .unwrap_or_default()
+    }
+
+    /// The switcher panel, centered across `output` a quarter of the way down.
+    fn switcher_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Clone + Send + 'static,
+    {
+        if self.switcher.output() != Some(output.name().as_str()) {
+            return Vec::new();
+        }
+        let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
+        let Some((buffer, (w, h))) = self.switcher.image(geo.size.w - 2 * GAP) else { return Vec::new() };
+        let at = Point::<f64, Physical>::from((((geo.size.w - w) / 2) as f64, ((geo.size.h - h) / 4).max(0) as f64));
         MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
             .map(|e| vec![OutputRenderElements::Image(e)])
             .unwrap_or_default()

@@ -47,13 +47,19 @@ enum Action {
     Launcher,
     /// A key pressed while the launcher is open, with the character it types.
     LauncherKey(ModifiersState, Keysym, Option<char>),
+    /// Mod+/, or the `switcher` key: show the window switcher (again: hide it).
+    Switcher,
+    /// A key pressed while the switcher is open, with the character it types.
+    SwitcherKey(ModifiersState, Keysym, Option<char>),
     /// Keys released while the launcher is open go nowhere.
     Swallowed,
-    /// Mod+Tab / Mod+Shift+Tab: the next / previous tab of the focused container.
+    /// Mod+Tab / Mod+Shift+Tab: the next / previous tab of the focused column.
     CycleTab(i32),
-    /// Mod+Ctrl+direction: join the container that way as a tab, or leave a tabbed one.
+    /// Mod+Ctrl+direction: join the column that way as a tab, or leave a tabbed one.
     MoveTab(Direction),
-    /// Mod+t: the windows stacked in the focused tile become tabs of its container.
+    /// Mod+t: the focused tile leaves the tiles it shares a tab with for a tab of its own
+    /// in its column; alone, the windows stacked in it become tabs of its column; a tab
+    /// with none goes back where it was in its column, or out of the tabs.
     StackToTabs,
     /// Mod+1..9: show that desktop on the active monitor.
     Desk(u8),
@@ -71,6 +77,28 @@ const BTN_RIGHT: u32 = 0x111;
 const CLICK_SLOP: f64 = 4.0;
 /// Scroll distance of one wheel notch (as smithay reports it).
 const SCROLL_NOTCH: f64 = 15.0;
+
+/// Pixels the pointer pushes against a screen edge before the strip starts sliding.
+const EDGE_RESISTANCE: f64 = 50.0;
+/// Pixels the strip slides per pixel the pointer pushes past the resistance.
+const EDGE_SPEED: f64 = 2.0;
+
+/// The pointer, already at a left/right screen edge (`at_edge`), went `over` pixels past it
+/// (right: positive; 0: not pushing): what has been pushed so far goes in `pushed`, and once
+/// past `EDGE_RESISTANCE` the pixels to slide the strip. Leaving the edge starts over.
+fn edge_slide(pushed: &mut f64, at_edge: bool, over: f64) -> i32 {
+    if !at_edge || over == 0.0 {
+        *pushed = 0.0;
+        return 0;
+    }
+    let before = *pushed;
+    *pushed += over.abs();
+    let past = *pushed - before.max(EDGE_RESISTANCE);
+    if past <= 0.0 {
+        return 0;
+    }
+    (past * EDGE_SPEED * over.signum()).round() as i32
+}
 
 /// Width/height change for a Super+scroll: a wheel notch is one resize step, up grows.
 fn scroll_resize_delta(vertical_scroll: f64) -> f64 {
@@ -100,6 +128,9 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
     }
     if config.launcher_key.is_some_and(|key| key.matches(mods, sym)) {
         return Some(Action::Launcher);
+    }
+    if config.switcher_key.is_some_and(|key| key.matches(mods, sym)) {
+        return Some(Action::Switcher);
     }
     let modifier = config.modifier.as_str();
     if !modifier_held(modifier, mods) {
@@ -140,6 +171,7 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
         Keysym::equal | Keysym::plus => Some(Action::Width(RESIZE_STEP)),
         Keysym::minus => Some(Action::Width(-RESIZE_STEP)),
         Keysym::d if config.launcher_key.is_none() => Some(Action::Launcher),
+        Keysym::slash if config.switcher_key.is_none() => Some(Action::Switcher),
         Keysym::r => Some(Action::CycleWidth),
         Keysym::f => Some(Action::FullWidth),
         Keysym::space if mods.shift => Some(Action::ToggleFloat),
@@ -187,6 +219,19 @@ mod tests {
     }
 
     #[test]
+    fn pushing_a_screen_edge_slides_past_the_resistance() {
+        let mut pushed = 0.0;
+        // Arriving at the edge does not count.
+        assert_eq!(edge_slide(&mut pushed, false, 30.0), 0);
+        assert_eq!(edge_slide(&mut pushed, true, 30.0), 0);
+        assert_eq!(edge_slide(&mut pushed, true, 30.0), (10.0 * EDGE_SPEED) as i32);
+        assert_eq!(edge_slide(&mut pushed, true, 5.0), (5.0 * EDGE_SPEED) as i32);
+        // Moving off the edge starts over; the left edge slides the other way.
+        assert_eq!(edge_slide(&mut pushed, true, 0.0), 0);
+        assert_eq!(edge_slide(&mut pushed, true, -60.0), -(10.0 * EDGE_SPEED) as i32);
+    }
+
+    #[test]
     fn scroll_resize_steps() {
         assert_eq!(scroll_resize_delta(-15.0), RESIZE_STEP); // one notch up grows
         assert_eq!(scroll_resize_delta(30.0), -2.0 * RESIZE_STEP);
@@ -206,13 +251,16 @@ mod tests {
             direction_keys: Vec::new(),
             close_key: None,
             launcher_key: None,
+            switcher_key: None,
             follow: false,
             focus_follows_mouse: false,
             xwayland: String::new(),
             outputs: Default::default(),
             input: Default::default(),
             font_family: String::new(),
+            tab_widths: Default::default(),
             icon_theme: String::new(),
+            border_color: None,
             exec: Vec::new(),
         }
     }
@@ -249,6 +297,7 @@ mod tests {
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::MoveTab(Direction::Left))));
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::j), Some(Action::MoveTab(Direction::Down))));
         assert!(matches!(action_for(&config, &alt, Keysym::t), Some(Action::StackToTabs)));
+        assert!(matches!(action_for(&config, &alt, Keysym::slash), Some(Action::Switcher)));
         assert!(matches!(action_for(&config, &alt_shift, Keysym::Left), Some(Action::Swap(Direction::Left))));
         // With Ctrl in the modifier, Ctrl+direction stays a focus move.
         let config = test_config("ctrl+alt");
@@ -307,6 +356,19 @@ impl Dune {
         clamp_to(&geos, pos)
     }
 
+    /// Slide the strip of the output under `pos` by `dx` pixels (none: nothing).
+    fn slide_strip(&mut self, pos: Point<f64, Logical>, dx: i32) {
+        if dx == 0 {
+            return;
+        }
+        let Some(name) = self.space.output_under(pos).next().map(|o| o.name()) else { return };
+        let focus = self.focused;
+        if let Some(layout) = self.layouts.get_mut(&name) {
+            layout.slide_view(dx, focus);
+            self.arrange();
+        }
+    }
+
     /// Mod+right drag: the tile under the pointer follows it, right/down growing it.
     fn drag_resize(&mut self, pos: Point<f64, Logical>) {
         let Some((id, last)) = self.resize_drag else { return };
@@ -341,9 +403,9 @@ impl Dune {
 
     /// `focus_follows_mouse`: the tile under the pointer takes focus, unless part of it is
     /// off screen (focusing it would slide the view under the pointer), a button or drag
-    /// is going on, or the launcher is open.
+    /// is going on, or the launcher or switcher is open.
     fn hover_focus(&mut self, pos: Point<f64, Logical>) {
-        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.launcher.output().is_some();
+        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.launcher.output().is_some() || self.switcher.is_open();
         if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed() {
             return;
         }
@@ -371,6 +433,8 @@ impl Dune {
             Action::EmptyContainer => self.open_empty_container(),
             Action::Launcher => self.toggle_launcher(),
             Action::LauncherKey(mods, sym, text) => self.launcher_key(mods, sym, text),
+            Action::Switcher => self.toggle_switcher(),
+            Action::SwitcherKey(mods, sym, text) => self.switcher_key(mods, sym, text),
             Action::Swallowed => {}
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
@@ -420,6 +484,16 @@ impl Dune {
                     };
                     return FilterResult::Intercept(action);
                 }
+                if state.switcher.is_open() {
+                    // The switcher takes the keyboard too; its own key still closes it.
+                    let sym = handle.modified_sym();
+                    let action = match action_for(&config, mods, handle.raw_latin_sym_or_raw_current_sym().unwrap_or(sym)) {
+                        Some(Action::Switcher) if pressed => Action::Switcher,
+                        _ if pressed => Action::SwitcherKey(*mods, sym, sym.key_char()),
+                        _ => Action::Swallowed,
+                    };
+                    return FilterResult::Intercept(action);
+                }
                 match handle
                     .raw_latin_sym_or_raw_current_sym()
                     .and_then(|sym| action_for(&config, mods, sym))
@@ -454,7 +528,14 @@ impl Dune {
                 if matches!(constraint, Some(Constraint::Locked)) {
                     return pointer.frame(self);
                 }
-                let mut pos = self.clamp_to_outputs(current + event.delta());
+                let wanted = current + event.delta();
+                let mut pos = self.clamp_to_outputs(wanted);
+                // Pushing on against a left/right screen edge slides the strip there (not
+                // for a pointer a game confines).
+                if constraint.is_none() {
+                    let dx = edge_slide(&mut self.edge_push, (pos.x - current.x).abs() < 0.5, wanted.x - pos.x);
+                    self.slide_strip(pos, dx);
+                }
                 // A confined one stays on its surface, inside the region.
                 if let (Some(Constraint::Confined(region)), Some((surface, origin))) = (&constraint, &before) {
                     let inside = |p: Point<f64, Logical>| region.as_ref().is_none_or(|r| r.contains((p - *origin).to_i32_round()));
@@ -535,7 +616,8 @@ impl Dune {
 
                 // Mod+left button drags move the tile: it lands where the button is released,
                 // on this monitor or another one; a float just goes where it is dragged. Let go
-                // on a tab bar, either one joins that container as a tab.
+                // on a tab bar, either one joins that container as a tab. A tab grabbed in its
+                // bar and let go there takes the place under the pointer.
                 // A Mod+click without moving floats the tile, or puts a float back.
                 if event.button_code() == BTN_LEFT {
                     let pos = pointer.current_location();
@@ -554,7 +636,7 @@ impl Dune {
                     }
                     if button_state == ButtonState::Pressed
                         && modifier_held(&self.config.modifier, &mods)
-                        && let Some(id) = self.tile_at(pos.x, pos.y)
+                        && let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y))
                     {
                         self.focus_tile(id);
                         let from = self.float_rect(id);

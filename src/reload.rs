@@ -59,8 +59,8 @@ impl Dune {
         {
             handle.change_repeat_info(config.repeat_rate, config.repeat_delay);
         }
-        if self.config.font_family != old.font_family {
-            self.tab_titles = crate::tab_title::TabTitles::new(&self.config.font_family);
+        if (&self.config.font_family, self.config.tab_widths) != (&old.font_family, old.tab_widths) {
+            self.tab_titles = crate::tab_title::TabTitles::new(&self.config.font_family, self.config.tab_widths);
         }
         if (&self.config.font_family, &self.config.icon_theme) != (&old.font_family, &old.icon_theme) {
             self.launcher = crate::launcher::Launcher::new(&self.config.font_family, &self.config.icon_theme);

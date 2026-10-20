@@ -87,6 +87,7 @@ pub fn init_winit(event_loop: &mut EventLoop<Dune>, state: &mut Dune) -> Result<
                 backend.submit(Some(&[damage])).unwrap();
                 backend.window().request_redraw();
                 state.backend = Backend::Winit(backend);
+                state.capture_frames(&output);
                 state.post_render(&output);
             }
             WinitEvent::CloseRequested => {

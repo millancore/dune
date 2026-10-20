@@ -12,11 +12,15 @@
 //! direction_right = super+ctrl+Right   # direction indicator keys (also _left, _up, _down)
 //! close = super+'         # extra key that closes the focused tile (Mod+q always does)
 //! launcher = super+e      # key that toggles the launcher (default Mod+d)
+//! switcher = super+g      # key that toggles the window switcher (default Mod+/)
 //! follow = true           # go to the desktop an app is launched on (`firefox @3`); default false
 //! focus_follows_mouse = true  # the tile under the pointer takes focus (when all of it is on screen); default false
 //! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
 //! font_family = JetBrains Mono   # tab titles and launcher (dune-term reads `~/.config/dune/term`)
+//! tab_min_width = 200     # px a tab shrinks to before its bar scrolls; default 200
+//! tab_max_width = 220     # px a tab grows to while there is room; default 220
 //! icon_theme = Papirus-Dark      # launcher icons; default: the desktop's (gsettings / GTK)
+//! border_color = none     # border of tiles without focus: RRGGBB or RRGGBBAA (no `#`), or none; default ffffff
 //! exec = waybar           # run when dune starts; one line per program, as many as needed
 //!
 //! # Mice and touchpads (on the real session, not nested)
@@ -31,15 +35,22 @@
 //! output.DP-1.off = true                # leave this monitor dark
 //! ```
 //!
+//! The pointer pushing on against the left or right edge of the screens slides the strip
+//! that way; it stays there until focus moves. A mark at the middle of an edge (`‹3`, `2›`)
+//! tells how many tiles are past it. Mod+/ lists every window to go to.
+//!
 //! Mod+Enter opens an empty container with the launcher in it: Enter right away puts a
 //! terminal (`terminal`) there, a program chosen or typed goes there instead. Mod+d is the
 //! launcher on its own.
 //!
-//! Tabbed containers have keys, no settings yet: Mod+Tab / Mod+Shift+Tab show the next /
-//! previous tab, Mod+Ctrl+direction joins the container that way as a tab (or leaves a
-//! tabbed one), a click on a tab shows it, a Mod+drag let go on a tab bar adds the tile
-//! there as a tab, and the launcher opens an app as a tab with
-//! Ctrl+T or `@t`. The tab bar sits at the top left of its container (see
+//! Tabs belong to columns (each tab with its own splits) and have keys (their only settings
+//! are `tab_min_width` and `tab_max_width`):
+//! Mod+Tab / Mod+Shift+Tab show the next / previous tab, Mod+Ctrl+direction joins the
+//! column that way as a tab (or leaves a tabbed one), Mod+t sends a tile out of its split
+//! into a tab of its own (a lone tile: a bar with it as the one tab), a click on a tab
+//! shows it, a Mod+drag let go on a tab bar adds the tile there as a tab, a tab Mod+dragged
+//! along its own bar moves to the place it is let go, and the launcher opens an app as a tab with
+//! Ctrl+T or `@t`. The tab bar sits at the top left of its column (see
 //! `layout::split_tab_bar`; its placement may become a setting).
 //!
 //! Saving the file applies it live (see `reload`), except monitor modes, `off`, `xwayland`
@@ -55,7 +66,7 @@ use std::{
 
 use smithay::input::keyboard::{Keysym, ModifiersState, XkbConfig, xkb};
 
-use crate::layout::Side;
+use crate::layout::{Side, TabWidths};
 
 /// A key with its modifiers, written like `super+Right` or `ctrl+alt+h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +167,8 @@ pub struct Config {
     pub close_key: Option<KeySpec>,
     /// The key that toggles the launcher, instead of Mod+d.
     pub launcher_key: Option<KeySpec>,
+    /// The key that toggles the window switcher, instead of Mod+/.
+    pub switcher_key: Option<KeySpec>,
     /// Show the desktop the launcher opens an app on, instead of staying here.
     pub follow: bool,
     /// The tile under the pointer takes focus as the pointer moves.
@@ -167,8 +180,12 @@ pub struct Config {
     pub input: InputConfig,
     /// As fontconfig names it; tab titles are written with it.
     pub font_family: String,
+    /// How narrow and how wide tabs get in their bars.
+    pub tab_widths: TabWidths,
     /// Icon theme for the launcher; empty: the one GTK apps use.
     pub icon_theme: String,
+    /// The border of tiles without focus (premultiplied RGBA); `None`: not drawn.
+    pub border_color: Option<[f32; 4]>,
     /// Shell commands run when dune starts (`exec` lines, in order).
     pub exec: Vec<String>,
 }
@@ -289,14 +306,56 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             }
             parsed
         }),
+        switcher_key: file.get("switcher").and_then(|spec| {
+            let parsed = KeySpec::parse(spec);
+            if parsed.is_none() {
+                tracing::warn!("ignoring `switcher = {spec}`: not a key like super+g");
+            }
+            parsed
+        }),
         follow: flag(file, "follow"),
         focus_follows_mouse: flag(file, "focus_follows_mouse"),
         outputs: outputs(file),
         input: input(file),
         font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
+        tab_widths: tab_widths(file),
         icon_theme: file.get("icon_theme").cloned().unwrap_or_default(),
+        border_color: border_color(file),
         exec: Vec::new(),
     }
+}
+
+/// `border_color`: `RRGGBB`, `RRGGBBAA` or `none`; white when missing or not one.
+fn border_color(file: &HashMap<String, String>) -> Option<[f32; 4]> {
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    let Some(value) = file.get("border_color") else { return Some(WHITE) };
+    if value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let hex = value.trim_start_matches("0x");
+    let channel = |i: usize| hex.get(i..i + 2).and_then(|c| u8::from_str_radix(c, 16).ok()).map(|c| c as f32 / 255.0);
+    let rgba = match hex.len() {
+        6 => (0..3).map(|i| channel(i * 2)).chain([Some(1.0)]).collect::<Option<Vec<_>>>(),
+        8 => (0..4).map(|i| channel(i * 2)).collect(),
+        _ => None,
+    };
+    let Some([r, g, b, a]) = rgba.and_then(|v| <[f32; 4]>::try_from(v).ok()) else {
+        tracing::warn!("ignoring `border_color = {value}`: not RRGGBB, RRGGBBAA or none");
+        return Some(WHITE);
+    };
+    // Solid colour buffers take premultiplied alpha.
+    Some([r * a, g * a, b * a, a])
+}
+
+/// `tab_min_width` and `tab_max_width`; a maximum under the minimum is raised to it.
+fn tab_widths(file: &HashMap<String, String>) -> TabWidths {
+    let default = TabWidths::default();
+    let min = number(file, "tab_min_width", default.min, 40..=2000);
+    let max = number(file, "tab_max_width", default.max, 40..=2000);
+    if max < min {
+        tracing::warn!("`tab_max_width = {max}` is under `tab_min_width = {min}`, using {min} for both");
+    }
+    TabWidths { min, max: max.max(min) }
 }
 
 fn number(file: &HashMap<String, String>, key: &str, default: i32, range: std::ops::RangeInclusive<i32>) -> i32 {
@@ -440,6 +499,27 @@ mod tests {
         assert!(!resolve(&parse("follow = maybe\n"), &|_| None).follow);
         assert!(!resolve(&parse(""), &|_| None).focus_follows_mouse);
         assert!(resolve(&parse("focus_follows_mouse = true\n"), &|_| None).focus_follows_mouse);
+    }
+
+    #[test]
+    fn tab_widths_come_from_the_file() {
+        assert_eq!(resolve(&parse(""), &|_| None).tab_widths, TabWidths::default());
+        let config = resolve(&parse("tab_min_width = 120\ntab_max_width = 300\n"), &|_| None);
+        assert_eq!(config.tab_widths, TabWidths { min: 120, max: 300 });
+        // Out of range: the default; a maximum under the minimum: the minimum.
+        let config = resolve(&parse("tab_min_width = 5\ntab_max_width = 100\n"), &|_| None);
+        assert_eq!(config.tab_widths, TabWidths { min: TabWidths::default().min, max: TabWidths::default().min });
+    }
+
+    #[test]
+    fn border_color() {
+        assert_eq!(resolve(&parse(""), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(resolve(&parse("border_color = none\n"), &|_| None).border_color, None);
+        assert_eq!(resolve(&parse("border_color = ff0000\n"), &|_| None).border_color, Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(resolve(&parse("border_color = ffffff00\n"), &|_| None).border_color, Some([0.0, 0.0, 0.0, 0.0]));
+        // `#` starts a comment, so `#333333` reads as no value: still white.
+        assert_eq!(resolve(&parse("border_color = #333333\n"), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(resolve(&parse("border_color = blue\n"), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
     }
 
     #[test]

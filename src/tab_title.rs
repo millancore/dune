@@ -9,7 +9,7 @@ use smithay::{
     utils::Transform,
 };
 
-use crate::layout::{Rect, TileId, plus_rect, tab_rects};
+use crate::layout::{Rect, TAB_HEIGHT, TabWidths, TileId, tab_strip};
 
 /// Tab text size, in pixels.
 const FONT_SIZE: f32 = 14.0;
@@ -20,6 +20,8 @@ const TEXT: [u8; 3] = [0xd8, 0xdc, 0xe6];
 const STRIP_BACKGROUND: [u8; 3] = [0x1e, 0x20, 0x29];
 const ACTIVE_TAB: [u8; 3] = [0x4c, 0x56, 0x6a];
 const INACTIVE_TEXT: [u8; 3] = [0x90, 0x96, 0xa4];
+/// The marks of a scrolled bar: how many tabs are past each end.
+const MARK_TEXT: [u8; 3] = [0xfa, 0x9e, 0x38];
 
 /// What a tabbed container's bar shows: its tabs' titles, which is shown, its size.
 type Strip = (Vec<String>, usize, (i32, i32));
@@ -29,18 +31,23 @@ pub struct TabTitles {
     /// Loaded on first use: fontconfig runs a process.
     font: Option<Option<Font>>,
     family: String,
+    widths: TabWidths,
     bars: HashMap<TileId, (String, (i32, i32), MemoryRenderBuffer)>,
     /// Bars of tabbed containers, by their shown tab.
     strips: HashMap<TileId, (Strip, MemoryRenderBuffer)>,
+    /// The marks at the edges of the screens, by their label, with their size.
+    marks: HashMap<String, ((i32, i32), MemoryRenderBuffer)>,
 }
 
 impl TabTitles {
-    pub fn new(family: &str) -> Self {
+    pub fn new(family: &str, widths: TabWidths) -> Self {
         TabTitles {
             font: None,
             family: family.to_string(),
+            widths,
             bars: HashMap::new(),
             strips: HashMap::new(),
+            marks: HashMap::new(),
         }
     }
 
@@ -66,11 +73,28 @@ impl TabTitles {
     pub fn strip(&mut self, active: TileId, titles: Vec<String>, shown: usize, size: (i32, i32)) -> &MemoryRenderBuffer {
         let strip = (titles, shown, size);
         if self.strips.get(&active).is_none_or(|(s, _)| *s != strip) {
-            let pixels = draw_strip(self.font(), &strip.0, shown, size);
+            let widths = self.widths;
+            let pixels = draw_strip(self.font(), &strip.0, shown, size, widths);
             let buffer = MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, size, 1, Transform::Normal, None);
             self.strips.insert(active, (strip, buffer));
         }
         &self.strips[&active].1
+    }
+
+    /// The mark floating at the left (`‹3`) or right (`3›`) edge of a screen with `n` tiles
+    /// past it, and its size.
+    pub fn edge_mark(&mut self, left: bool, n: usize) -> (&MemoryRenderBuffer, (i32, i32)) {
+        let label = if left { format!("‹{n}") } else { format!("{n}›") };
+        if !self.marks.contains_key(&label) {
+            let font = self.font();
+            let cell = font.as_ref().map_or(8, |f| f.cell_width as i32);
+            let size = (2 * PADDING + cell * label.chars().count() as i32, TAB_HEIGHT);
+            let pixels = draw_mark(font, &label, size);
+            let buffer = MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, size, 1, Transform::Normal, None);
+            self.marks.insert(label.clone(), (size, buffer));
+        }
+        let (size, buffer) = &self.marks[&label];
+        (buffer, *size)
     }
 
     /// Forget the bars of tiles that are no longer tabs.
@@ -101,13 +125,26 @@ fn draw(font: Option<&mut Font>, title: &str, (w, h): (i32, i32)) -> Vec<u8> {
     pixels
 }
 
-/// ARGB8888 pixels of a tabbed container's bar: each title in its tab (see `tab_rects`),
-/// the shown tab on a lighter background.
-fn draw_strip(mut font: Option<&mut Font>, titles: &[String], shown: usize, (w, h): (i32, i32)) -> Vec<u8> {
+/// ARGB8888 pixels of a mark at a screen edge: `label` in the colour of a scrolled bar's
+/// marks, on the bar's background.
+fn draw_mark(font: Option<&mut Font>, label: &str, (w, h): (i32, i32)) -> Vec<u8> {
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let mut pixels: Vec<u8> = [STRIP_BACKGROUND[2], STRIP_BACKGROUND[1], STRIP_BACKGROUND[0], 0xff].repeat(w * h);
+    if let Some(font) = font {
+        text(&mut pixels, (w, h), font, label, (0, w as i32), MARK_TEXT);
+    }
+    pixels
+}
+
+/// ARGB8888 pixels of a tabbed container's bar: each title in its tab (see `tab_strip`),
+/// the shown tab on a lighter background, and at the ends of a scrolled bar how many tabs
+/// are past them (`‹3`, `5›`).
+fn draw_strip(mut font: Option<&mut Font>, titles: &[String], shown: usize, (w, h): (i32, i32), widths: TabWidths) -> Vec<u8> {
     let (w, h) = (w.max(1) as usize, h.max(1) as usize);
     let mut pixels: Vec<u8> = [STRIP_BACKGROUND[2], STRIP_BACKGROUND[1], STRIP_BACKGROUND[0], 0xff].repeat(w * h);
     let bar = Rect::new(0, 0, w as i32, h as i32);
-    for (i, (title, tab)) in titles.iter().zip(tab_rects(bar, titles.len())).enumerate() {
+    let strip = tab_strip(bar, titles.len(), shown, widths);
+    for (i, (title, tab)) in titles.iter().zip(strip.tabs.iter().copied()).enumerate().skip(strip.first).take(strip.count) {
         // A pixel between tabs.
         let (x0, x1) = (tab.x, (tab.x + tab.w - 1).max(tab.x + 1));
         if i == shown {
@@ -122,8 +159,15 @@ fn draw_strip(mut font: Option<&mut Font>, titles: &[String], shown: usize, (w, 
             text(&mut pixels, (w, h), font, title, (x0, x1), color);
         }
     }
+    if let Some(font) = font.as_deref_mut() {
+        for (mark, left) in [(strip.left, true), (strip.right, false)] {
+            let Some((r, n)) = mark else { continue };
+            let label = if left { format!("‹{n}") } else { format!("{n}›") };
+            text(&mut pixels, (w, h), font, &label, (r.x, r.x + r.w), MARK_TEXT);
+        }
+    }
     // The "+": two strokes in the middle of its square.
-    let plus = plus_rect(bar, titles.len());
+    let plus = strip.plus;
     let (cx, cy, arm) = (plus.x + plus.w / 2, plus.y + plus.h / 2, plus.h / 4);
     for (x, y, sw, sh) in [(cx - arm, cy - 1, 2 * arm, 2), (cx - 1, cy - arm, 2, 2 * arm)] {
         for py in y.max(0)..(y + sh).min(h as i32) {
@@ -186,19 +230,49 @@ mod tests {
         let active = vec![ACTIVE_TAB[2], ACTIVE_TAB[1], ACTIVE_TAB[0]];
         let back = vec![STRIP_BACKGROUND[2], STRIP_BACKGROUND[1], STRIP_BACKGROUND[0]];
 
-        let second = draw_strip(None, &titles, 1, size);
+        let second = draw_strip(None, &titles, 1, size, TabWidths::default());
         // Tabs from the left at most TAB_MAX_WIDTH wide: the second one is lit, the rest not.
         assert_eq!(px(&second, 2, 1), back);
         assert_eq!(px(&second, crate::layout::TAB_MAX_WIDTH as usize + 2, 1), active);
         assert_eq!(px(&second, 590, 1), back);
 
         let mut font = Font::load("monospace", FONT_SIZE).expect("a monospace font");
-        let text = draw_strip(Some(&mut font), &titles, 0, size);
-        let blank = draw_strip(None, &titles, 0, size);
+        let text = draw_strip(Some(&mut font), &titles, 0, size, TabWidths::default());
+        let blank = draw_strip(None, &titles, 0, size, TabWidths::default());
         let differs = |x0: usize, x1: usize| (0..24).any(|y| (x0..x1).any(|x| px(&text, x, y) != px(&blank, x, y)));
         let tab = crate::layout::TAB_MAX_WIDTH as usize;
         assert!(differs(0, tab) && differs(tab, 2 * tab), "both titles drawn");
         assert!(!differs(2 * tab, 600), "nothing past the tabs");
+    }
+
+    #[test]
+    fn an_edge_mark_has_its_label_whole() {
+        let mut titles = TabTitles::new("monospace", TabWidths::default());
+        let (_, size) = titles.edge_mark(false, 12);
+        let mut font = Font::load("monospace", FONT_SIZE).expect("a monospace font");
+        assert_eq!(size, (2 * PADDING + 3 * font.cell_width as i32, TAB_HEIGHT));
+        let text = draw_mark(Some(&mut font), "12›", size);
+        let blank = draw_mark(None, "12›", size);
+        let w = size.0 as usize;
+        // The last character (the arrow) is drawn, not cut into `…`.
+        let arrow = (w - PADDING as usize - font.cell_width as usize)..w;
+        assert!((0..TAB_HEIGHT as usize).any(|y| arrow.clone().any(|x| text[(y * w + x) * 4] != blank[(y * w + x) * 4])));
+    }
+
+    #[test]
+    fn a_scrolled_strip_marks_its_ends() {
+        use crate::layout::{ARROW_WIDTH, PLUS_WIDTH, TAB_MIN_WIDTH};
+        let w = (4 * TAB_MIN_WIDTH + 2 * ARROW_WIDTH + PLUS_WIDTH) as usize;
+        let titles: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
+        let mut font = Font::load("monospace", FONT_SIZE).expect("a monospace font");
+        let blank = draw_strip(None, &titles, 0, (w as i32, 24), TabWidths::default());
+        let marked = |p: &[u8], x0: usize, x1: usize| (0..24).any(|y| (x0..x1).any(|x| p[(y * w + x) * 4] != blank[(y * w + x) * 4]));
+        let right = ARROW_WIDTH as usize + 4 * TAB_MIN_WIDTH as usize;
+        let first = draw_strip(Some(&mut font), &titles, 0, (w as i32, 24), TabWidths::default());
+        assert!(!marked(&first, 0, ARROW_WIDTH as usize), "nothing to the left");
+        assert!(marked(&first, right, right + ARROW_WIDTH as usize), "tabs to the right");
+        let middle = draw_strip(Some(&mut font), &titles, 5, (w as i32, 24), TabWidths::default());
+        assert!(marked(&middle, 0, ARROW_WIDTH as usize) && marked(&middle, right, right + ARROW_WIDTH as usize));
     }
 
     #[test]

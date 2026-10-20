@@ -12,8 +12,10 @@ mod launcher;
 mod layout;
 mod reload;
 mod render;
+mod screencopy;
 mod shell;
 mod state;
+mod switcher;
 mod tab_title;
 mod tiling;
 mod udev;
@@ -139,6 +141,14 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
         match std::process::Command::new("dbus-update-activation-environment").arg("--systemd").args(vars).status() {
             Ok(status) if status.success() => {}
             other => tracing::warn!("could not export the session environment to systemd/D-Bus: {other:?}"),
+        }
+        // Portals left from another session would keep its environment and backends
+        // (screen sharing for niri, sway...): stopped, D-Bus starts them again for dune.
+        let stop = ["--user", "stop", "xdg-desktop-portal.service", "xdg-desktop-portal-wlr.service", "xdg-desktop-portal-gnome.service"];
+        match std::process::Command::new("systemctl").args(stop).spawn() {
+            // Waited for on the side: stopping may take a moment, startup does not wait.
+            Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+            Err(err) => tracing::warn!("could not restart the portals: {err}"),
         }
     }
 

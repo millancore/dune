@@ -74,8 +74,16 @@ pub struct UdevData {
     input_devices: Vec<InputDevice>,
 }
 
+impl UdevData {
+    pub fn render_node(&self) -> Option<DrmNode> {
+        self.gpu.as_ref().map(|gpu| gpu.render_node)
+    }
+}
+
 struct Gpu {
     node: DrmNode,
+    /// Where clients allocate buffers for this GPU (screen capture dmabufs).
+    render_node: DrmNode,
     manager: DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>,
     scanner: DrmScanner,
     surfaces: HashMap<crtc::Handle, Surface>,
@@ -336,6 +344,7 @@ impl Dune {
         udev.renderer = Some(renderer);
         udev.gpu = Some(Gpu {
             node,
+            render_node,
             manager,
             scanner: DrmScanner::new(),
             surfaces: HashMap::new(),
@@ -512,16 +521,23 @@ impl Dune {
         // No overlay planes: a game scanned out on one covered the composited pointer
         // (niri leaves them off by default too).
         let flags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
+        let mut changed = false;
         match surface.drm_output.render_frame(&mut renderer, &elements, BACKGROUND, flags) {
-            Ok(result) if !result.is_empty => match surface.drm_output.queue_frame(()) {
-                Ok(()) => surface.queued = Some(Instant::now()),
-                Err(err) => tracing::warn!("cannot show frame on {}: {err}", output.name()),
-            },
+            Ok(result) if !result.is_empty => {
+                changed = true;
+                match surface.drm_output.queue_frame(()) {
+                    Ok(()) => surface.queued = Some(Instant::now()),
+                    Err(err) => tracing::warn!("cannot show frame on {}: {err}", output.name()),
+                }
+            }
             Ok(_) => {} // nothing changed
             Err(err) => tracing::warn!("cannot render {}: {err}", output.name()),
         }
         drop(elements);
         udev.renderer = Some(renderer);
+        if changed {
+            self.capture_frames(&output);
+        }
         self.post_render(&output);
     }
 

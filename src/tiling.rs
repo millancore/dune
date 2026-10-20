@@ -21,7 +21,7 @@ use dune_common::protocol::{Request, Side, direction_answer};
 
 use crate::{
     launcher::Spot,
-    layout::{Direction, Layout, Rect, Split, TileId, column_zone, drop_column, drop_side, drop_zone, neighbor},
+    layout::{Direction, Layout, Rect, Split, TileId, column_zone, drop_column, drop_side, drop_zone, neighbor, past_edges},
     state::{Dune, Tile},
 };
 
@@ -32,13 +32,15 @@ pub const BORDER: i32 = 1;
 
 /// Where a tile being dragged would go: next to `target` on `side` in `output`'s
 /// layout (at its end without a target), in a column of its own when `column`, or
-/// into `target`'s container as a tab when `tab`; shown as `area` while dragging.
+/// into `target`'s container as a tab when `tab`, or, when `place`, its own tab moved to
+/// that place of its bar; shown as `area` while dragging.
 pub struct DropSpot {
     pub output: String,
     pub target: Option<TileId>,
     pub side: Side,
     pub column: bool,
     pub tab: bool,
+    pub place: Option<usize>,
     pub area: Rect,
 }
 
@@ -154,29 +156,40 @@ impl Dune {
         }
     }
 
-    /// Mod+Ctrl+direction: a tab leaves its container for one of its own on that side;
-    /// a tile alone joins the container that way as a tab.
+    /// Mod+Ctrl+direction: a tab leaves its column, for a column of its own on that side
+    /// (above or below: into the tab shown in its place); another tile joins the column
+    /// that way as a tab.
     pub fn move_tab(&mut self, dir: Direction) {
         let Some(id) = self.focused.filter(|f| !self.is_floating(*f)) else { return };
         let Some(output) = self.output_of(id) else { return };
         if let Some(sibling) = self.layouts.get(&output).and_then(|l| l.tab_sibling(id)) {
-            return self.move_tile(id, &output, Some(sibling), dir, false);
+            let column = matches!(dir, Direction::Left | Direction::Right);
+            return self.move_tile(id, &output, Some(sibling), dir, column);
         }
         if let Some(other) = neighbor(&self.geometries, id, dir).filter(|t| !self.is_floating(*t)) {
             self.join_tab(id, other);
         }
     }
 
-    /// Mod+t: the windows living inside the focused tile (swallowed, or stacked in it)
-    /// each get a tile of their own, as tabs of its container after it.
+    /// Mod+t: the focused tile, sharing its tab with others, leaves them for a tab of its
+    /// own in its column. Alone, the windows living inside it (swallowed, or stacked in
+    /// it) each get a tile of their own, as tabs of its column after it; with none, see
+    /// `leave_tab`.
     pub fn stack_to_tabs(&mut self) {
         let Some(id) = self.focused else { return };
         let Some(output) = self.output_of(id) else { return };
+        let home = self.layouts.get(&output).and_then(|l| l.home(id));
+        if self.layouts.get_mut(&output).is_some_and(|l| l.tile_to_tab(id)) {
+            if let Some(home) = home {
+                self.tab_homes.insert(id, (output, home));
+            }
+            return self.focus_tile(id);
+        }
         let below = match self.tiles.get_mut(&id) {
             Some(tile) if tile.stack.len() > 1 && !self.floating.values().flatten().any(|(t, _)| *t == id) => {
                 tile.stack.drain(..tile.stack.len() - 1).collect::<Vec<_>>()
             }
-            _ => return,
+            _ => return self.leave_tab(id, &output),
         };
         let Some(layout) = self.layouts.get_mut(&output) else { return };
         for window in below {
@@ -187,6 +200,24 @@ impl Dune {
         }
         layout.activate_tab(id);
         self.arrange();
+    }
+
+    /// Mod+t on a tile alone in its tab, nothing stacked in it: a tile Mod+t sent to a tab
+    /// goes back where it was in its column; another tab leaves the tabs for a column of
+    /// its own on their right, and the one tab of a column loses its bar. A column without
+    /// tabs gets a bar with it as the one tab.
+    fn leave_tab(&mut self, id: TileId, output: &str) {
+        let home = self.tab_homes.remove(&id).filter(|(o, _)| o == output).map(|(_, h)| h);
+        let Some(layout) = self.layouts.get_mut(output) else { return };
+        if home.is_some_and(|h| layout.tab_back(id, h)) {
+            return self.focus_tile(id);
+        }
+        if layout.lone_tab(id) || layout.untab(id) {
+            return self.arrange();
+        }
+        if let Some(sibling) = layout.tab_sibling(id) {
+            self.move_tile(id, output, Some(sibling), Side::Right, true);
+        }
     }
 
     /// `id` leaves wherever it is to become a tab of `target`'s container, focused.
@@ -205,19 +236,19 @@ impl Dune {
     /// The tab under (`x`, `y`) in a tabbed container's bar.
     pub fn tab_at(&self, x: f64, y: f64) -> Option<TileId> {
         let bar = self.tab_bars.iter().find(|b| b.rect.contains(x, y))?;
-        let rects = crate::layout::tab_rects(bar.rect, bar.tabs.len());
-        rects.iter().zip(&bar.tabs).find(|(r, _)| r.contains(x, y)).map(|(_, t)| *t)
+        bar.strip(self.config.tab_widths).index_at(x, y).map(|i| bar.tabs[i])
     }
 
     /// The tabbed container whose bar has its "+" under (`x`, `y`): its shown tab.
     pub fn plus_at(&self, x: f64, y: f64) -> Option<TileId> {
-        let bar = self.tab_bars.iter().find(|b| crate::layout::plus_rect(b.rect, b.tabs.len()).contains(x, y))?;
+        let bar = self.tab_bars.iter().find(|b| b.strip(self.config.tab_widths).plus.contains(x, y))?;
         Some(bar.active)
     }
 
     /// Take `id` out of whichever layout or floating stack holds it, shown or not.
     pub fn remove_from_layouts(&mut self, id: TileId) {
         self.float_homes.remove(&id);
+        self.tab_homes.remove(&id);
         for layout in self.layouts.values_mut() {
             layout.remove(id);
         }
@@ -411,8 +442,8 @@ impl Dune {
         }
         self.adopt_desks(&outputs, &first.name());
 
-        // A focused tab (by keyboard, click or after a close) opens; so does a focused
-        // tab of a tabbed container.
+        // A focused accordion tab (by keyboard, click or after a close) opens; so does
+        // the tab of a tabbed column a focused tile is in.
         if let Some(id) = self.focused {
             for layout in self.layouts.values_mut() {
                 layout.activate_tab(id);
@@ -428,6 +459,7 @@ impl Dune {
         let mut shown = Vec::new();
         let mut tabs = Vec::new();
         let mut tab_bars = Vec::new();
+        let mut edge_counts = HashMap::new();
         // Floats first, front to back: what is first is hit (and drawn) first.
         for output in &outputs {
             for (id, rect) in self.floating.get(&output.name()).into_iter().flatten().rev() {
@@ -441,7 +473,9 @@ impl Dune {
             let Some(area) = self.output_rect(output) else { continue };
             let Some(layout) = self.layouts.get_mut(&output.name()) else { continue };
             tracing::debug!(output = output.name(), ?area, "arranging tiles");
-            for (id, rect) in layout.geometries(area, GAP, BORDER, &visible, self.focused) {
+            let laid_out = layout.geometries(area, GAP, BORDER, &visible, self.focused);
+            edge_counts.insert(output.name(), past_edges(area, &laid_out));
+            for (id, rect) in laid_out {
                 if layout.is_tab(id) {
                     tabs.push(id);
                 }
@@ -456,6 +490,7 @@ impl Dune {
         self.geometries = geometries;
         self.shown = shown;
         self.tabs = tabs;
+        self.edge_counts = edge_counts;
 
         // Tabs not shown in their container keep their window unmapped, at the size of
         // the shown tab so switching to them needs no resize.
@@ -521,6 +556,10 @@ impl Dune {
     pub fn update_focus(&mut self) {
         if self.focused.is_none_or(|id| !self.tiles.contains_key(&id)) {
             self.focused = self.geometries.first().map(|(id, _)| *id);
+        }
+        if let Some(id) = self.focused.filter(|id| self.recent.first() != Some(id)) {
+            self.recent.retain(|t| *t != id && self.tiles.contains_key(t));
+            self.recent.insert(0, id);
         }
         let focused_window = self.focused.and_then(|id| self.tiles[&id].top().cloned());
 
@@ -610,12 +649,16 @@ impl Dune {
         self.focus_tile(id);
     }
 
-    /// A Mod+drag ended at `pos`: on a tab bar the tile joins that container as a tab;
+    /// A Mod+drag ended at `pos`: a tab let go on its own bar takes the place under the
+    /// pointer; on another tab bar the tile joins that container as a tab;
     /// otherwise it goes next to the tile under it (on the side nearest to the pointer; at
     /// its left or right edge, in a new column there), or in a new column at the end of
     /// the output when no tile is under it.
     pub fn drop_tile(&mut self, id: TileId, pos: Point<f64, Logical>) {
         match self.drop_spot(id, pos) {
+            Some(DropSpot { place: Some(index), .. }) => self.change_tile(id, |l, id| {
+                l.move_tab(id, index);
+            }),
             Some(DropSpot { tab: true, target: Some(target), .. }) => self.join_tab(id, target),
             Some(spot) => self.move_tile(id, &spot.output, spot.target, spot.side, spot.column),
             None => {}
@@ -624,16 +667,34 @@ impl Dune {
 
     /// Where `id` would land if dropped at `pos`, or `None` when nothing would move.
     pub fn drop_spot(&self, id: TileId, pos: Point<f64, Logical>) -> Option<DropSpot> {
-        // On a tab bar: a tab of that container (its own container: nothing moves).
+        // On a tab bar: a tab of that container; on its own bar, the tab under the pointer
+        // is the place it moves to (its own: nothing moves).
         if let Some(bar) = self.tab_bars.iter().find(|b| b.rect.contains(pos.x, pos.y)) {
-            if bar.tabs.contains(&id) {
-                return None;
+            if let Some(from) = bar.tabs.iter().position(|t| *t == id) {
+                let strip = bar.strip(self.config.tab_widths);
+                let index = strip.index_at(pos.x, pos.y).unwrap_or(strip.first + strip.count - 1);
+                let output = self.output_of(id)?;
+                // Over a mark at an end: the mark is lit, the tab goes just past it.
+                let area = match (strip.left, strip.right) {
+                    (Some((r, _)), _) if index + 1 == strip.first => r,
+                    (_, Some((r, _))) if index == strip.first + strip.count => r,
+                    _ => strip.tabs[index],
+                };
+                return (index != from).then(|| DropSpot {
+                    output,
+                    target: Some(bar.tabs[index]),
+                    side: Side::Right,
+                    column: false,
+                    tab: false,
+                    place: Some(index),
+                    area,
+                });
             }
             let output = self.output_of(bar.active)?;
             let content = self.shown.iter().find(|(t, _)| *t == bar.active).map(|(_, r)| *r);
             let bottom = content.map_or(bar.rect.y + bar.rect.h, |r| r.y + r.h);
             let area = Rect::new(bar.rect.x, bar.rect.y, bar.rect.w, bottom - bar.rect.y);
-            return Some(DropSpot { output, target: Some(bar.active), side: Side::Right, column: false, tab: true, area });
+            return Some(DropSpot { output, target: Some(bar.active), side: Side::Right, column: false, tab: true, place: None, area });
         }
         // Tiles land in the strip: a float under the pointer is looked through.
         let under = self.shown.iter().find(|(t, r)| *t != id && !self.is_floating(*t) && r.contains(pos.x, pos.y)).copied();
@@ -642,7 +703,7 @@ impl Dune {
             let output = self.output_of(target)?;
             let column = drop_column(&rect, pos.x, side);
             let area = if column { column_zone(&rect, side) } else { drop_zone(&rect, side) };
-            return Some(DropSpot { output, target: Some(target), side, column, tab: false, area });
+            return Some(DropSpot { output, target: Some(target), side, column, tab: false, place: None, area });
         }
         // Dropped on the tile itself: nothing moves.
         if self.shown.iter().any(|(t, r)| *t == id && r.contains(pos.x, pos.y)) {
@@ -651,7 +712,7 @@ impl Dune {
         // Empty space: a column of its own at the end of the strip there.
         let output = self.space.output_under(pos).next()?;
         let area = self.output_rect(output)?;
-        Some(DropSpot { output: output.name(), target: None, side: Side::Right, column: true, tab: false, area })
+        Some(DropSpot { output: output.name(), target: None, side: Side::Right, column: true, tab: false, place: None, area })
     }
 
     /// Apply a layout change to the focused tile's layout, then lay everything out again.
@@ -697,6 +758,12 @@ impl Dune {
             })
         });
         title.unwrap_or_else(|| format!("tile {id}"))
+    }
+
+    /// The app id of the tile's window.
+    pub fn tile_app_id(&self, id: TileId) -> Option<String> {
+        let surface = self.tiles.get(&id)?.top()?.toplevel()?.wl_surface().clone();
+        with_states(&surface, |states| states.data_map.get::<XdgToplevelSurfaceData>()?.lock().unwrap().app_id.clone())
     }
 
     /// Pid of the process behind a Wayland client.

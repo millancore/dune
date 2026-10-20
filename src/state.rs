@@ -82,6 +82,8 @@ pub struct Dune {
     pub tabs: Vec<TileId>,
     /// Bars of the tabbed containers on the outputs (shown ones only), from the last `arrange`.
     pub tab_bars: Vec<crate::layout::TabBar>,
+    /// By output: how many tiles of its strip are past its left and its right edge.
+    pub edge_counts: HashMap<String, (usize, usize)>,
     /// Mod+right button drag resizing a tile: the tile and the last pointer position.
     pub resize_drag: Option<(TileId, Point<f64, Logical>)>,
     /// Mod+left button drag moving a tile: it is dropped where the button is released.
@@ -90,6 +92,9 @@ pub struct Dune {
     pub floating: HashMap<String, Vec<(TileId, Rect)>>,
     /// Where floating tiles came from in the strip, with the layout's output, to go back.
     pub float_homes: HashMap<TileId, (String, crate::layout::Home)>,
+    /// Where tiles sent to a tab of their own by Mod+t were in their column, with the
+    /// layout's output, to go back on the next Mod+t.
+    pub tab_homes: HashMap<TileId, (String, crate::layout::Home)>,
     /// The desktop each output shows (1 when missing); `layouts` and `floating` hold it.
     pub desks: HashMap<String, u8>,
     /// Desktops not shown, by output name and number.
@@ -127,6 +132,14 @@ pub struct Dune {
 
     /// GPU buffers from clients (linux-dmabuf); the global is created with the backend.
     pub dmabuf_state: DmabufState,
+    /// Screen capture (see `crate::screencopy`): monitors as capture sources, the
+    /// sessions clients hold, and frames waiting for something new on their monitor.
+    pub output_capture_source_state: smithay::wayland::image_capture_source::OutputCaptureSourceState,
+    pub image_copy_capture_state: smithay::wayland::image_copy_capture::ImageCopyCaptureState,
+    /// xdg-activation: windows brought forward by a token (a clicked notification).
+    pub activation_state: smithay::wayland::xdg_activation::XdgActivationState,
+    pub capture_sessions: Vec<smithay::wayland::image_copy_capture::Session>,
+    pub pending_captures: Vec<crate::screencopy::PendingCapture>,
     /// Where we draw: a window in another session, or the real hardware.
     pub backend: Backend,
     pub decorations: crate::render::Decorations,
@@ -135,6 +148,12 @@ pub struct Dune {
     pub workspaces: crate::workspaces::WorkspaceState,
     /// The Mod+d launcher panel.
     pub launcher: crate::launcher::Launcher,
+    /// The Mod+/ panel to go to any window.
+    pub switcher: crate::switcher::Switcher,
+    /// Tiles focused, the latest first: the switcher lists them in this order.
+    pub recent: Vec<TileId>,
+    /// How far the pointer has pushed against a screen edge (see `input::edge_slide`).
+    pub edge_push: f64,
     /// The pointer image: clients choose it; dune draws it on a real session.
     pub cursor_status: CursorImageStatus,
     pub cursor: crate::cursor::Cursor,
@@ -147,6 +166,25 @@ pub enum Backend {
     Winit(WinitGraphicsBackend<GlesRenderer>),
     /// A real session on a TTY.
     Udev(crate::udev::UdevData),
+}
+
+impl Dune {
+    /// Run `f` with the renderer lent out of the backend, so it can build a scene from
+    /// the rest of the state. None before there is one.
+    pub fn with_renderer<T>(&mut self, f: impl FnOnce(&mut Self, &mut GlesRenderer) -> T) -> Option<T> {
+        let mut backend = std::mem::replace(&mut self.backend, Backend::None);
+        let result = backend.renderer().map(|renderer| f(self, renderer));
+        self.backend = backend;
+        result
+    }
+
+    /// The GPU's render node, for clients allocating buffers on it (real sessions).
+    pub fn render_node(&self) -> Option<smithay::backend::drm::DrmNode> {
+        match &self.backend {
+            Backend::Udev(udev) => udev.render_node(),
+            _ => None,
+        }
+    }
 }
 
 impl Backend {
@@ -182,6 +220,10 @@ impl Dune {
         // the pointer while playing.
         smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
         smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
+        // Screen capture: grim, and screen sharing through xdg-desktop-portal-wlr.
+        let output_capture_source_state = smithay::wayland::image_capture_source::OutputCaptureSourceState::new::<Self>(&dh);
+        let image_copy_capture_state = smithay::wayland::image_copy_capture::ImageCopyCaptureState::new::<Self>(&dh);
+        let activation_state = smithay::wayland::xdg_activation::XdgActivationState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
@@ -215,10 +257,12 @@ impl Dune {
             shown: Vec::new(),
             tabs: Vec::new(),
             tab_bars: Vec::new(),
+            edge_counts: HashMap::new(),
             resize_drag: None,
             move_drag: None,
             floating: HashMap::new(),
             float_homes: HashMap::new(),
+            tab_homes: HashMap::new(),
             desks: HashMap::new(),
             hidden: HashMap::new(),
             swallows: HashMap::new(),
@@ -238,14 +282,22 @@ impl Dune {
             primary_selection_state,
             popups,
             seat,
-            tab_titles: crate::tab_title::TabTitles::new(&config.font_family),
+            tab_titles: crate::tab_title::TabTitles::new(&config.font_family, config.tab_widths),
             launcher: crate::launcher::Launcher::new(&config.font_family, &config.icon_theme),
+            switcher: crate::switcher::Switcher::new(&config.font_family, &config.icon_theme),
+            recent: Vec::new(),
+            edge_push: 0.0,
             workspaces,
             config,
             layer_shell_state,
             viewporter_state,
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
+            output_capture_source_state,
+            image_copy_capture_state,
+            activation_state,
+            capture_sessions: Vec::new(),
+            pending_captures: Vec::new(),
             backend: Backend::None,
             decorations: Default::default(),
             cursor_status: CursorImageStatus::default_named(),

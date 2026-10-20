@@ -23,7 +23,7 @@ pub struct Desk {
 }
 
 impl Desk {
-    fn tiles(&self) -> Vec<TileId> {
+    pub(crate) fn tiles(&self) -> Vec<TileId> {
         self.floating.iter().map(|(t, _)| *t).chain(self.layout.tiles()).collect()
     }
 
