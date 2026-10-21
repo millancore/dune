@@ -85,15 +85,20 @@ impl TabTitles {
     /// past it, and its size.
     pub fn edge_mark(&mut self, left: bool, n: usize) -> (&MemoryRenderBuffer, (i32, i32)) {
         let label = if left { format!("‹{n}") } else { format!("{n}›") };
-        if !self.marks.contains_key(&label) {
+        self.mark(&label)
+    }
+
+    /// A mark with `label` (an edge's, the lock on private tiles), and its size.
+    pub fn mark(&mut self, label: &str) -> (&MemoryRenderBuffer, (i32, i32)) {
+        if !self.marks.contains_key(label) {
             let font = self.font();
             let cell = font.as_ref().map_or(8, |f| f.cell_width as i32);
             let size = (2 * PADDING + cell * label.chars().count() as i32, TAB_HEIGHT);
-            let pixels = draw_mark(font, &label, size);
+            let pixels = draw_mark(font, label, size);
             let buffer = MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, size, 1, Transform::Normal, None);
-            self.marks.insert(label.clone(), (size, buffer));
+            self.marks.insert(label.to_string(), (size, buffer));
         }
-        let (size, buffer) = &self.marks[&label];
+        let (size, buffer) = &self.marks[label];
         (buffer, *size)
     }
 
@@ -102,11 +107,13 @@ impl TabTitles {
         self.bars.retain(|tile, _| tabs.contains(tile));
     }
 
-    /// The bar of `tile`, `size` pixels, showing `title`.
+    /// The bar of `tile`, `size` pixels, showing `title`. A bar taller than wide (a tile
+    /// folded inside its row) has its title turned, read from the bottom up.
     pub fn bar(&mut self, tile: TileId, title: &str, size: (i32, i32)) -> &MemoryRenderBuffer {
         let fresh = self.bars.get(&tile).is_some_and(|(t, s, _)| t == title && *s == size);
         if !fresh {
-            let pixels = draw(self.font(), title, size);
+            let (w, h) = size;
+            let pixels = if h > w { upright(&draw(self.font(), title, (h, w)), (h, w)) } else { draw(self.font(), title, size) };
             let buffer = MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, size, 1, Transform::Normal, None);
             self.bars.insert(tile, (title.to_string(), size, buffer));
         }
@@ -123,6 +130,21 @@ fn draw(font: Option<&mut Font>, title: &str, (w, h): (i32, i32)) -> Vec<u8> {
         text(&mut pixels, (w, h), font, title, (0, w as i32), TEXT);
     }
     pixels
+}
+
+/// The ARGB8888 `pixels` of a `(w, h)` image turned a quarter counter-clockwise: an image
+/// `h` wide and `w` tall whose left edge was the bottom.
+fn upright(pixels: &[u8], (w, h): (i32, i32)) -> Vec<u8> {
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let mut out = vec![0; pixels.len()];
+    for y in 0..w {
+        for x in 0..h {
+            let from = (x * w + (w - 1 - y)) * 4;
+            let to = (y * h + x) * 4;
+            out[to..to + 4].copy_from_slice(&pixels[from..from + 4]);
+        }
+    }
+    out
 }
 
 /// ARGB8888 pixels of a mark at a screen edge: `label` in the colour of a scrolled bar's
@@ -273,6 +295,15 @@ mod tests {
         assert!(marked(&first, right, right + ARROW_WIDTH as usize), "tabs to the right");
         let middle = draw_strip(Some(&mut font), &titles, 5, (w as i32, 24), TabWidths::default());
         assert!(marked(&middle, 0, ARROW_WIDTH as usize) && marked(&middle, right, right + ARROW_WIDTH as usize));
+    }
+
+    #[test]
+    fn an_upright_image_is_turned_counter_clockwise() {
+        // 3 wide, 2 tall: a b c / d e f, one byte per pixel kept in the first channel.
+        let px = |v: &[u8]| v.iter().flat_map(|b| [*b, 0, 0, 0]).collect::<Vec<u8>>();
+        let turned = upright(&px(b"abcdef"), (3, 2));
+        // 2 wide, 3 tall: c f / b e / a d (the left column ends at the bottom).
+        assert_eq!(turned, px(b"cfbead"));
     }
 
     #[test]

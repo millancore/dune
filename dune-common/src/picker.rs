@@ -1,4 +1,4 @@
-//! The launcher's line editor, and the `cmd:v` / `cmd:h` split lines typed in terminals.
+//! The launcher's line editor.
 //!
 //! Pure logic: it turns keys into an edited line plus a list of suggestions; the
 //! launcher of dune-finder draws them.
@@ -10,9 +10,6 @@ use std::{
 };
 
 use crate::{desktop::App, protocol::Split};
-
-/// Starts a line that is not a split command (`:firefox:v` is not `firefox:v`).
-pub const TRIGGER: char = ':';
 
 /// Suggestions shown at once; the list scrolls to keep the selection visible.
 pub const MAX_ROWS: usize = 8;
@@ -83,18 +80,6 @@ pub struct Line {
     /// `None` runs the command in place, swallowing the tile.
     pub split: Option<Split>,
     pub command: String,
-}
-
-/// A command line typed at the prompt that asks for a split: `cmd:v args` or
-/// `cmd:h args` (bare `:v` / `:h` opens an empty terminal). `None` for anything else,
-/// which goes to the shell as usual.
-pub fn parse_split_command(text: &str) -> Option<Line> {
-    let line = parse_line(text.trim());
-    // A picker line (`:firefox:v`) that reached the shell is not a split.
-    if text.trim().starts_with(TRIGGER) && !line.command.is_empty() {
-        return None;
-    }
-    line.split.is_some().then_some(line)
 }
 
 /// Parse the text typed after `:`: `prog[:v|:h] args`.
@@ -223,8 +208,9 @@ impl Picker {
         Outcome::Continue
     }
 
-    /// Browsing (dune-finder's launcher), a last word starting with `@` says where
-    /// the app opens: `firefox @2`. It is not part of the command.
+    /// Browsing (dune-finder's launcher), a last word starting with `:` says where
+    /// the app opens: `firefox :d2`. It is not part of the command; `:v` / `:h` are
+    /// splits, not destinations.
     pub fn dest(&self) -> Option<&str> {
         self.dest_start().map(|i| self.input[i..].trim_start())
     }
@@ -236,7 +222,8 @@ impl Picker {
         }
         let word = self.input.rfind(' ').map_or(0, |i| i + 1);
         let start = self.input[..word].trim_end().len();
-        self.input[word..].starts_with('@').then_some(start)
+        let dest = self.input[word..].strip_prefix(':')?;
+        Split::parse(dest).is_none().then_some(start)
     }
 
     /// Run `f` with the destination word put aside, so that completion and the command
@@ -480,23 +467,30 @@ mod tests {
     #[test]
     fn browser_sets_the_destination_aside() {
         let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
-        typed(&mut p, "fire @2");
-        assert_eq!(p.dest(), Some("@2"));
+        typed(&mut p, "fire :d2");
+        assert_eq!(p.dest(), Some(":d2"));
         // Suggestions and Tab are about the app, not the destination.
         assert_eq!(labels(&p), ["Firefox"]);
         p.feed(Key::Tab);
-        assert_eq!(p.input(), "firefox @2");
+        assert_eq!(p.input(), "firefox :d2");
         assert_eq!(p.feed(Key::Enter), Outcome::Run(Line { split: None, command: "/usr/lib/firefox/firefox".into() }));
 
         // Only a destination: the highlighted app.
         let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
-        typed(&mut p, "@s");
-        assert_eq!(p.dest(), Some("@s"));
+        typed(&mut p, ":s");
+        assert_eq!(p.dest(), Some(":s"));
         assert!(matches!(p.feed(Key::Enter), Outcome::Run(_)));
 
-        // The `:` picker in a terminal has no destinations.
+        // `:v` / `:h` are splits, `@` is typed like any other character.
+        let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
+        typed(&mut p, "fire :v");
+        assert_eq!(p.dest(), None);
+        typed(&mut p, "\x15fire @2");
+        assert_eq!(p.dest(), None);
+
+        // Not browsing: no destinations.
         let mut p = picker();
-        typed(&mut p, "fire @2");
+        typed(&mut p, "fire :d2");
         assert_eq!(p.dest(), None);
     }
 
@@ -517,19 +511,6 @@ mod tests {
             vec![Key::Char('a'), Key::Up, Key::Down, Key::BackTab, Key::Tab, Key::Enter, Key::Backspace, Key::CtrlC, Key::Esc]
         );
         assert_eq!(parse_keys("ñ".as_bytes()), vec![Key::Char('ñ')]);
-    }
-
-    #[test]
-    fn split_commands_without_the_picker() {
-        assert_eq!(
-            parse_split_command("vim:h test.txt"),
-            Some(Line { split: Some(Split::Horizontal), command: "vim test.txt".into() })
-        );
-        assert_eq!(parse_split_command("  htop:v "), Some(Line { split: Some(Split::Vertical), command: "htop".into() }));
-        assert_eq!(parse_split_command(":v"), Some(Line { split: Some(Split::Vertical), command: "".into() }));
-        assert_eq!(parse_split_command("vim test.txt"), None);
-        assert_eq!(parse_split_command("echo a:v"), None);
-        assert_eq!(parse_split_command(":firefox:v"), None);
     }
 
     #[test]

@@ -1,12 +1,12 @@
-//! dune-finder: the launcher (apps), window switcher (`/`) and files (`#`) of the dune
-//! compositor, as a panel of its own (a wlr-layer-shell surface) that dune starts for
-//! Mod+d, Mod+/ and Mod+Enter. It asks dune for the windows and to start or show what was chosen over the
+//! dune-finder: the launcher (apps), window switcher (`/`), files (`#`), jumps (`>`) and
+//! tile options of the dune compositor, as a panel of its own (a wlr-layer-shell surface)
+//! that dune starts for Mod+d, Mod+/ (the tile options) and Mod+Enter. It asks dune for the windows and to start or show what was chosen over the
 //! control socket (`dune_common::protocol`, `$DUNE_SOCKET`).
 //!
-//! `dune-finder [--mode apps|windows|files] [--output NAME] [--target TILE] [--slot TILE
+//! `dune-finder [--mode apps|windows|files|jump|tile-options] [--output NAME] [--target TILE] [--slot TILE
 //! --at X,Y,W,H] [--compact] [--font FAMILY] [--icon-theme THEME] [--file-manager CMD]
 //! [--file-manager-terminal CMD]`: `--target` is
-//! the tile apps open next to; `--slot` the empty container they go into, `--at` where it is
+//! the tile apps open next to (and the tile options are for); `--slot` the empty container they go into, `--at` where it is
 //! on the output; `--compact` shows no list until something is typed or browsed; `--file-manager` what Mod+Enter (or Ctrl+Enter) opens files in (default `yazi`),
 //! `--file-manager-terminal` the terminal it runs in (default: dune's).
 
@@ -15,7 +15,9 @@ mod apps;
 mod files;
 mod finder;
 mod icons;
+mod jump;
 mod panel;
+mod tile_options;
 mod windows;
 
 use app::Options;
@@ -45,6 +47,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
                     "apps" => Mode::Apps,
                     "windows" => Mode::Windows,
                     "files" => Mode::Files,
+                    "jump" => Mode::Jump,
+                    "tile-options" => Mode::TileOptions,
                     other => return Err(format!("unknown mode `{other}`")),
                 }
             }
@@ -106,6 +110,8 @@ mod tests {
         );
         assert_eq!(parse(args("")).unwrap().file_manager_terminal, None);
         assert_eq!(parse(args("")).unwrap().mode, Mode::Apps);
+        assert_eq!(parse(args("--mode jump")).unwrap().mode, Mode::Jump);
+        assert_eq!(parse(args("--mode tile-options")).unwrap().mode, Mode::TileOptions);
         assert!(parse(args("--compact")).unwrap().compact);
         assert!(!parse(args("")).unwrap().compact);
         assert!(parse(args("--mode x")).is_err());

@@ -166,31 +166,53 @@ pub fn tab_strip(bar: Rect, n: usize, shown: usize, widths: TabWidths) -> TabStr
 #[derive(Debug)]
 struct Row {
     tiles: Vec<TileId>,
-    /// Share of the column's width of each tile; they add up to 1.
+    /// Share of the column's width of each tile; the open ones add up to 1.
     widths: Vec<f64>,
+    /// Tiles folded into an upright bar by a neighbour growing (see `resize_row_width`).
+    folded: Vec<bool>,
 }
 
 impl Row {
     fn new(id: TileId) -> Self {
-        Row { tiles: vec![id], widths: vec![1.0] }
+        Row { tiles: vec![id], widths: vec![1.0], folded: vec![false] }
     }
 
-    /// Put `id` at `index`, giving it an even share of the width.
+    /// Put `id` at `index`, giving it an even share of the width of the open tiles.
     fn insert(&mut self, index: usize, id: TileId) {
-        let share = 1.0 / (self.tiles.len() + 1) as f64;
-        for w in &mut self.widths {
+        let open = self.folded.iter().filter(|f| !**f).count();
+        let share = 1.0 / (open + 1) as f64;
+        for (w, _) in self.widths.iter_mut().zip(&self.folded).filter(|(_, f)| !**f) {
             *w *= 1.0 - share;
         }
         self.tiles.insert(index, id);
         self.widths.insert(index, share);
+        self.folded.insert(index, false);
     }
 
     fn remove(&mut self, index: usize) {
         self.tiles.remove(index);
-        let w = self.widths.remove(index);
-        if w < 1.0 {
-            for rest in &mut self.widths {
-                *rest /= 1.0 - w;
+        self.widths.remove(index);
+        self.folded.remove(index);
+        // A lone tile, or only folded ones left: they all open again.
+        if self.tiles.len() < 2 || self.folded.iter().all(|f| *f) {
+            self.unfold();
+        }
+        self.normalize_open();
+    }
+
+    /// Every tile open again, with an even share of the width.
+    fn unfold(&mut self) {
+        let even = 1.0 / self.tiles.len().max(1) as f64;
+        self.widths.iter_mut().for_each(|w| *w = even);
+        self.folded.iter_mut().for_each(|f| *f = false);
+    }
+
+    /// The open tiles' widths scaled to add up to 1.
+    fn normalize_open(&mut self) {
+        let total: f64 = self.widths.iter().zip(&self.folded).filter(|(_, f)| !**f).map(|(w, _)| w).sum();
+        if total > 0.0 {
+            for (w, _) in self.widths.iter_mut().zip(&self.folded).filter(|(_, f)| !**f) {
+                *w /= total;
             }
         }
     }
@@ -669,9 +691,14 @@ impl Layout {
                 let (c, r, k) = self.find(id).unwrap();
                 let row = &mut self.columns[c].rows[r];
                 let width = width.clamp(MIN_ROW_WIDTH, 1.0 - MIN_ROW_WIDTH * (row.tiles.len() - 1) as f64);
-                let rest: f64 = row.widths.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, w)| w).sum();
-                for (i, w) in row.widths.iter_mut().enumerate() {
-                    *w = if i == k { width } else { *w / rest * (1.0 - width) };
+                let open = |i: &usize| *i != k && !row.folded[*i];
+                let rest: f64 = (0..row.tiles.len()).filter(open).map(|i| row.widths[i]).sum();
+                for i in 0..row.tiles.len() {
+                    if i == k {
+                        row.widths[i] = width;
+                    } else if open(&i) {
+                        row.widths[i] = row.widths[i] / rest * (1.0 - width);
+                    }
                 }
             }
             Home::Stacked { on } if here(on) => {
@@ -795,48 +822,62 @@ impl Layout {
     }
 
     /// Make the tile wider (positive `delta`) or narrower inside its row, as a share of the
-    /// column's width; the other tiles of the row give or take the difference.
+    /// column's width; the other tiles of the row give or take the difference. Tiles
+    /// squeezed below `TAB_THRESHOLD` fold into upright bars; shrinking a tile opens the
+    /// row's folded ones again (as `resize_height` does with rows).
     pub fn resize_row_width(&mut self, id: TileId, delta: f64) {
         let Some((c, r, k)) = self.find(id) else { return };
         let row = &mut self.columns[c].rows[r];
-        let n = row.tiles.len();
-        if n < 2 {
+        if row.tiles.len() < 2 {
             return;
         }
-        let old = row.widths[k];
-        let new = (old + delta).clamp(MIN_ROW_WIDTH, 1.0 - MIN_ROW_WIDTH * (n - 1) as f64);
-        // The others keep their proportions, but none drops below the minimum.
-        let rest: f64 = 1.0 - old;
-        let scale = (1.0 - new) / rest;
-        for (i, w) in row.widths.iter_mut().enumerate() {
-            *w = if i == k { new } else { *w * scale };
+        if delta < 0.0 && row.folded.iter().any(|f| *f) {
+            return row.unfold();
         }
-        let short: f64 = row.widths.iter().map(|w| (MIN_ROW_WIDTH - w).max(0.0)).sum();
-        if short > 0.0 {
-            let others = row.widths.iter().enumerate().filter(|(i, w)| *i != k && **w > MIN_ROW_WIDTH);
-            let spare: f64 = others.map(|(_, w)| w - MIN_ROW_WIDTH).sum();
-            for (i, w) in row.widths.iter_mut().enumerate() {
-                if i == k {
-                    continue;
-                }
-                *w = if *w <= MIN_ROW_WIDTH {
-                    MIN_ROW_WIDTH
-                } else {
-                    *w - (*w - MIN_ROW_WIDTH) / spare * short
-                };
+        if row.folded.iter().filter(|f| !**f).count() < 2 {
+            return;
+        }
+        row.normalize_open();
+        let old = row.widths[k];
+        let new = (old + delta).clamp(MIN_ROW_WIDTH, 1.0);
+        let scale = if old < 1.0 { (1.0 - new) / (1.0 - old) } else { 0.0 };
+        for (i, (w, folded)) in row.widths.iter_mut().zip(row.folded.iter_mut()).enumerate() {
+            if *folded {
+                continue;
+            }
+            if i == k {
+                *w = new;
+            } else {
+                *w *= scale;
+                // Rounding noise must not fold a tile that is exactly at the threshold.
+                *folded = *w < TAB_THRESHOLD - 1e-9;
             }
         }
+        row.normalize_open();
     }
 
     pub fn is_tab(&self, id: TileId) -> bool {
-        self.find(id).is_some_and(|(c, r, _)| self.columns[c].tabs[r])
+        self.find(id).is_some_and(|(c, r, k)| self.columns[c].tabs[r] || self.columns[c].rows[r].folded[k])
     }
 
     /// Open a tab: its row takes the place of the largest open row of its column, which
-    /// becomes a tab in turn.
+    /// becomes a tab in turn. A tile folded inside its row does the same with the widest
+    /// open tile of the row.
     pub fn open_tab(&mut self, id: TileId) {
-        let Some((c, r, _)) = self.find(id) else { return };
+        let Some((c, r, k)) = self.find(id) else { return };
         let col = &mut self.columns[c];
+        if col.rows[r].folded[k] {
+            let row = &mut col.rows[r];
+            let widest = (0..row.tiles.len()).filter(|i| !row.folded[*i]).max_by(|a, b| row.widths[*a].total_cmp(&row.widths[*b]));
+            match widest {
+                Some(wide) => {
+                    row.widths.swap(wide, k);
+                    row.folded[wide] = true;
+                }
+                None => row.widths[k] = 1.0,
+            }
+            row.folded[k] = false;
+        }
         if !col.tabs[r] {
             return;
         }
@@ -978,7 +1019,7 @@ impl Layout {
                 } else {
                     (space as f64 * h / total).round() as i32
                 };
-                out.extend(row_geometries(&rows[*r], Rect::new(content.x, y, w, th), sep, visible));
+                out.extend(row_geometries(&rows[*r], Rect::new(content.x, y, w, th), sep, *tab, visible));
                 y += th + sep;
             }
         }
@@ -995,17 +1036,31 @@ pub fn past_edges(area: Rect, rects: &[(TileId, Rect)]) -> (usize, usize) {
     (left, right)
 }
 
-/// The tiles of `row` side by side in `rect`, `sep` pixels apart.
-fn row_geometries(row: &Row, rect: Rect, sep: i32, visible: &dyn Fn(TileId) -> bool) -> Vec<(TileId, Rect)> {
-    let shown: Vec<(TileId, f64)> =
-        row.tiles.iter().zip(&row.widths).filter(|(t, _)| visible(**t)).map(|(t, w)| (*t, *w)).collect();
-    let total: f64 = shown.iter().map(|(_, w)| w).sum();
-    let space = rect.w - sep * (shown.len() as i32 - 1);
+/// The tiles of `row` side by side in `rect`, `sep` pixels apart; folded ones as upright
+/// bars `TAB_HEIGHT` wide. A row folded in its column (`in_bar`) gives each tile its share
+/// of the bar, folded or not.
+fn row_geometries(row: &Row, rect: Rect, sep: i32, in_bar: bool, visible: &dyn Fn(TileId) -> bool) -> Vec<(TileId, Rect)> {
+    let shown: Vec<(TileId, f64, bool)> = (0..row.tiles.len())
+        .filter(|i| visible(row.tiles[*i]))
+        .map(|i| (row.tiles[i], row.widths[i], row.folded[i] && !in_bar))
+        .collect();
+    // Folded widths are stale shares: only the open tiles split what the bars leave.
+    let total: f64 = shown.iter().filter(|(_, _, f)| !f).map(|(_, w, _)| w).sum();
+    let bars = shown.iter().filter(|(_, _, f)| *f).count() as i32;
+    let space = rect.w - sep * (shown.len() as i32 - 1) - bars * TAB_HEIGHT;
+    let last_open = shown.iter().rposition(|(_, _, f)| !f);
     let mut x = rect.x;
     let mut out = Vec::new();
-    for (i, (t, w)) in shown.iter().enumerate() {
-        // The last tile takes what rounding left.
-        let tw = if i + 1 == shown.len() { rect.x + rect.w - x } else { (space as f64 * w / total).round() as i32 };
+    for (i, (t, w, folded)) in shown.iter().enumerate() {
+        let tw = if *folded {
+            TAB_HEIGHT
+        } else if Some(i) == last_open {
+            // The last open tile takes what rounding left, minus the bars after it.
+            let after = shown[i + 1..].len() as i32;
+            rect.x + rect.w - x - after * (TAB_HEIGHT + sep)
+        } else {
+            (space as f64 * w / total).round() as i32
+        };
         out.push((*t, Rect::new(x, rect.y, tw, rect.h)));
         x += tw + sep;
     }
@@ -1286,15 +1341,47 @@ mod tests {
     }
 
     #[test]
-    fn row_width_keeps_every_tile_above_the_minimum() {
+    fn squeezed_tiles_of_a_row_fold_into_upright_bars() {
         let mut l = Layout::default();
         l.insert(1, None, Split::Vertical);
         l.insert_on(2, Some(1), Side::Right);
         l.insert_on(3, Some(2), Side::Right);
-        l.resize_row_width(3, -0.2);
         l.resize_row_width(1, 1.0);
+        assert!(!l.is_tab(1) && l.is_tab(2) && l.is_tab(3));
+        let w = 1000 - 2 * TAB_HEIGHT;
+        assert_eq!(
+            geo(&mut l, 1),
+            vec![
+                (1, Rect::new(0, 0, w, 600)),
+                (2, Rect::new(w, 0, TAB_HEIGHT, 600)),
+                (3, Rect::new(w + TAB_HEIGHT, 0, TAB_HEIGHT, 600)),
+            ]
+        );
+        // Shrinking a tile opens the folded ones again, evenly.
+        l.resize_row_width(1, -0.05);
+        assert!(!l.is_tab(2) && !l.is_tab(3));
         let widths: Vec<i32> = geo(&mut l, 1).iter().map(|(_, r)| r.w).collect();
-        assert_eq!(widths, vec![800, 100, 100]);
+        assert_eq!(widths, vec![333, 333, 334]);
+    }
+
+    #[test]
+    fn a_folded_tile_of_a_row_opens_in_place_of_the_widest() {
+        let mut l = Layout::default();
+        l.insert(1, None, Split::Vertical);
+        l.insert_on(2, Some(1), Side::Right);
+        l.insert_on(3, Some(2), Side::Right);
+        l.resize_row_width(1, 0.2); // 2 and 3 squeezed to 0.23 each: still open
+        assert!(!l.is_tab(2));
+        l.resize_row_width(1, 0.2); // now 0.13: folded
+        assert!(l.is_tab(2) && l.is_tab(3));
+        l.open_tab(3);
+        assert!(l.is_tab(1) && l.is_tab(2) && !l.is_tab(3));
+        let g = geo(&mut l, 3);
+        assert_eq!(g[2], (3, Rect::new(2 * TAB_HEIGHT, 0, 1000 - 2 * TAB_HEIGHT, 600)));
+        // Taking out the one open tile opens the rest.
+        l.remove(3);
+        assert!(!l.is_tab(1) && !l.is_tab(2));
+        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 500, 600)), (2, Rect::new(500, 0, 500, 600))]);
     }
 
     #[test]

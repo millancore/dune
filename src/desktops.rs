@@ -88,7 +88,7 @@ impl Dune {
         self.show_desk_on(&output, n);
     }
 
-    /// Make `output` show its desktop `n`.
+    /// Make `output` show its desktop `n`; a locked one (`crate::privacy`) is not shown.
     pub fn show_desk_on(&mut self, output: &str, n: u8) {
         let output = output.to_string();
         if !self.space.outputs().any(|o| o.name() == output) {
@@ -97,6 +97,9 @@ impl Dune {
         let current = self.desk_of(&output);
         if current == n || !(1..=DESKS).contains(&n) {
             return;
+        }
+        if self.privacy.locked(&output, n) {
+            return tracing::info!(output, desk = n, "desktop locked, not shown");
         }
         let mut leaving = self.take_shown(&output);
         leaving.focused = self.focused.filter(|f| leaving.contains(*f));
@@ -108,6 +111,7 @@ impl Dune {
         let back = coming.focused.filter(|f| coming.contains(*f)).or_else(|| coming.tiles().first().copied());
         self.show(&output, coming);
         self.desks.insert(output.clone(), n);
+        self.previous_desks.insert(output.clone(), current);
         tracing::info!(output, desk = n, "desktop shown");
 
         // Focus goes to the desktop shown: the tile focused there last. An empty desktop

@@ -1,6 +1,6 @@
 //! A monospace font: faces (regular, bold, italic), per-character fallback fonts,
-//! cell metrics and a cache of rasterized glyphs. dune-term draws its cells with it,
-//! the compositor its tab titles.
+//! cell metrics and a cache of rasterized glyphs. The compositor draws its tab titles
+//! with it, dune-finder its panel.
 
 use std::collections::HashMap;
 

@@ -1,6 +1,6 @@
 //! The apps mode (Mod+d): it searches the desktop applications with the picker and lets
 //! the user choose, before Enter, where the app opens: on a side of the focused tile,
-//! floating, as a tab of it, on another monitor or desktop (`firefox @2`, see `Dest::with`).
+//! floating, as a tab of it, on another monitor or desktop (`firefox :d2`, see `Dest::with`).
 //! Graphical apps start on their own, like rofi does; console programs get a terminal.
 //!
 //! Opened for an empty container (Mod+Enter, `slot`), Enter right away puts a terminal
@@ -20,9 +20,9 @@ use crate::{
     panel::{Row, View},
 };
 
-const HINT: &str = "@3 desk @m2 mon @t tab @f float ^arrows · / windows # files";
-const DEST_HELP: &str = "@: 1-9 desktop · m1-m9 monitor · t tab · n new · f float";
-const SLOT_HINT: &str = "Enter: terminal · pick a program · / windows · # files";
+const HINT: &str = ":d3 :m2 :t :f ^arrows · / windows # files > jump";
+const DEST_HELP: &str = ":  d1-9 desktop · m1-m9 monitor · t tab · n new · f float";
+const SLOT_HINT: &str = "Enter: terminal · pick a program · / windows # files > jump";
 
 /// What a key did in the apps mode.
 #[derive(Debug, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub enum Step {
     Windows,
     /// `#` typed first: go to the files.
     Files,
+    /// `>` typed first: go to the folders to jump to.
+    Jump,
 }
 
 pub struct Apps {
@@ -89,7 +91,7 @@ impl Apps {
         Dest { place: self.place, tab: self.tab, monitor: None, desk: None }
     }
 
-    /// The Ctrl keys' choice changed by the `@` word typed; None when that word is wrong.
+    /// The Ctrl keys' choice changed by the `:` word typed; None when that word is wrong.
     fn dest(&self) -> Option<Dest> {
         match self.picker.dest() {
             Some(word) => self.keys_dest().with(word),
@@ -97,7 +99,7 @@ impl Apps {
         }
     }
 
-    /// Where what is chosen goes: the Ctrl keys' choice with the `@` word typed.
+    /// Where what is chosen goes: the Ctrl keys' choice with the `:` word typed.
     pub fn destination(&self) -> Dest {
         self.dest().unwrap_or(self.keys_dest())
     }
@@ -160,6 +162,7 @@ impl Apps {
         match key {
             Key::Char('/') if self.picker.input().is_empty() => return Step::Windows,
             Key::Char('#') if self.picker.input().is_empty() => return Step::Files,
+            Key::Char('>') if self.picker.input().is_empty() => return Step::Jump,
             _ => {}
         }
         // Nothing is highlighted yet: the first Down lands on the first app.
@@ -232,7 +235,7 @@ impl Apps {
             .collect();
         let hint = if self.slot { SLOT_HINT } else { HINT };
         View {
-            prompt: format!("> {}▏", self.picker.input()),
+            prompt: format!("{}▏", self.picker.input()),
             rows,
             status: self.status(),
             hint,
@@ -460,10 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn at_words_choose_the_destination() {
+    fn colon_words_choose_the_destination() {
         let r = column();
         let mut a = launcher();
-        typed(&mut a, "fire @2");
+        typed(&mut a, "fire :d2");
         assert_eq!(
             press(&mut a, Keysym::Return, false),
             Step::Launch {
@@ -473,7 +476,13 @@ mod tests {
                 app: Some("firefox".into())
             }
         );
-        // Ctrl+t opens as a tab; `@n` undoes it.
+        // A wrong or unfinished `:` word: the help says what fits.
+        let mut a = launcher();
+        typed(&mut a, "fire :d");
+        assert_eq!(a.status(), DEST_HELP);
+        typed(&mut a, "3");
+        assert_eq!(a.status(), "opens in a new column · desktop 3");
+        // Ctrl+t opens as a tab; `:n` undoes it.
         let mut a = launcher();
         press(&mut a, Keysym::t, true);
         typed(&mut a, "fire");
@@ -486,7 +495,7 @@ mod tests {
         ));
         let mut a = launcher();
         press(&mut a, Keysym::t, true);
-        typed(&mut a, "fire @n");
+        typed(&mut a, "fire :n");
         assert!(matches!(
             press(&mut a, Keysym::Return, false),
             Step::Launch {

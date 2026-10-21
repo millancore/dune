@@ -1,23 +1,16 @@
 //! The dune layer: what happens between the keyboard and the shell of a terminal tile.
 //!
-//! Typing goes to the shell; this layer tracks whether a command line was started
-//! since the last Enter, so `cmd:v`/`cmd:h` lines and the direction indicator can
-//! send a command to a new tile, and `DUNE_RUN` runs once the shell is ready.
+//! Typing goes to the shell; this layer runs `DUNE_RUN` once the shell is ready, and
+//! tells the compositor which tile the windows of what it ran belong to (swallow).
 //! "At the prompt" means the shell itself is the foreground process group of its
 //! terminal (no program running) — the caller checks that.
 //!
 //! The layer only decides; the caller does the I/O: it writes the returned bytes to
 //! the shell. Applications are started from the compositor's launcher.
 
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use crate::{
-    picker::Line,
-    protocol::{Request, Side, TileId},
-};
+use crate::protocol::{Request, TileId};
 
 /// Quiet time after the shell's first prompt before a `DUNE_RUN` command is typed
 /// (startup files may run programs before that).
@@ -27,15 +20,11 @@ pub struct AtLayer {
     tile: Option<TileId>,
     shell_pid: u32,
     send: Box<dyn Fn(&Request) -> bool>,
-    /// Takes (reads and clears) the tile's direction indicator, kept by dune.
-    take_direction: Box<dyn Fn() -> Option<Side>>,
-    /// Something was typed at the prompt since the last Enter.
-    typed: bool,
     /// The shell was at its prompt the last time we looked.
     was_idle: bool,
     /// A program was started in place and the compositor is waiting for its window.
     swallowing: bool,
-    /// Command to run once the shell is ready (tiles opened with `prog:v`).
+    /// Command to run once the shell is ready (`DUNE_RUN`: what the launcher runs in a terminal).
     run_first: Option<String>,
     last_output: Option<Instant>,
 }
@@ -52,8 +41,7 @@ impl AtLayer {
     pub fn for_tile(shell_pid: u32, run_first: Option<String>) -> Self {
         let tile = std::env::var("DUNE_TILE").ok().and_then(|t| t.parse().ok());
         let send = Box::new(|req: &Request| crate::protocol::send(req).is_ok());
-        let take_direction = Box::new(move || tile.and_then(crate::protocol::take_direction));
-        Self::new(tile, shell_pid, run_first, send, take_direction)
+        Self::new(tile, shell_pid, run_first, send)
     }
 
     pub fn new(
@@ -61,14 +49,11 @@ impl AtLayer {
         shell_pid: u32,
         run_first: Option<String>,
         send: Box<dyn Fn(&Request) -> bool>,
-        take_direction: Box<dyn Fn() -> Option<Side>>,
     ) -> Self {
         AtLayer {
             tile,
             shell_pid,
             send,
-            take_direction,
-            typed: false,
             was_idle: true,
             swallowing: false,
             run_first: run_first.filter(|r| !r.trim().is_empty()),
@@ -96,7 +81,6 @@ impl AtLayer {
     pub fn tick(&mut self, at_prompt: bool) -> Vec<u8> {
         if at_prompt && !self.was_idle {
             // A program handed the terminal back to the shell.
-            self.typed = false;
             self.end_swallow();
         }
         self.was_idle = at_prompt;
@@ -108,87 +92,27 @@ impl AtLayer {
         Vec::new()
     }
 
-    /// Nothing was typed at the prompt since the last Enter: the next key starts a
-    /// new command line.
-    pub fn line_is_empty(&self) -> bool {
-        !self.typed
-    }
-
-    /// A `cmd:v args` / `cmd:h args` line typed at the prompt (see
-    /// `picker::parse_split_command`): ask the compositor for the tile. The caller
-    /// clears the shell's line instead of sending Enter.
-    pub fn split_command(&mut self, line: Line) {
-        self.typed = false;
-        self.run_line(line);
-    }
-
-    /// Enter on a typed command line: the side its tile's direction indicator
-    /// points to, if any (taking it clears it).
-    pub fn take_direction(&self) -> Option<Side> {
-        (self.take_direction)()
-    }
-
-    /// Open `command` in a new tile on `side` of this one (the caller clears the
-    /// shell's line instead of sending Enter).
-    pub fn open_beside(&mut self, side: Side, command: String) {
-        self.typed = false;
-        self.open(side, command);
-    }
-
     /// Input typed by the user (already encoded as terminal bytes); returns what goes
     /// to the shell (all of it: the layer only watches).
     pub fn input(&mut self, bytes: &[u8], at_prompt: bool) -> Vec<u8> {
         if !at_prompt {
-            self.typed = false;
             return bytes.to_vec();
         }
 
         let mut i = 0;
         while i < bytes.len() {
-            let b = bytes[i];
-            if b == 0x1b {
-                // Replies from the terminal (cursor reports, focus events, OSC/DCS
-                // answers) are not typing; arrow keys and the like are.
-                let len = escape_len(&bytes[i..]);
-                if !is_terminal_reply(&bytes[i..i + len]) {
-                    self.typed = true;
-                }
-                i += len;
+            // Escape sequences (keys, terminal replies) may carry anything; skip them.
+            if bytes[i] == 0x1b {
+                i += escape_len(&bytes[i..]);
                 continue;
             }
-            match b {
-                b'\r' | b'\n' => {
-                    self.typed = false;
-                    // A builtin run in place (no program ran) ends here.
-                    self.end_swallow();
-                }
-                0x03 | 0x15 => self.typed = false, // Ctrl-C / Ctrl-U clear the line
-                _ => self.typed = true,
+            if matches!(bytes[i], b'\r' | b'\n') {
+                // A builtin run in place (no program ran) ends here.
+                self.end_swallow();
             }
             i += 1;
         }
         bytes.to_vec()
-    }
-
-    /// Run a split line: on the side it names (`:v`/`:h`), else on the side the
-    /// direction indicator points to, else in place.
-    fn run_line(&mut self, line: Line) -> Vec<u8> {
-        match line.split.map(Side::from).or_else(|| (self.take_direction)()) {
-            Some(side) => {
-                self.open(side, line.command);
-                Vec::new()
-            }
-            None => self.run_in_place(&line.command),
-        }
-    }
-
-    fn open(&mut self, side: Side, command: String) {
-        (self.send)(&Request::Open {
-            side: Some(side),
-            from: self.tile,
-            cwd: Some(self.shell_cwd()),
-            command,
-        });
     }
 
     /// The command typed into the shell, as if by the user, after telling the
@@ -210,30 +134,6 @@ impl AtLayer {
             }
         }
     }
-
-    fn shell_cwd(&self) -> PathBuf {
-        std::fs::read_link(format!("/proc/{}/cwd", self.shell_pid))
-            .or_else(|_| std::env::current_dir())
-            .unwrap_or_else(|_| PathBuf::from("/"))
-    }
-}
-
-/// Name of dune's shell wrapper; terminals inside dune get it as `$SHELL`.
-pub const WRAPPER_NAME: &str = "dune-shell";
-
-/// When `$SHELL` is dune's wrapper, the user's real shell (`DUNE_USER_SHELL`, or
-/// `/bin/sh`): a terminal that does the dune layer itself starts that directly.
-pub fn wrapped_user_shell() -> Option<PathBuf> {
-    let shell = PathBuf::from(std::env::var_os("SHELL")?);
-    if shell.file_name()? != WRAPPER_NAME {
-        return None;
-    }
-    Some(
-        std::env::var_os("DUNE_USER_SHELL")
-            .map(PathBuf::from)
-            .filter(|s| s.file_name().is_some_and(|n| n != WRAPPER_NAME) && s.exists())
-            .unwrap_or_else(|| PathBuf::from("/bin/sh")),
-    )
 }
 
 /// Length of the escape sequence at the start of `bytes` (which starts with ESC).
@@ -263,51 +163,21 @@ fn escape_len(bytes: &[u8]) -> usize {
     }
 }
 
-fn is_terminal_reply(seq: &[u8]) -> bool {
-    match seq.get(1) {
-        Some(b']') | Some(b'P') | Some(b'_') => true,
-        // Cursor position, device attributes/status, focus in/out, window reports.
-        Some(b'[') => matches!(seq.last(), Some(b'R' | b'c' | b'n' | b'I' | b'O' | b't' | b'y')),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::*;
-    use crate::protocol::Side;
 
     /// A layer for tile 7 whose requests are recorded.
     fn layer(run_first: Option<&str>) -> (AtLayer, Rc<RefCell<Vec<Request>>>) {
-        layer_pointing(run_first, None)
-    }
-
-    /// The same, with the tile's direction indicator pointing to `side` (once).
-    fn layer_pointing(run_first: Option<&str>, side: Option<Side>) -> (AtLayer, Rc<RefCell<Vec<Request>>>) {
         let sent = Rc::new(RefCell::new(Vec::new()));
         let log = sent.clone();
         let send = Box::new(move |req: &Request| {
-            log.borrow_mut().push(match req {
-                Request::Open {
-                    side,
-                    from,
-                    command,
-                    ..
-                } => Request::Open {
-                    side: *side,
-                    from: *from,
-                    cwd: None,
-                    command: command.clone(),
-                },
-                other => other.clone(),
-            });
+            log.borrow_mut().push(req.clone());
             true
         });
-        let indicator = std::cell::Cell::new(side);
-        let take_direction = Box::new(move || indicator.take());
-        (AtLayer::new(Some(7), 4242, run_first.map(String::from), send, take_direction), sent)
+        (AtLayer::new(Some(7), 4242, run_first.map(String::from), send), sent)
     }
 
     #[test]
@@ -318,45 +188,16 @@ mod tests {
     }
 
     #[test]
-    fn terminal_replies_do_not_count_as_typing() {
-        let (mut at, _) = layer(None);
-        at.input(b"\x1b[12;40R\x1b[I", true);
-        assert!(at.line_is_empty());
-        // But an arrow key (history) does.
-        at.input(b"\x1b[A", true);
-        assert!(!at.line_is_empty());
-    }
-
-    #[test]
-    fn colon_goes_to_the_shell() {
-        let (mut at, sent) = layer(None);
-        assert_eq!(at.input(b":", true), b":");
-        assert!(!at.line_is_empty());
-        assert!(sent.borrow().is_empty());
-    }
-
-    #[test]
-    fn open_beside_a_typed_command() {
-        let (mut at, sent) = layer_pointing(None, Some(Side::Up));
-        at.input(b"htop", true);
-        let side = at.take_direction().unwrap();
-        at.open_beside(side, "htop".into());
-        assert!(at.line_is_empty());
-        assert_eq!(sent.borrow()[0], Request::Open { side: Some(Side::Up), from: Some(7), cwd: None, command: "htop".into() });
-        assert_eq!(at.take_direction(), None);
-    }
-
-    #[test]
-    fn split_command_without_at() {
-        let (mut at, sent) = layer(None);
-        at.input(b"vim:h test.txt", true);
-        assert!(!at.line_is_empty());
-        at.split_command(crate::picker::parse_split_command("vim:h test.txt").unwrap());
-        assert!(at.line_is_empty());
-        assert_eq!(
-            sent.borrow()[0],
-            Request::Open { side: Some(Side::Down), from: Some(7), cwd: None, command: "vim test.txt".into() }
-        );
+    fn enter_at_the_prompt_ends_a_swallow() {
+        let (mut at, sent) = layer(Some("cd /tmp"));
+        at.output_seen();
+        std::thread::sleep(SETTLE + Duration::from_millis(20));
+        assert_eq!(at.tick(true), b"cd /tmp\r");
+        // A terminal reply carrying a newline is not Enter.
+        at.input(b"\x1b]11;a\nb\x07", true);
+        assert_eq!(sent.borrow().len(), 1);
+        at.input(b"\r", true);
+        assert_eq!(sent.borrow()[1], Request::Unswallow { tile: 7 });
     }
 
     #[test]
@@ -379,7 +220,5 @@ mod tests {
         assert_eq!(escape_len(b"\x1b[12;40R"), 8);
         assert_eq!(escape_len(b"\x1b]11;rgb:0/0/0\x07x"), 15);
         assert_eq!(escape_len(b"\x1bOA"), 3);
-        assert!(is_terminal_reply(b"\x1b[12;40R"));
-        assert!(!is_terminal_reply(b"\x1b[3~"));
     }
 }

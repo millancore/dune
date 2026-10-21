@@ -10,6 +10,8 @@ mod input;
 mod ipc;
 mod launcher;
 mod layout;
+mod lock;
+mod privacy;
 mod reload;
 mod render;
 mod screencopy;
@@ -33,7 +35,7 @@ usage:
                                          another session as a window (--tty/--nested to force)
   dune open [--split v|h] [--from TILE] [--cwd DIR] [--] COMMAND...
                                          open COMMAND in a new terminal tile
-  dune shell                             run the : layer around $DUNE_USER_SHELL (what tiles run)";
+  dune shell                             run the dune layer around $DUNE_USER_SHELL (what tiles run)";
 
 fn main() {
     let mut args = std::env::args_os();
@@ -173,8 +175,8 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Run an `exec` line of the config through the shell, on its own.
-fn autostart(command: &str) {
+/// Run a command of the config (an `exec` line, `lock_command`) through the shell, on its own.
+pub fn autostart(command: &str) {
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(command).env_remove("DUNE_TILE").env_remove("DUNE_RUN").env_remove("DUNE_LAUNCH");
     if let Some(home) = std::env::var_os("HOME") {

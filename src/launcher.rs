@@ -4,8 +4,9 @@
 //! apps start on their own, like rofi does; console programs get a terminal.
 //!
 //! Mod+Enter opens dune-finder for a new, empty container instead: Enter right away puts
-//! a terminal there, anything chosen or typed goes there too. Mod+/ opens it on the list
-//! of windows (`crate::windows`).
+//! a terminal there, anything chosen or typed goes there too. The `switcher` key opens it
+//! on the list of windows (`crate::windows`), Mod+/ on the focused tile's options
+//! (`crate::privacy::option_rows`), whose rows come back as `tile_action` requests.
 
 use std::{
     collections::HashMap,
@@ -81,6 +82,8 @@ pub struct FinderRun {
 pub enum FinderMode {
     Apps,
     Windows,
+    /// The focused tile's options (Mod+/).
+    TileOptions,
 }
 
 impl FinderMode {
@@ -88,16 +91,17 @@ impl FinderMode {
         match self {
             FinderMode::Apps => "apps",
             FinderMode::Windows => "windows",
+            FinderMode::TileOptions => "tile-options",
         }
     }
 }
 
 impl Dune {
-    /// Mod+d / Mod+/: show dune-finder on the active output, or hide it.
+    /// Mod+d / Mod+/ / `switcher`: show dune-finder on the active output, or hide it.
     pub fn toggle_finder(&mut self, mode: FinderMode) {
         if self.finder_running() {
-            // Mod+/ on the apps of an empty container: its windows instead, the one chosen
-            // goes into it (`go_to`).
+            // The `switcher` key on the apps of an empty container: its windows instead, the
+            // one chosen goes into it (`go_to`).
             if let Some(run) = self.finder.as_mut().filter(|r| r.mode == FinderMode::Apps && mode == FinderMode::Windows)
                 && let Some(slot) = run.slot.take()
             {
@@ -105,6 +109,10 @@ impl Dune {
                 return self.start_finder(mode, Some(slot), false);
             }
             return self.close_finder();
+        }
+        // The tile options are a focused tile's: none, no menu.
+        if mode == FinderMode::TileOptions && self.focused.is_none() {
+            return tracing::debug!("no focused tile: no tile options");
         }
         self.start_finder(mode, None, false);
     }
@@ -286,7 +294,15 @@ impl Dune {
 
     /// A `launch` request from dune-finder: start `command` where `dest` says, next to
     /// `target`, or into the empty container `slot`; in a terminal with `terminal`.
-    pub fn finder_launch(&mut self, dest: Dest, target: Option<TileId>, slot: Option<TileId>, command: String, terminal: bool) {
+    pub fn finder_launch(
+        &mut self,
+        dest: Dest,
+        target: Option<TileId>,
+        slot: Option<TileId>,
+        command: String,
+        terminal: bool,
+        cwd: Option<PathBuf>,
+    ) {
         let spot = match slot.filter(|s| self.tiles.contains_key(s)) {
             Some(slot) => {
                 // It is filled now: dune-finder going away leaves it.
@@ -311,7 +327,7 @@ impl Dune {
         {
             self.show_desk_on(output, *desk);
         }
-        self.launch(command, spot, terminal);
+        self.launch(command, spot, terminal, cwd);
         // A terminal's tile is placed by `launch`; showing it afterwards brings it along.
         if let Some((output, desk)) = follow
             && terminal
@@ -345,7 +361,7 @@ impl Dune {
     /// Start `command` for `spot`. Graphical apps start on their own, like rofi; console
     /// programs in a terminal. The process carries `DUNE_LAUNCH`, so `place_toplevel`
     /// knows where its first window goes.
-    fn launch(&mut self, command: String, spot: Spot, terminal: bool) {
+    fn launch(&mut self, command: String, spot: Spot, terminal: bool, cwd: Option<PathBuf>) {
         let n = self.next_launch;
         self.next_launch += 1;
         // A forgotten launch leaves its empty container behind: take it away too.
@@ -382,7 +398,7 @@ impl Dune {
                 }
             };
             let stack = matches!(spot, Spot::Tab(_)) && stacked.is_none();
-            if self.start_terminal(tile, None, Some(command), stack.then_some(n)) {
+            if self.start_terminal(tile, cwd, Some(command), stack.then_some(n)) {
                 if stack {
                     self.launches.insert(n, Launch { spot, started: Instant::now(), pid: None });
                 }

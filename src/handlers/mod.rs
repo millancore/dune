@@ -144,4 +144,58 @@ impl PointerConstraintsHandler for Dune {
     }
 }
 
+//
+// Idle: swayidle hears when input stops (ext-idle-notify); a video or a game holds it off
+// (idle-inhibit)
+//
+
+use smithay::desktop::{WindowSurfaceType, layer_map_for_output};
+use smithay::wayland::compositor::get_parent;
+use smithay::wayland::idle_inhibit::IdleInhibitHandler;
+use smithay::wayland::idle_notify::{IdleNotifierHandler, IdleNotifierState};
+
+impl IdleNotifierHandler for Dune {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier_state
+    }
+}
+
+impl IdleInhibitHandler for Dune {
+    fn inhibit(&mut self, surface: WlSurface) {
+        if !self.idle_inhibitors.contains(&surface) {
+            self.idle_inhibitors.push(surface);
+        }
+        self.refresh_idle_inhibit();
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitors.retain(|s| *s != surface);
+        self.refresh_idle_inhibit();
+    }
+}
+
+impl Dune {
+    /// Idle is held off while a surface that asked for it is alive and shown: on a window
+    /// mapped on screen (not a hidden tab, desktop or swallowed one) or a layer. Called
+    /// after every frame too, as surfaces die or get hidden without telling.
+    pub fn refresh_idle_inhibit(&mut self) {
+        self.idle_inhibitors.retain(|s| s.is_alive());
+        let inhibited = self.idle_inhibitors.iter().any(|s| self.is_shown_surface(s));
+        self.idle_notifier_state.set_is_inhibited(inhibited);
+    }
+
+    /// Whether `surface` (or the surface it is a subsurface of) is a shown window or a layer.
+    fn is_shown_surface(&self, surface: &WlSurface) -> bool {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.space.elements().any(|w| w.toplevel().is_some_and(|t| *t.wl_surface() == root))
+            || self
+                .space
+                .outputs()
+                .any(|o| layer_map_for_output(o).layer_for_surface(&root, WindowSurfaceType::TOPLEVEL).is_some())
+    }
+}
+
 smithay::delegate_dispatch2!(Dune);

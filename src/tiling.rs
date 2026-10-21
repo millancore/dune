@@ -1,6 +1,11 @@
 //! Tile management: spawning terminal tiles, placing new windows, swallowing and focus.
 
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::input::{InputTime, KeyState},
@@ -17,7 +22,7 @@ use smithay::{
     },
 };
 
-use dune_common::protocol::{Request, Side, WindowInfo, direction_answer};
+use dune_common::protocol::{Request, Side, TileOption, WindowInfo};
 
 use crate::{
     config::TerminalHere,
@@ -30,6 +35,28 @@ use crate::{
 /// a column are only `BORDER` apart, so neighbours share one border line.
 pub const GAP: i32 = 6;
 pub const BORDER: i32 = 1;
+/// How long a resize by keys or wheel takes to slide from the old size to the new one.
+const RESIZE_ANIMATION: Duration = Duration::from_millis(150);
+/// A size sent to a client that has not drawn it after this long no longer holds back
+/// the next one (a client that never answers must not freeze its size).
+const CONFIGURE_WAIT: Duration = Duration::from_millis(150);
+
+/// A resize sliding into place: where each tile it moves started, and since when.
+pub struct ResizeAnimation {
+    from: HashMap<TileId, Rect>,
+    start: Instant,
+}
+
+/// `from` moved towards `to` by `t` (0 to 1).
+fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
+    let mix = |a: i32, b: i32| a + ((b - a) as f64 * t).round() as i32;
+    Rect::new(mix(from.x, to.x), mix(from.y, to.y), mix(from.w, to.w), mix(from.h, to.h))
+}
+
+/// Ease-out cubic: quick at first, slowing into place.
+fn ease_out(t: f64) -> f64 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
 
 /// Where a tile being dragged would go: next to `target` on `side` in `output`'s
 /// layout (at its end without a target), in a column of its own when `column`, or
@@ -51,7 +78,7 @@ impl Dune {
     /// The tile is reserved in the layout right away but takes no space until the
     /// terminal maps its window. The terminal runs dune's shell wrapper as its
     /// `$SHELL` (see `crate::shell`), which starts the user's shell; `run` is handed
-    /// to the wrapper through `DUNE_RUN` and executed as if typed as `@<run>`.
+    /// to the wrapper through `DUNE_RUN` and typed at the prompt once the shell is ready.
     pub fn spawn_terminal(
         &mut self,
         target: Option<TileId>,
@@ -110,10 +137,33 @@ impl Dune {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
+    /// Focus left tile `id`: the folder its shell worked in counts as a visit for
+    /// dune-finder's jumps. Only windows running something (a terminal's shell) count, and
+    /// neither the home folder nor the root, where apps started from the launcher sit.
+    fn record_jump(&self, id: TileId) {
+        let Some(surface) = self.tiles.get(&id).and_then(|t| t.top()).and_then(|w| w.toplevel()).map(|t| t.wl_surface().clone()) else {
+            return;
+        };
+        if self.client_pid(&surface).and_then(newest_child).is_none() {
+            return;
+        }
+        let Some(dir) = self.tile_cwd(id) else { return };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if dir == std::path::Path::new("/") || Some(&dir) == home.as_ref() {
+            return;
+        }
+        // A file write: kept off the compositor's thread.
+        std::thread::spawn(move || {
+            if let Err(err) = dune_common::jumps::record(&dir) {
+                tracing::warn!("cannot record the jump to {}: {err}", dir.display());
+            }
+        });
+    }
+
     /// Start a terminal for tile `id` (its `DUNE_TILE`), running `run` like `spawn_terminal`.
     /// `launch` is the launcher's `DUNE_LAUNCH` number when the launcher placed it.
     pub fn start_terminal(&mut self, id: TileId, cwd: Option<PathBuf>, run: Option<String>, launch: Option<u64>) -> bool {
-        let terminal = terminal_command(&self.config.terminal);
+        let terminal = &self.config.terminal;
         let mut cmd = Command::new("/bin/sh");
         // `exec` keeps the pid, so the Wayland client pid is the terminal's own.
         cmd.arg("-c").arg(format!("exec {terminal}"));
@@ -323,10 +373,14 @@ impl Dune {
             .cloned()
     }
 
-    /// The pointer moved: the output under it becomes the active one.
+    /// The pointer moved: the output under it becomes the active one (locked, the
+    /// keyboard goes to that output's lock surface).
     pub fn pointer_at(&mut self, pos: Point<f64, Logical>) {
-        if let Some(output) = self.space.output_under(pos).next() {
-            self.active_output = Some(output.name());
+        let Some(name) = self.space.output_under(pos).next().map(|o| o.name()) else { return };
+        let changed = self.active_output.as_ref() != Some(&name);
+        self.active_output = Some(name);
+        if changed && self.session_lock.is_locked() {
+            self.update_focus();
         }
     }
 
@@ -343,7 +397,7 @@ impl Dune {
     ///    window nothing claims, the latest launch's) goes where the launcher was told:
     ///    a new tab of the focused tile's container, its empty container, or a new tile
     ///    on some monitor and desktop;
-    /// 3. a program started with `@prog` swallows the tile it was started from: its
+    /// 3. a program a tile's shell ran in place (`DUNE_RUN`) swallows the tile it was started from: its
     ///    process descends from a shell that announced a swallow for that tile;
     /// 4. anything else gets a new tile next to the focused one.
     pub fn place_toplevel(&mut self, surface: ToplevelSurface) {
@@ -446,7 +500,6 @@ impl Dune {
             }
         } else {
             tracing::info!(tile = id, "window closed, tile removed");
-            self.directions.remove(&id);
             let next = self.neighbor_of(id);
             self.remove_from_layouts(id);
             self.tiles.remove(&id);
@@ -488,6 +541,9 @@ impl Dune {
         }
 
         self.settle_floats();
+        // A private tile that closed is forgotten (ids are not reused).
+        let tiles = &self.tiles;
+        self.privacy.forget_gone(|t| tiles.contains_key(&t));
 
         let tiles = &self.tiles;
         let visible = |id| tiles.get(&id).is_some_and(|t: &Tile| !t.stack.is_empty() || t.reserved);
@@ -550,9 +606,17 @@ impl Dune {
         }
         self.tab_bars = tab_bars;
 
+        self.place_windows();
+        self.refresh_workspaces();
+    }
+
+    /// Map the windows of the strip where `geometries` (or a resize sliding into place)
+    /// puts them, and send them their sizes.
+    fn place_windows(&mut self) {
         // Back to front: mapping an element puts it on top of the space, so floats end up
         // above the strip and clicks reach them.
-        for (id, rect) in self.geometries.iter().rev() {
+        let placed: Vec<(TileId, Rect)> = self.geometries.iter().rev().map(|(id, r)| (*id, self.drawn_rect(*id, *r))).collect();
+        for (id, rect) in &placed {
             let Some(window) = self.tiles[id].top().cloned() else {
                 continue;
             };
@@ -580,12 +644,61 @@ impl Dune {
                     }
                 }
             });
-            // Before the initial commit the size rides along with the initial configure.
-            if toplevel.is_initial_configure_sent() {
-                toplevel.send_pending_configure();
+            self.send_size(toplevel);
+        }
+    }
+
+    /// Where `id`, laid out at `target`, is drawn now: on its way there while a resize slides.
+    pub fn drawn_rect(&self, id: TileId, target: Rect) -> Rect {
+        let Some(anim) = &self.resize_animation else { return target };
+        let Some(from) = anim.from.get(&id) else { return target };
+        let t = anim.start.elapsed().as_secs_f64() / RESIZE_ANIMATION.as_secs_f64();
+        lerp_rect(*from, target, ease_out(t))
+    }
+
+    /// Start a resize sliding from where the tiles are drawn now (so repeated keys glide on).
+    pub fn animate_resize(&mut self) {
+        let from = self.geometries.iter().map(|(id, r)| (*id, self.drawn_rect(*id, *r))).collect();
+        self.resize_animation = Some(ResizeAnimation { from, start: Instant::now() });
+    }
+
+    /// Before a frame: move the windows of a sliding resize on (and stop it once there).
+    pub fn step_resize_animation(&mut self) {
+        let Some(anim) = &self.resize_animation else { return };
+        if anim.start.elapsed() >= RESIZE_ANIMATION {
+            self.resize_animation = None;
+        }
+        self.place_windows();
+    }
+
+    /// Send `toplevel` its pending state; a new size waits while the client has not drawn
+    /// the last one (up to `CONFIGURE_WAIT`), so a resize does not bury it in sizes.
+    fn send_size(&mut self, toplevel: &ToplevelSurface) {
+        // Before the initial commit the size rides along with the initial configure.
+        if !toplevel.is_initial_configure_sent() {
+            return;
+        }
+        let key = toplevel.wl_surface().id();
+        let pending = toplevel.with_pending_state(|state| state.size);
+        let waiting = self.configure_waits.get(&key).is_some_and(|(size, since)| *size != pending && since.elapsed() < CONFIGURE_WAIT);
+        if waiting {
+            return;
+        }
+        if toplevel.send_pending_configure().is_some() {
+            self.configure_waits.insert(key, (pending, Instant::now()));
+        }
+    }
+
+    /// A toplevel committed: once it has drawn the size it was sent, the next may go.
+    pub fn size_committed(&mut self, toplevel: &ToplevelSurface) {
+        let key = toplevel.wl_surface().id();
+        let Some((sent, _)) = self.configure_waits.get(&key).copied() else { return };
+        if toplevel.with_committed_state(|state| state.map(|s| s.size)) == Some(sent) {
+            self.configure_waits.remove(&key);
+            if toplevel.has_pending_changes() {
+                self.send_size(toplevel);
             }
         }
-        self.refresh_workspaces();
     }
 
     /// Give keyboard focus to the visible window of the focused tile.
@@ -594,6 +707,9 @@ impl Dune {
             self.focused = self.geometries.first().map(|(id, _)| *id);
         }
         if let Some(id) = self.focused.filter(|id| self.recent.first() != Some(id)) {
+            if let Some(left) = self.recent.first().copied() {
+                self.record_jump(left);
+            }
             self.recent.retain(|t| *t != id && self.tiles.contains_key(t));
             self.recent.insert(0, id);
         }
@@ -606,11 +722,15 @@ impl Dune {
             }
         }
 
-        // A layer that asked for the keyboard (launcher) keeps it while open.
-        let surface: Option<WlSurface> = self
-            .layer_focus
-            .clone()
-            .or_else(|| focused_window.map(|w| w.toplevel().unwrap().wl_surface().clone()));
+        // Locked, only a lock surface gets it. A layer that asked for the keyboard
+        // (launcher) keeps it while open.
+        let surface: Option<WlSurface> = if self.session_lock.is_locked() {
+            self.lock_focus()
+        } else {
+            self.layer_focus
+                .clone()
+                .or_else(|| focused_window.map(|w| w.toplevel().unwrap().wl_surface().clone()))
+        };
         let keyboard = self.seat.get_keyboard().unwrap();
         keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
     }
@@ -819,13 +939,14 @@ impl Dune {
             Request::Unswallow { tile } => {
                 self.swallows.remove(&tile);
             }
-            // The indicator is used once: asking for it clears it.
-            Request::Direction { tile } => {
-                return Some(direction_answer(self.directions.remove(&tile)));
-            }
-            Request::Windows => return Some(WindowInfo::encode_all(&self.window_list())),
+            Request::Windows => return Some(WindowInfo::encode_all(&self.window_list(false))),
+            Request::LockedWindows => return Some(WindowInfo::encode_all(&self.window_list(true))),
             Request::GoTo { tile } => {
                 self.go_to(tile);
+                return Some("ok".into());
+            }
+            Request::Unlock { tile } => {
+                self.unlock_and_go(tile);
                 return Some("ok".into());
             }
             Request::Launch {
@@ -833,9 +954,15 @@ impl Dune {
                 target,
                 slot,
                 terminal,
+                cwd,
                 command,
             } => {
-                self.finder_launch(dest, target, slot, command, terminal);
+                self.finder_launch(dest, target, slot, command, terminal, cwd);
+                return Some("ok".into());
+            }
+            Request::TileOptions { tile } => return Some(TileOption::encode_all(&self.tile_options(tile))),
+            Request::TileAction { tile, action } => {
+                self.run_tile_action(tile, action);
                 return Some("ok".into());
             }
             Request::Keys(keys) => {
@@ -851,16 +978,6 @@ impl Dune {
         }
         None
     }
-
-    /// Point the focused tile's direction indicator at `side`; the same side again clears it.
-    pub fn toggle_direction(&mut self, side: Side) {
-        let Some(id) = self.focused else { return };
-        if self.directions.get(&id) == Some(&side) {
-            self.directions.remove(&id);
-        } else {
-            self.directions.insert(id, side);
-        }
-    }
 }
 
 fn neighbor_or_first(geoms: &[(TileId, Rect)], id: TileId, order: Vec<TileId>) -> Option<TileId> {
@@ -868,17 +985,6 @@ fn neighbor_or_first(geoms: &[(TileId, Rect)], id: TileId, order: Vec<TileId>) -
         .into_iter()
         .find_map(|dir| neighbor(geoms, id, dir))
         .or_else(|| order.into_iter().find(|t| *t != id))
-}
-
-/// The terminal to run. dune's own `dune-term` is looked up next to the dune binary
-/// first, so it is found even when its directory is not on the session's `PATH`.
-fn terminal_command(configured: &str) -> String {
-    if configured == "dune-term" {
-        return crate::launcher::sibling_command(configured)
-            .to_string_lossy()
-            .into_owned();
-    }
-    configured.to_string()
 }
 
 /// `DUNE_*` variables of a process, read from `/proc`.
@@ -934,6 +1040,16 @@ fn stat_field(pid: u32, n: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resize_slides_from_the_old_rect_to_the_new() {
+        let (from, to) = (Rect::new(0, 0, 500, 600), Rect::new(0, 0, 600, 600));
+        assert_eq!(lerp_rect(from, to, ease_out(0.0)), from);
+        assert_eq!(lerp_rect(from, to, ease_out(1.0)), to);
+        assert_eq!(lerp_rect(from, to, ease_out(2.0)), to);
+        // Eased out: more than half the way at half the time.
+        assert!(lerp_rect(from, to, ease_out(0.5)).w > 550);
+    }
 
     #[test]
     fn process_ancestry() {

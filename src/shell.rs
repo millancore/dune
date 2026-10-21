@@ -1,10 +1,9 @@
-//! The shell wrapper: dune's layer for terminals other than dune-term.
+//! The shell wrapper: dune's layer between a terminal tile and its shell.
 //!
 //! Terminal tiles are started with `SHELL` pointing at dune (as `dune-shell`), so any
 //! terminal emulator runs this instead of the user's shell. It starts the real shell
 //! (`DUNE_USER_SHELL`) on a new PTY and copies bytes both ways, passing what is typed
-//! through the shared layer (`dune_common::at`). dune-term does the same natively and
-//! runs the shell itself.
+//! through the shared layer (`dune_common::at`).
 
 use std::{
     ffi::{CString, OsString},

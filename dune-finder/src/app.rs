@@ -6,7 +6,7 @@ use std::time::Duration;
 use dune_common::{
     desktop,
     font::Font,
-    protocol::{self, Request, TileId, WindowInfo},
+    protocol::{self, Request, TileId, TileOption, WindowInfo},
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -134,10 +134,19 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         picker,
         apps,
         Box::new(windows),
+        Box::new(|| dune_common::jumps::ranked(dune_common::jumps::now()).into_iter().map(|j| j.path).collect()),
         home,
         options.file_manager.clone(),
     );
     finder.file_manager_terminal = options.file_manager_terminal.clone();
+    if options.mode == Mode::TileOptions {
+        let rows = tile_options(options.target);
+        // No tile to do anything to (gone, or none focused): no menu.
+        if rows.is_empty() {
+            return Ok(());
+        }
+        finder.show_tile_options(rows);
+    }
     let (w, h) = panel::panel_size(font.as_ref(), i32::MAX, panel::ROWS);
     let compact = options.compact && finder.untouched();
 
@@ -178,12 +187,25 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The windows dune has, the most recently focused first.
-fn windows() -> Vec<WindowInfo> {
-    match protocol::ask(&Request::Windows, ANSWER) {
+/// The windows dune has, the most recently focused first: those of locked desktops with
+/// `locked`, else all the others.
+fn windows(locked: bool) -> Vec<WindowInfo> {
+    let request = if locked { Request::LockedWindows } else { Request::Windows };
+    match protocol::ask(&request, ANSWER) {
         Ok(answer) => WindowInfo::decode_all(&answer),
         Err(err) => {
             eprintln!("dune-finder: cannot list the windows: {err}");
+            Vec::new()
+        }
+    }
+}
+
+/// The rows of the tile options menu for `tile`, from dune.
+fn tile_options(tile: Option<TileId>) -> Vec<TileOption> {
+    match protocol::ask(&Request::TileOptions { tile }, ANSWER) {
+        Ok(answer) => TileOption::decode_all(&answer),
+        Err(err) => {
+            eprintln!("dune-finder: cannot list the tile options: {err}");
             Vec::new()
         }
     }
@@ -313,11 +335,17 @@ impl App {
                 command,
                 terminal,
                 app,
+                folder,
             } => {
                 if let Some(app) = app
                     && let Err(err) = desktop::record_launch(&app)
                 {
                     eprintln!("dune-finder: cannot count the launch of {app}: {err}");
+                }
+                if let Some(folder) = &folder
+                    && let Err(err) = dune_common::jumps::record(folder)
+                {
+                    eprintln!("dune-finder: cannot count the visit to {}: {err}", folder.display());
                 }
                 let (target, slot) = (self.options.target, self.options.slot);
                 if let Err(err) = protocol::ask(
@@ -326,6 +354,7 @@ impl App {
                         target,
                         slot,
                         terminal,
+                        cwd: folder,
                         command,
                     },
                     ANSWER,
@@ -336,6 +365,17 @@ impl App {
             Action::GoTo(tile) => {
                 if let Err(err) = protocol::ask(&Request::GoTo { tile }, ANSWER) {
                     eprintln!("dune-finder: cannot go to the window: {err}");
+                }
+            }
+            Action::Unlock(tile) => {
+                if let Err(err) = protocol::ask(&Request::Unlock { tile }, ANSWER) {
+                    eprintln!("dune-finder: cannot unlock the window's desktop: {err}");
+                }
+            }
+            Action::TileAction(action) => {
+                let tile = self.options.target;
+                if let Err(err) = protocol::ask(&Request::TileAction { tile, action }, ANSWER) {
+                    eprintln!("dune-finder: cannot do `{}`: {err}", action.code());
                 }
             }
         }

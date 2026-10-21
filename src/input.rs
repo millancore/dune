@@ -16,14 +16,16 @@ use smithay::{
     },
 };
 
+use dune_common::protocol::TileAction;
+
 use crate::{
-    config::{Config, TerminalHere},
+    config::{Binding, Config, TerminalHere},
     launcher::FinderMode,
     layout::{Direction, Layout, Rect, Side, TileId, split_band, split_edge},
     state::{Dune, MoveDrag},
 };
 
-/// Compositor keybindings, all behind the modifier chosen with `DUNE_MOD`.
+/// What compositor keys do: the config's bindings (`Binding`), and VT switching.
 #[derive(Debug, Clone, Copy)]
 enum Action {
     /// Mod+Enter: an empty container, dune-finder to choose what goes in it.
@@ -43,13 +45,16 @@ enum Action {
     ToggleFloat,
     Close,
     Quit,
-    Direction(Direction),
-    /// Mod+d, or the `launcher` key: show dune-finder on the apps (again: hide it).
+    /// Mod+d: show dune-finder on the apps (again: hide it).
     Launcher,
-    /// Mod+/, or the `switcher` key: show dune-finder on the windows (again: hide it).
+    /// dune-finder on the windows (again: hide it); no key by default (`/` in the finder).
     Switcher,
-    /// Mod+v / Mod+s / Mod+Shift+t, or the `terminal_*` keys: a terminal to the right of the
-    /// focused tile, below it or as a tab of its container, in its folder.
+    /// Mod+/: dune-finder on the focused tile's options (again: hide it).
+    TileOptions,
+    /// Block the focused tile on screen and in captures (again: show it).
+    PrivateTile,
+    /// Mod+v / Mod+s / Mod+Shift+t: a terminal to the right of the focused tile, below it
+    /// or as a tab of its container, in its folder.
     Terminal(TerminalHere),
     /// Mod+Tab / Mod+Shift+Tab: the next / previous tab of the focused column.
     CycleTab(i32),
@@ -63,8 +68,44 @@ enum Action {
     Desk(u8),
     /// Mod+Shift+1..9: send the focused tile to that desktop.
     SendToDesk(u8),
+    /// Mod+Escape: run `lock_command` (swaylock).
+    Lock,
     /// Ctrl+Alt+F1..F12 on a real session.
     SwitchVt(i32),
+}
+
+impl From<Binding> for Action {
+    fn from(binding: Binding) -> Action {
+        match binding {
+            Binding::Focus(dir) => Action::Focus(dir),
+            Binding::Swap(dir) => Action::Swap(dir),
+            Binding::MoveTab(dir) => Action::MoveTab(dir),
+            Binding::Desk(n) => Action::Desk(n),
+            Binding::SendToDesk(n) => Action::SendToDesk(n),
+            Binding::EmptyContainer => Action::EmptyContainer,
+            Binding::NextTab => Action::CycleTab(1),
+            Binding::PrevTab => Action::CycleTab(-1),
+            Binding::Wider => Action::Width(RESIZE_STEP),
+            Binding::Narrower => Action::Width(-RESIZE_STEP),
+            Binding::Taller => Action::Height(RESIZE_STEP),
+            Binding::Shorter => Action::Height(-RESIZE_STEP),
+            Binding::RowWider => Action::RowWidth(RESIZE_STEP),
+            Binding::RowNarrower => Action::RowWidth(-RESIZE_STEP),
+            Binding::CycleWidth => Action::CycleWidth,
+            Binding::FullWidth => Action::FullWidth,
+            Binding::Center => Action::Center,
+            Binding::Float => Action::ToggleFloat,
+            Binding::Close => Action::Close,
+            Binding::Launcher => Action::Launcher,
+            Binding::Switcher => Action::Switcher,
+            Binding::TileOptions => Action::TileOptions,
+            Binding::PrivateTile => Action::PrivateTile,
+            Binding::Terminal(here) => Action::Terminal(here),
+            Binding::StackToTabs => Action::StackToTabs,
+            Binding::Quit => Action::Quit,
+            Binding::Lock => Action::Lock,
+        }
+    }
 }
 
 /// How much one press of the resize keys changes a width or height.
@@ -117,75 +158,14 @@ fn action_for(config: &Config, mods: &ModifiersState, sym: Keysym) -> Option<Act
     if vt < 12 {
         return Some(Action::SwitchVt(vt as i32 + 1));
     }
-    // Direction indicator keys first: they may use the same modifier as the rest.
-    if let Some((side, _)) = config.direction_keys.iter().find(|(_, key)| key.matches(mods, sym)) {
-        return Some(Action::Direction(*side));
-    }
-    if config.close_key.is_some_and(|key| key.matches(mods, sym)) {
-        return Some(Action::Close);
-    }
-    if config.launcher_key.is_some_and(|key| key.matches(mods, sym)) {
-        return Some(Action::Launcher);
-    }
-    if config.switcher_key.is_some_and(|key| key.matches(mods, sym)) {
-        return Some(Action::Switcher);
-    }
-    if let Some((here, _)) = config.terminal_keys.iter().find(|(_, key)| key.matches(mods, sym)) {
-        return Some(Action::Terminal(*here));
-    }
-    let unset = |here: TerminalHere| !config.terminal_keys.iter().any(|(h, _)| *h == here);
-    let modifier = config.modifier.as_str();
-    if !modifier_held(modifier, mods) {
-        return None;
-    }
-    let dir = match sym {
-        Keysym::h | Keysym::Left => Some(Direction::Left),
-        Keysym::j | Keysym::Down => Some(Direction::Down),
-        Keysym::k | Keysym::Up => Some(Direction::Up),
-        Keysym::l | Keysym::Right => Some(Direction::Right),
-        _ => None,
-    };
-    let row_mod = mods.ctrl && modifier != "ctrl+alt";
-    if let Some(dir) = dir {
-        return Some(if row_mod {
-            Action::MoveTab(dir)
-        } else if mods.shift {
-            Action::Swap(dir)
-        } else {
-            Action::Focus(dir)
-        });
-    }
-    // The key itself, unshifted: Mod+Shift+1 is `1` with shift held on any layout.
-    let digit = sym.raw().wrapping_sub(Keysym::_1.raw());
-    if digit < 9 {
-        let n = digit as u8 + 1;
-        return Some(if mods.shift { Action::SendToDesk(n) } else { Action::Desk(n) });
-    }
-    match sym {
-        Keysym::Return => Some(Action::EmptyContainer),
-        Keysym::ISO_Left_Tab => Some(Action::CycleTab(-1)),
-        Keysym::Tab => Some(Action::CycleTab(if mods.shift { -1 } else { 1 })),
-        // Ctrl: the tile's width inside its row (unless Ctrl is part of the modifier).
-        Keysym::equal | Keysym::plus if row_mod => Some(Action::RowWidth(RESIZE_STEP)),
-        Keysym::minus if row_mod => Some(Action::RowWidth(-RESIZE_STEP)),
-        Keysym::equal | Keysym::plus if mods.shift => Some(Action::Height(RESIZE_STEP)),
-        Keysym::minus | Keysym::underscore if mods.shift => Some(Action::Height(-RESIZE_STEP)),
-        Keysym::equal | Keysym::plus => Some(Action::Width(RESIZE_STEP)),
-        Keysym::minus => Some(Action::Width(-RESIZE_STEP)),
-        Keysym::d if config.launcher_key.is_none() => Some(Action::Launcher),
-        Keysym::slash if config.switcher_key.is_none() => Some(Action::Switcher),
-        Keysym::r => Some(Action::CycleWidth),
-        Keysym::f => Some(Action::FullWidth),
-        Keysym::space if mods.shift => Some(Action::ToggleFloat),
-        Keysym::space => Some(Action::Center),
-        Keysym::q => Some(Action::Close),
-        Keysym::v if unset(TerminalHere::Right) => Some(Action::Terminal(TerminalHere::Right)),
-        Keysym::s if unset(TerminalHere::Below) => Some(Action::Terminal(TerminalHere::Below)),
-        Keysym::t if mods.shift && unset(TerminalHere::Tab) => Some(Action::Terminal(TerminalHere::Tab)),
-        Keysym::t => Some(Action::StackToTabs),
-        Keysym::e if mods.shift => Some(Action::Quit),
-        _ => None,
-    }
+    let (binding, _) = config.bindings.iter().find(|(_, key)| key.matches(mods, sym))?;
+    Some((*binding).into())
+}
+
+/// While the session is locked, only VT switching stays a compositor key; the rest go to
+/// the lock surface.
+fn allowed_while_locked(action: &Action) -> bool {
+    matches!(action, Action::SwitchVt(_))
 }
 
 /// The closest point to `pos` inside one of `outputs` (pointer motion stays on the screens).
@@ -243,34 +223,7 @@ mod tests {
     }
 
     fn test_config(modifier: &str) -> Config {
-        crate::config::Config {
-            keyboard_rules: String::new(),
-            keyboard_model: String::new(),
-            keyboard_layout: String::new(),
-            keyboard_variant: String::new(),
-            keyboard_options: String::new(),
-            repeat_delay: 500,
-            repeat_rate: 25,
-            terminal: String::new(),
-            modifier: modifier.into(),
-            direction_keys: Vec::new(),
-            close_key: None,
-            launcher_key: None,
-            switcher_key: None,
-            terminal_keys: Vec::new(),
-            follow: false,
-            focus_follows_mouse: false,
-            xwayland: String::new(),
-            outputs: Default::default(),
-            input: Default::default(),
-            font_family: String::new(),
-            tab_widths: Default::default(),
-            icon_theme: String::new(),
-            file_manager: "yazi".into(),
-            file_manager_terminal: String::new(),
-            border_color: None,
-            exec: Vec::new(),
-        }
+        crate::config::from_text(&format!("modifier = {modifier}\n"))
     }
 
     #[test]
@@ -280,6 +233,22 @@ mod tests {
         assert!(matches!(action_for(&config, &mods, Keysym::XF86_Switch_VT_3), Some(Action::SwitchVt(3))));
         assert!(matches!(action_for(&config, &mods, Keysym::XF86_Switch_VT_12), Some(Action::SwitchVt(12))));
         assert!(action_for(&config, &mods, Keysym::F3).is_none());
+    }
+
+    #[test]
+    fn only_vt_switching_while_locked() {
+        let config = test_config("alt");
+        let alt = ModifiersState { alt: true, ..Default::default() };
+        let ctrl_alt = ModifiersState { ctrl: true, alt: true, ..Default::default() };
+        let allowed = |mods: &ModifiersState, sym| action_for(&config, mods, sym).is_some_and(|a| allowed_while_locked(&a));
+        assert!(allowed(&ctrl_alt, Keysym::XF86_Switch_VT_2));
+        for sym in [Keysym::Return, Keysym::d, Keysym::slash, Keysym::q, Keysym::_1, Keysym::Left, Keysym::E, Keysym::Escape] {
+            assert!(action_for(&config, &alt, sym).is_none_or(|a| !allowed_while_locked(&a)), "{sym:?}");
+        }
+        // Mod+Shift+e (quit) stays off too.
+        let alt_shift = ModifiersState { alt: true, shift: true, ..Default::default() };
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::e), Some(Action::Quit)));
+        assert!(!allowed(&alt_shift, Keysym::e));
     }
 
     #[test]
@@ -295,12 +264,12 @@ mod tests {
 
     #[test]
     fn terminal_keys() {
-        let mut config = test_config("super");
+        let config = test_config("super");
         let logo = ModifiersState { logo: true, ..Default::default() };
         assert!(matches!(action_for(&config, &logo, Keysym::v), Some(Action::Terminal(TerminalHere::Right))));
         assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
         // A key set for one replaces its Mod key; the others keep theirs.
-        config.terminal_keys = vec![(TerminalHere::Right, crate::config::KeySpec::parse("super+n").unwrap())];
+        let config = crate::config::from_text("modifier = super\nterminal_vertical = mod+n\n");
         assert!(matches!(action_for(&config, &logo, Keysym::n), Some(Action::Terminal(TerminalHere::Right))));
         assert!(action_for(&config, &logo, Keysym::v).is_none());
         assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
@@ -319,11 +288,23 @@ mod tests {
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::j), Some(Action::MoveTab(Direction::Down))));
         assert!(matches!(action_for(&config, &alt, Keysym::t), Some(Action::StackToTabs)));
         assert!(matches!(action_for(&config, &alt_shift, Keysym::t), Some(Action::Terminal(TerminalHere::Tab))));
-        assert!(matches!(action_for(&config, &alt, Keysym::slash), Some(Action::Switcher)));
+        assert!(matches!(action_for(&config, &alt, Keysym::slash), Some(Action::TileOptions)));
         assert!(matches!(action_for(&config, &alt_shift, Keysym::Left), Some(Action::Swap(Direction::Left))));
         // With Ctrl in the modifier, Ctrl+direction stays a focus move.
         let config = test_config("ctrl+alt");
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::Focus(Direction::Left))));
+    }
+
+    #[test]
+    fn escape_locks() {
+        let alt = ModifiersState { alt: true, ..Default::default() };
+        assert!(matches!(action_for(&test_config("alt"), &alt, Keysym::Escape), Some(Action::Lock)));
+        assert!(action_for(&test_config("alt"), &ModifiersState::default(), Keysym::Escape).is_none());
+        let logo = ModifiersState { logo: true, ..Default::default() };
+        assert!(matches!(action_for(&test_config("super"), &logo, Keysym::Escape), Some(Action::Lock)));
+        // Set off: Mod+Escape goes to the client.
+        let config = crate::config::from_text("lock = none\n");
+        assert!(action_for(&config, &alt, Keysym::Escape).is_none());
     }
 
     #[test]
@@ -413,6 +394,8 @@ impl Dune {
         if self.is_floating(id) {
             self.scale_float(id, dw, dh);
         } else {
+            // Keys and wheel jump a whole step: the tiles slide there instead.
+            self.animate_resize();
             self.change_tile(id, change);
         }
     }
@@ -425,9 +408,12 @@ impl Dune {
 
     /// `focus_follows_mouse`: the tile under the pointer takes focus, unless part of it is
     /// off screen (focusing it would slide the view under the pointer), a button or drag
-    /// is going on, or dune-finder is open.
+    /// is going on, dune-finder is open or the session is locked.
     fn hover_focus(&mut self, pos: Point<f64, Logical>) {
-        let busy = self.move_drag.is_some() || self.resize_drag.is_some() || self.finder.is_some();
+        let busy = self.move_drag.is_some()
+            || self.resize_drag.is_some()
+            || self.finder.is_some()
+            || self.session_lock.is_locked();
         if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed()
         {
             return;
@@ -442,7 +428,11 @@ impl Dune {
     /// Mod held, no drag going on and the pointer near an edge of a tile of the strip: that
     /// tile, the side, and the band along that edge to light (`split_hint_at`).
     pub fn split_hint(&self) -> Option<(TileId, Side, Rect)> {
-        if self.resize_drag.is_some() || self.finder.is_some() || self.move_drag.is_some_and(|d| d.moved) {
+        if self.resize_drag.is_some()
+            || self.finder.is_some()
+            || self.move_drag.is_some_and(|d| d.moved)
+            || self.session_lock.is_locked()
+        {
             return None;
         }
         let mods = self.seat.get_keyboard()?.modifier_state();
@@ -479,6 +469,8 @@ impl Dune {
             Action::EmptyContainer => self.open_empty_container(),
             Action::Launcher => self.toggle_finder(FinderMode::Apps),
             Action::Switcher => self.toggle_finder(FinderMode::Windows),
+            Action::TileOptions => self.toggle_finder(FinderMode::TileOptions),
+            Action::PrivateTile => self.toggle_private_focused(),
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
             Action::Width(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_width(id, delta)),
@@ -494,15 +486,28 @@ impl Dune {
             }
             Action::Close => self.close_focused(),
             Action::Quit => self.loop_signal.stop(),
-            Action::Direction(side) => self.toggle_direction(side),
             Action::CycleTab(delta) => self.cycle_tab(delta),
             Action::MoveTab(dir) => self.move_tab(dir),
             Action::StackToTabs => self.stack_to_tabs(),
             Action::Terminal(here) => self.terminal_here(here),
             Action::Desk(n) => self.show_desk(n),
             Action::SendToDesk(n) => self.send_to_desk(n),
+            Action::Lock => crate::autostart(&self.config.lock_command),
             Action::SwitchVt(vt) => self.change_vt(vt),
         }
+    }
+
+    /// A row chosen in the tile options menu: `action` on `tile`, focused first (the actions
+    /// work on the focused tile). Nothing without one, or with one on a locked desktop.
+    pub fn run_tile_action(&mut self, tile: Option<TileId>, action: TileAction) {
+        let Some(tile) = tile.filter(|t| self.tiles.contains_key(t) && !self.on_locked_desk(*t)) else { return };
+        if action == TileAction::PrivateTile {
+            return self.toggle_private_tile(tile);
+        }
+        if self.focused != Some(tile) {
+            self.focus_tile(tile);
+        }
+        self.run_action(crate::privacy::binding_of(action).into());
     }
 
     /// A key press or release: compositor keybindings first, then the focused client.
@@ -512,6 +517,7 @@ impl Dune {
         let config = self.config.clone();
         // While dune-finder is open, Mod+Enter is its own (files: the file manager).
         let finder_open = self.finder.is_some();
+        let locked = self.session_lock.is_locked();
 
         let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
             self,
@@ -524,6 +530,7 @@ impl Dune {
                 .and_then(|sym| action_for(&config, mods, sym))
             {
                 Some(Action::EmptyContainer) if finder_open => FilterResult::Forward,
+                Some(action) if locked && !allowed_while_locked(&action) => FilterResult::Forward,
                 Some(action) if pressed => FilterResult::Intercept(action),
                 _ => FilterResult::Forward,
             },
@@ -534,6 +541,11 @@ impl Dune {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        // Any input but devices coming and going restarts swayidle's timers.
+        if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
+            self.idle_notifier_state.notify_activity(&self.seat);
+        }
+        let locked = self.session_lock.is_locked();
         match event {
             InputEvent::Keyboard { event, .. } => {
                 self.handle_key(event.key_code(), event.state(), Event::time(&event));
@@ -556,8 +568,8 @@ impl Dune {
                 let wanted = current + event.delta();
                 let mut pos = self.clamp_to_outputs(wanted);
                 // Pushing on against a left/right screen edge slides the strip there (not
-                // for a pointer a game confines).
-                if constraint.is_none() {
+                // for a pointer a game confines, nor while locked).
+                if constraint.is_none() && !locked {
                     let dx = edge_slide(&mut self.edge_push, (pos.x - current.x).abs() < 0.5, wanted.x - pos.x);
                     self.slide_strip(pos, dx);
                 }
@@ -621,6 +633,13 @@ impl Dune {
                 let pointer = self.seat.get_pointer().unwrap();
                 let serial = SERIAL_COUNTER.next_serial();
                 let button_state = event.state();
+
+                // Locked: the click only goes to the lock surface.
+                if locked {
+                    let button = ButtonEvent { button: event.button_code(), state: button_state, serial, time: event.time() };
+                    pointer.button(self, &button);
+                    return pointer.frame(self);
+                }
 
                 // A click away from dune-finder closes it, and goes no further.
                 if button_state == ButtonState::Pressed
@@ -750,9 +769,9 @@ impl Dune {
                 }
 
                 // Super+scroll resizes the tile under the pointer: the column's width, or with
-                // Shift its height. Always Super, whatever the bindings modifier.
+                // Shift its height. Always Super, whatever the bindings modifier. Not while locked.
                 let mods = self.seat.get_keyboard().unwrap().modifier_state();
-                if mods.logo && vertical_amount != 0.0 {
+                if !locked && mods.logo && vertical_amount != 0.0 {
                     let pos = self.seat.get_pointer().unwrap().current_location();
                     if let Some(id) = self.tile_at(pos.x, pos.y).or(self.focused) {
                         let delta = scroll_resize_delta(vertical_amount);
@@ -767,7 +786,7 @@ impl Dune {
 
                 // Alt+scroll over a tile with neighbours side by side resizes it inside its
                 // row; anywhere else the scroll goes to the window.
-                if mods.alt && !mods.ctrl && vertical_amount != 0.0 {
+                if !locked && mods.alt && !mods.ctrl && vertical_amount != 0.0 {
                     let pos = self.seat.get_pointer().unwrap().current_location();
                     let tile = self.tile_at(pos.x, pos.y);
                     if let Some(id) = tile.filter(|id| self.layouts.values().any(|l| l.shares_row(*id))) {

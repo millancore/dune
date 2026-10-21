@@ -1,7 +1,12 @@
 //! The windows mode (Mod+/, or `/` typed first in the apps): every window dune has, on
 //! every monitor and desktop, in every tab and folded row, the most recently focused first
 //! (the focused one last: Enter right away goes back to the window before). Typing narrows
-//! it, fuzzy, by title, app and desktop; Enter shows the window's desktop and focuses it.
+//! it, fuzzy, by title, app and desktop; `:d2` keeps desktop 2 only and `:m1` monitor 1
+//! (`:d2 :m1 slack`). Enter shows the window's desktop and focuses it.
+//!
+//! Windows of locked desktops are not among them: `:l` typed first lists those instead
+//! (asked of dune then, marked 🔒), the rest of the query narrowing them as usual; Enter
+//! unlocks the window's desktop and goes to it.
 
 use dune_common::{
     desktop::App,
@@ -18,7 +23,7 @@ use crate::{
     panel::{ROWS, Row, View},
 };
 
-const HINT: &str = "Enter: go · ↑↓ Tab: choose · ⌫: apps · Esc: close";
+const HINT: &str = ":d2 :m1 :l · Enter: go · ↑↓ Tab: choose · ⌫: apps · Esc: close";
 
 /// A window to go to.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +33,8 @@ pub struct Entry {
     pub app: String,
     /// Where it is: `desk 2`, `desk 2 · m1` with more than one monitor.
     pub place: String,
+    pub desk: Option<u8>,
+    pub monitor: u8,
     /// Theme icon name (or path) of its app.
     pub icon: Option<String>,
 }
@@ -38,6 +45,8 @@ impl Entry {
         let icon = app_icon(apps, &window.app);
         Entry {
             tile: window.tile,
+            desk: window.desk(),
+            monitor: window.monitor(),
             title: window.title,
             app: window.app,
             place: window.place,
@@ -52,12 +61,16 @@ pub enum Step {
     Continue,
     Close,
     Go(TileId),
+    /// A window of a locked desktop (`:l`): unlock it and go there.
+    Unlock(TileId),
     /// Backspace with nothing typed: back to the apps.
     Apps,
 }
 
 pub struct Windows {
     entries: Vec<Entry>,
+    /// The windows of locked desktops, given once `:l` is typed (`wants_locked`).
+    locked: Option<Vec<Entry>>,
     query: String,
     /// Entries matching `query`, best first.
     matches: Vec<usize>,
@@ -71,11 +84,41 @@ impl Windows {
         let matches = (0..entries.len()).collect();
         Windows {
             entries,
+            locked: None,
             query: String::new(),
             matches,
             selected: 0,
             matcher: Matcher::new(Config::DEFAULT),
         }
+    }
+
+    /// Whether `:l` is typed and the windows of locked desktops are needed (`set_locked`).
+    pub fn wants_locked(&self) -> bool {
+        self.query.starts_with(":l") && self.locked.is_none()
+    }
+
+    /// The windows of locked desktops, each marked 🔒.
+    pub fn set_locked(&mut self, entries: Vec<Entry>) {
+        let mark = |mut e: Entry| {
+            if !e.title.starts_with('🔒') {
+                e.title = format!("🔒 {}", e.title);
+            }
+            e
+        };
+        self.locked = Some(entries.into_iter().map(mark).collect());
+        self.refilter();
+    }
+
+    /// The entries listed (see `listing`).
+    fn listing(&self) -> (&[Entry], &str, bool) {
+        listing(&self.query, &self.entries, self.locked.as_deref())
+    }
+
+    /// What choosing the `i`th listed entry does.
+    fn choose(&self, i: usize) -> Step {
+        let (entries, _, locked) = self.listing();
+        let tile = entries[i].tile;
+        if locked { Step::Unlock(tile) } else { Step::Go(tile) }
     }
 
     /// A key pressed: `sym` with `mods`, typing `text`.
@@ -84,10 +127,7 @@ impl Windows {
         match sym {
             Keysym::Escape => return Step::Close,
             Keysym::Return | Keysym::KP_Enter => {
-                return self
-                    .matches
-                    .get(self.selected)
-                    .map_or(Step::Close, |i| Step::Go(self.entries[*i].tile));
+                return self.matches.get(self.selected).map_or(Step::Close, |i| self.choose(*i));
             }
             Keysym::Down | Keysym::Tab => self.selected = (self.selected + 1) % n,
             Keysym::n if mods.ctrl => self.selected = (self.selected + 1) % n,
@@ -122,20 +162,34 @@ impl Windows {
     pub fn click(&mut self, row: usize) -> Step {
         let i = first_shown(self.selected) + row;
         match self.matches.get(i) {
-            Some(e) => Step::Go(self.entries[*e].tile),
+            Some(e) => self.choose(*e),
             None => Step::Continue,
         }
     }
 
-    /// The entries matching the query again, best first (ties keep the listing order).
+    /// The entries matching the query again, best first (ties keep the listing order). Its
+    /// `:dN` / `:mN` words keep that desktop / monitor only; other `:` words (`:`, `:d`
+    /// while typing) count for nothing. `:l` first: the locked ones (`listing`).
     fn refilter(&mut self) {
         self.selected = 0;
-        let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
+        let (mut desk, mut monitor) = (None, None);
+        let mut fuzzy = Vec::new();
+        let (entries, query, _) = listing(&self.query, &self.entries, self.locked.as_deref());
+        for word in query.split_whitespace() {
+            let Some(filter) = word.strip_prefix(':') else {
+                fuzzy.push(word);
+                continue;
+            };
+            let number = |prefix| filter.strip_prefix(prefix).and_then(|n| n.parse::<u8>().ok());
+            desk = number('d').or(desk);
+            monitor = number('m').or(monitor);
+        }
+        let pattern = Pattern::parse(&fuzzy.join(" "), CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
-        let mut scored: Vec<(u32, usize)> = self
-            .entries
+        let mut scored: Vec<(u32, usize)> = entries
             .iter()
             .enumerate()
+            .filter(|(_, e)| desk.is_none_or(|d| e.desk == Some(d)) && monitor.is_none_or(|m| e.monitor == m))
             .filter_map(|(i, e)| {
                 let haystack = format!("{} {} {}", e.title, e.app, e.place);
                 pattern.score(Utf32Str::new(&haystack, &mut buf), &mut self.matcher).map(|score| (score, i))
@@ -149,13 +203,14 @@ impl Windows {
     /// title, then (dim, at the right) its app and where it is.
     pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32) -> View<'a> {
         let first = first_shown(self.selected);
+        let (entries, _, locked) = self.listing();
         let shown: Vec<(usize, &Entry)> = self
             .matches
             .iter()
             .skip(first)
             .take(ROWS)
             .enumerate()
-            .map(|(i, e)| (first + i, &self.entries[*e]))
+            .map(|(i, e)| (first + i, &entries[*e]))
             .collect();
         for name in shown.iter().filter_map(|(_, e)| e.icon.as_deref()) {
             icons.get(name, icon_size);
@@ -173,12 +228,23 @@ impl Windows {
                 selected: *i == self.selected,
             })
             .collect();
+        let kind = if locked { "locked windows" } else { "windows" };
         View {
             prompt: format!("/ {}▏", self.query),
             rows,
-            status: format!("{} / {} windows", self.matches.len(), self.entries.len()),
+            status: format!("{} / {} {kind}", self.matches.len(), entries.len()),
             hint: HINT,
         }
+    }
+}
+
+/// The entries `query` lists and the query narrowing them: with `:l` first, the `locked`
+/// ones and the rest of the query, else `entries` and all of it; whether they are the
+/// locked ones.
+fn listing<'a>(query: &'a str, entries: &'a [Entry], locked: Option<&'a [Entry]>) -> (&'a [Entry], &'a str, bool) {
+    match query.strip_prefix(":l") {
+        Some(rest) => (locked.unwrap_or_default(), rest, true),
+        None => (entries, query, false),
     }
 }
 
@@ -208,12 +274,13 @@ mod tests {
     use super::*;
 
     fn entry(tile: TileId, title: &str, app: &str, place: &str) -> Entry {
-        Entry { tile, title: title.into(), app: app.into(), place: place.into(), icon: None }
+        let window = WindowInfo { tile, title: title.into(), app: app.into(), place: place.into() };
+        Entry::new(window, &[])
     }
 
     fn windows() -> Windows {
         Windows::new(vec![
-            entry(1, "dune — nvim", "dune-term", "desk 1"),
+            entry(1, "dune — nvim", "wezterm", "desk 1"),
             entry(2, "Mozilla Firefox", "firefox", "desk 2"),
             entry(3, "Files", "org.gnome.Nautilus", "desk 3 · m2"),
         ])
@@ -230,7 +297,8 @@ mod tests {
     }
 
     fn listed(w: &Windows) -> Vec<TileId> {
-        w.matches.iter().map(|i| w.entries[*i].tile).collect()
+        let (entries, ..) = w.listing();
+        w.matches.iter().map(|i| entries[*i].tile).collect()
     }
 
     #[test]
@@ -260,6 +328,66 @@ mod tests {
         typed(&mut w, "zzz");
         assert_eq!(listed(&w), Vec::<TileId>::new());
         assert_eq!(w.feed(&none(), Keysym::Return, None), Step::Close);
+    }
+
+    #[test]
+    fn colon_words_keep_a_desktop_or_a_monitor() {
+        let mut w = windows();
+        typed(&mut w, ":d2");
+        assert_eq!(listed(&w), vec![2]);
+        let ctrl = Modifiers { ctrl: true, ..Default::default() };
+        w.feed(&ctrl, Keysym::u, None);
+        // No `mN`: the one monitor, m1.
+        typed(&mut w, ":m1");
+        assert_eq!(listed(&w), vec![1, 2]);
+        typed(&mut w, " fire");
+        assert_eq!(listed(&w), vec![2]);
+        w.feed(&ctrl, Keysym::u, None);
+        typed(&mut w, ":m2 files");
+        assert_eq!(listed(&w), vec![3]);
+        w.feed(&ctrl, Keysym::u, None);
+        typed(&mut w, ":d3 :m1");
+        assert_eq!(listed(&w), Vec::<TileId>::new());
+        // While typing, `:` and `:d` keep everything, in the listing order.
+        w.feed(&ctrl, Keysym::u, None);
+        typed(&mut w, ":");
+        assert_eq!(listed(&w), vec![1, 2, 3]);
+        typed(&mut w, "d");
+        assert_eq!(listed(&w), vec![1, 2, 3]);
+        w.feed(&ctrl, Keysym::u, None);
+        typed(&mut w, ":x nvim");
+        assert_eq!(listed(&w), vec![1]);
+    }
+
+    #[test]
+    fn colon_l_lists_the_windows_of_locked_desktops_only() {
+        let mut w = windows();
+        typed(&mut w, ":");
+        assert!(!w.wants_locked());
+        typed(&mut w, "l");
+        // dune is asked for them once.
+        assert!(w.wants_locked());
+        assert_eq!(listed(&w), Vec::<TileId>::new());
+        w.set_locked(vec![entry(7, "Slack | client", "slack", "desk 4"), entry(8, "🔒 foot", "foot", "desk 4")]);
+        assert!(!w.wants_locked());
+        assert_eq!(listed(&w), vec![7, 8]);
+        // Marked, once.
+        assert_eq!(w.locked.as_ref().unwrap()[0].title, "🔒 Slack | client");
+        assert_eq!(w.locked.as_ref().unwrap()[1].title, "🔒 foot");
+        // Choosing one unlocks its desktop.
+        assert_eq!(w.feed(&none(), Keysym::Return, None), Step::Unlock(7));
+        assert_eq!(w.click(1), Step::Unlock(8));
+        // The rest of the query narrows them as usual.
+        typed(&mut w, " slack");
+        assert_eq!(listed(&w), vec![7]);
+        let ctrl = Modifiers { ctrl: true, ..Default::default() };
+        w.feed(&ctrl, Keysym::u, None);
+        typed(&mut w, ":lfoot");
+        assert_eq!(listed(&w), vec![8]);
+        // Without `:l`, the unlocked ones again, gone to.
+        w.feed(&ctrl, Keysym::u, None);
+        assert_eq!(listed(&w), vec![1, 2, 3]);
+        assert_eq!(w.feed(&none(), Keysym::Return, None), Step::Go(1));
     }
 
     #[test]

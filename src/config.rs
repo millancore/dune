@@ -7,19 +7,13 @@
 //! keyboard_variant = dvorak
 //! repeat_delay = 500      # ms a held key waits before repeating
 //! repeat_rate = 25        # repeats per second while held
-//! terminal = dune-term  # or foot, alacritty, ...
-//! modifier = alt          # alt, super or ctrl+alt
-//! direction_right = super+ctrl+Right   # direction indicator keys (also _left, _up, _down)
-//! close = super+'         # extra key that closes the focused tile (Mod+q always does)
-//! launcher = super+e      # key that toggles dune-finder on the apps (default Mod+d)
-//! switcher = super+g      # key that toggles dune-finder on the windows (default Mod+/)
-//! terminal_vertical = super+v    # a terminal to the right of the focused tile, in its folder (default Mod+v)
-//! terminal_horizontal = super+s  # one below it (default Mod+s)
-//! terminal_tab = super+shift+t   # one as a new tab of its container (default Mod+Shift+t)
-//! follow = true           # go to the desktop an app is launched on (`firefox @3`); default false
+//! terminal = wezterm start --always-new-process  # or foot, alacritty, ...
+//! modifier = alt          # alt, super or ctrl+alt: `mod` in the keys below, and Mod+mouse
+//! lock_command = swaylock -f   # what the `lock` key runs; default swaylock -f
+//! follow = true          # go to the desktop an app is launched on (`firefox :d3`); default false
 //! focus_follows_mouse = true  # the tile under the pointer takes focus (when all of it is on screen); default false
 //! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
-//! font_family = JetBrains Mono   # tab titles and dune-finder (dune-term reads `~/.config/dune/term`)
+//! font_family = JetBrains Mono   # tab titles and dune-finder
 //! tab_min_width = 200     # px a tab shrinks to before its bar scrolls; default 200
 //! tab_max_width = 220     # px a tab grows to while there is room; default 220
 //! icon_theme = Papirus-Dark      # dune-finder icons; default: the desktop's (gsettings / GTK)
@@ -40,18 +34,74 @@
 //! output.DP-1.off = true                # leave this monitor dark
 //! ```
 //!
+//! Keys: every compositor key has a name, set like `close = super+q, super+'`. A value is
+//! one or more keys separated by commas and replaces that key's defaults; `none` turns it
+//! off; one that is not a key (a typo) is warned about and the defaults stay. `mod` stands
+//! for `modifier`, the rest are `super`, `alt`, `ctrl` and `shift`, then a key name as
+//! xkb writes it (`Return`, `slash`, `comma`, `Escape`) or one character (`q`, `'`). Keys
+//! are the unshifted ones, so Mod+Shift+1 is `mod+shift+1`, and `mod+E` is `mod+e`. A key
+//! two names share goes to the one listed first here (a warning tells), so with
+//! `modifier = ctrl+alt` the Ctrl keys (`move_tab_*`, `row_*`) give way. Ctrl+Alt+F1..F12
+//! switch VTs on a real session, always. The defaults:
+//!
+//! ```text
+//! focus_left = mod+h, mod+Left        # focus the tile that way
+//! focus_down = mod+j, mod+Down
+//! focus_up = mod+k, mod+Up
+//! focus_right = mod+l, mod+Right
+//! swap_left = mod+shift+h, mod+shift+Left        # swap the tile with the one that way
+//! swap_down = mod+shift+j, mod+shift+Down
+//! swap_up = mod+shift+k, mod+shift+Up
+//! swap_right = mod+shift+l, mod+shift+Right
+//! move_tab_left = mod+ctrl+h, mod+ctrl+Left      # join the column that way as a tab, or leave a tabbed one
+//! move_tab_down = mod+ctrl+j, mod+ctrl+Down
+//! move_tab_up = mod+ctrl+k, mod+ctrl+Up
+//! move_tab_right = mod+ctrl+l, mod+ctrl+Right
+//! desk_1 = mod+1                      # show that desktop (desk_1 .. desk_9: mod+1 .. mod+9)
+//! send_to_desk_1 = mod+shift+1        # send the tile there (send_to_desk_1 .. _9: mod+shift+1 .. 9)
+//! empty_container = mod+Return        # an empty container, dune-finder to fill it
+//! next_tab = mod+Tab
+//! prev_tab = mod+shift+Tab, mod+shift+ISO_Left_Tab
+//! wider = mod+equal, mod+plus         # the column's width
+//! narrower = mod+minus
+//! taller = mod+shift+equal, mod+shift+plus       # the tile's height
+//! shorter = mod+shift+minus, mod+shift+underscore
+//! row_wider = mod+ctrl+equal, mod+ctrl+plus      # the tile's width inside its row
+//! row_narrower = mod+ctrl+minus
+//! cycle_width = mod+r
+//! full_width = mod+f
+//! center = mod+space                  # center the column (again: stop)
+//! float = mod+shift+space             # float the tile (again: back into the strip)
+//! close = mod+q
+//! launcher = mod+d                    # dune-finder on the apps
+//! tile_options = mod+slash            # dune-finder on the focused tile's options (private, float, ...)
+//! switcher = none                     # dune-finder on the windows (`/` in it gets there too)
+//! private_tile = none                 # block the focused tile on screen and in captures (again: show it)
+//! terminal_vertical = mod+v           # a terminal right of the tile, in its folder
+//! terminal_horizontal = mod+s         # one below it
+//! terminal_tab = mod+shift+t          # one as a new tab of its container
+//! stack_to_tabs = mod+t
+//! quit = mod+shift+e
+//! lock = mod+Escape                   # runs `lock_command`
+//! ```
+//!
 //! The pointer pushing on against the left or right edge of the screens slides the strip
 //! that way; it stays there until focus moves. A mark at the middle of an edge (`‹3`, `2›`)
 //! tells how many tiles are past it.
 //!
 //! dune-finder (a program of its own, installed next to dune) is the launcher and the
-//! window list: Mod+d shows the apps, Mod+/ every window to go to; `/` typed first in the
-//! apps turns it into the windows, Backspace with nothing typed turns it back. A click
+//! window list: Mod+d shows the apps, `/` typed first in them turns it into every window
+//! to go to, Backspace with nothing typed turns it back (`:l` typed first lists the
+//! windows of locked desktops instead; choosing one unlocks its desktop). Mod+/ shows the
+//! options of the focused tile: private tile, float, center, full width, to tab, send to
+//! a desktop, close, each with its key; typing narrows them, Enter does one. A click
 //! chooses a row, the wheel moves through them, a click away closes it. Mod+Enter opens an
 //! empty container with dune-finder for it: Enter right away puts a terminal (`terminal`)
 //! there, a program chosen or typed goes there instead. `#` typed first shows the files of
 //! the home folder: Enter opens a folder or a file (`xdg-open`), Mod+Enter the
-//! `file_manager` at it.
+//! `file_manager` at it. `>` typed first jumps, like zoxide's `z`: the folders terminals
+//! worked in (and the finder opened), the most used and recent first; Enter opens a
+//! terminal there, Mod+Enter the `file_manager`.
 //!
 //! With Mod held, the pointer near an edge of a tile lights a band along that edge;
 //! a Mod+click there opens an empty container on that side with a compact dune-finder (no
@@ -64,8 +114,13 @@
 //! into a tab of its own (a lone tile: a bar with it as the one tab), a click on a tab
 //! shows it, a Mod+drag let go on a tab bar adds the tile there as a tab, a tab Mod+dragged
 //! along its own bar moves to the place it is let go, and dune-finder opens an app as a tab with
-//! Ctrl+T or `@t`. The tab bar sits at the top left of its column (see
+//! Ctrl+T or `:t`. The tab bar sits at the top left of its column (see
 //! `layout::split_tab_bar`; its placement may become a setting).
+//!
+//! A right click on a desktop in the bar (waybar `ext/workspaces` with `"on-click-right":
+//! "deactivate"`) locks it, "🔒 n": it is not shown (Mod+N, a click on it and the window
+//! list leave it alone; locking the one shown switches to another) until another right
+//! click, or a window chosen with `:l`, unlocks it. Tiles can still be sent there.
 //!
 //! Night light has no settings here: programs like wlsunset (the waybar night-light
 //! module runs it) set the monitors' gamma through wlr-gamma-control (see `gamma`), on
@@ -84,7 +139,7 @@ use std::{
 
 use smithay::input::keyboard::{Keysym, ModifiersState, XkbConfig, xkb};
 
-use crate::layout::{Side, TabWidths};
+use crate::layout::{Direction, TabWidths};
 
 /// A key with its modifiers, written like `super+Right` or `ctrl+alt+h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +152,8 @@ pub struct KeySpec {
 }
 
 impl KeySpec {
-    pub fn parse(spec: &str) -> Option<KeySpec> {
+    /// `mod` in `spec` stands for `modifier` (`alt`, `super` or `ctrl+alt`).
+    pub fn parse(spec: &str, modifier: &str) -> Option<KeySpec> {
         let mut parts: Vec<&str> = spec.split('+').map(str::trim).collect();
         let name = parts.pop().filter(|n| !n.is_empty())?;
         let mut key = xkb::keysym_from_name(name, xkb::KEYSYM_CASE_INSENSITIVE);
@@ -109,9 +165,23 @@ impl KeySpec {
         if key == Keysym::NoSymbol {
             return None;
         }
+        // Keys come unshifted (Mod+Shift+e is `e` with shift held), so `E` is the `e` key.
+        if let Some(c) = key.key_char() {
+            let mut lower = c.to_lowercase();
+            if let (Some(l), None) = (lower.next(), lower.next())
+                && l != c
+            {
+                key = Keysym::from_char(l);
+            }
+        }
         let mut spec = KeySpec { logo: false, alt: false, ctrl: false, shift: false, key };
         for m in parts {
             match m.to_lowercase().as_str() {
+                "mod" => match modifier {
+                    "super" | "logo" => spec.logo = true,
+                    "ctrl+alt" => (spec.ctrl, spec.alt) = (true, true),
+                    _ => spec.alt = true,
+                },
                 "super" | "logo" | "mod4" => spec.logo = true,
                 "alt" | "mod1" => spec.alt = true,
                 "ctrl" | "control" => spec.ctrl = true,
@@ -126,6 +196,137 @@ impl KeySpec {
     pub fn matches(&self, mods: &ModifiersState, key: Keysym) -> bool {
         key == self.key && mods.logo == self.logo && mods.alt == self.alt && mods.ctrl == self.ctrl && mods.shift == self.shift
     }
+}
+
+impl std::fmt::Display for KeySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (held, name) in [(self.logo, "super+"), (self.ctrl, "ctrl+"), (self.alt, "alt+"), (self.shift, "shift+")] {
+            if held {
+                f.write_str(name)?;
+            }
+        }
+        f.write_str(&xkb::keysym_get_name(self.key))
+    }
+}
+
+/// What a compositor key does; each one has a name in the file (see the table up top).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    Focus(Direction),
+    Swap(Direction),
+    MoveTab(Direction),
+    Desk(u8),
+    SendToDesk(u8),
+    EmptyContainer,
+    NextTab,
+    PrevTab,
+    Wider,
+    Narrower,
+    Taller,
+    Shorter,
+    RowWider,
+    RowNarrower,
+    CycleWidth,
+    FullWidth,
+    Center,
+    Float,
+    Close,
+    Launcher,
+    TileOptions,
+    Switcher,
+    PrivateTile,
+    Terminal(TerminalHere),
+    StackToTabs,
+    Quit,
+    Lock,
+}
+
+/// Every binding: its name in the file, what it does and its default keys. A key two of
+/// them share goes to the earlier one.
+fn binding_table() -> Vec<(String, Binding, String)> {
+    use Binding::*;
+    let sides = [
+        ("left", Direction::Left, "h", "Left"),
+        ("down", Direction::Down, "j", "Down"),
+        ("up", Direction::Up, "k", "Up"),
+        ("right", Direction::Right, "l", "Right"),
+    ];
+    let mut table = Vec::new();
+    for (prefix, mods, binding) in [
+        ("focus", "mod", Focus as fn(Direction) -> Binding),
+        ("swap", "mod+shift", Swap),
+        ("move_tab", "mod+ctrl", MoveTab),
+    ] {
+        for (side, dir, letter, arrow) in sides {
+            table.push((format!("{prefix}_{side}"), binding(dir), format!("{mods}+{letter}, {mods}+{arrow}")));
+        }
+    }
+    table.extend((1..=9).map(|n| (format!("desk_{n}"), Desk(n), format!("mod+{n}"))));
+    table.extend((1..=9).map(|n| (format!("send_to_desk_{n}"), SendToDesk(n), format!("mod+shift+{n}"))));
+    let rest = [
+        ("empty_container", EmptyContainer, "mod+Return"),
+        ("next_tab", NextTab, "mod+Tab"),
+        ("prev_tab", PrevTab, "mod+shift+Tab, mod+shift+ISO_Left_Tab"),
+        ("wider", Wider, "mod+equal, mod+plus"),
+        ("narrower", Narrower, "mod+minus"),
+        ("taller", Taller, "mod+shift+equal, mod+shift+plus"),
+        ("shorter", Shorter, "mod+shift+minus, mod+shift+underscore"),
+        ("row_wider", RowWider, "mod+ctrl+equal, mod+ctrl+plus"),
+        ("row_narrower", RowNarrower, "mod+ctrl+minus"),
+        ("cycle_width", CycleWidth, "mod+r"),
+        ("full_width", FullWidth, "mod+f"),
+        ("center", Center, "mod+space"),
+        ("float", Float, "mod+shift+space"),
+        ("close", Close, "mod+q"),
+        ("launcher", Launcher, "mod+d"),
+        ("tile_options", TileOptions, "mod+slash"),
+        ("switcher", Switcher, "none"),
+        ("private_tile", PrivateTile, "none"),
+        ("terminal_vertical", Terminal(TerminalHere::Right), "mod+v"),
+        ("terminal_horizontal", Terminal(TerminalHere::Below), "mod+s"),
+        ("terminal_tab", Terminal(TerminalHere::Tab), "mod+shift+t"),
+        ("stack_to_tabs", StackToTabs, "mod+t"),
+        ("quit", Quit, "mod+shift+e"),
+        ("lock", Lock, "mod+Escape"),
+    ];
+    table.extend(rest.map(|(name, binding, keys)| (name.to_string(), binding, keys.to_string())));
+    table
+}
+
+/// Keys separated by commas, or `none`; `None` if one of them is not a key.
+fn key_list(value: &str, modifier: &str) -> Option<Vec<KeySpec>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    value.split(',').map(|spec| KeySpec::parse(spec, modifier)).collect()
+}
+
+/// The keys of every binding, in table order: the file's in place of the defaults.
+fn bindings(file: &HashMap<String, String>, modifier: &str) -> Vec<(Binding, KeySpec)> {
+    // With the name and whether the file set it, for the warnings.
+    let mut taken: Vec<(String, Binding, KeySpec, bool)> = Vec::new();
+    for (name, binding, defaults) in binding_table() {
+        let set = file.get(&name).and_then(|value| {
+            let keys = key_list(value, modifier);
+            if keys.is_none() {
+                tracing::warn!("ignoring `{name} = {value}`: not keys like mod+q, super+shift+t or none");
+            }
+            keys
+        });
+        let from_file = set.is_some();
+        let keys = set.unwrap_or_else(|| key_list(&defaults, modifier).unwrap_or_default());
+        for key in keys {
+            if let Some((other, other_binding, _, other_from_file)) = taken.iter().find(|(_, _, k, _)| *k == key) {
+                // Defaults collapsing under `modifier = ctrl+alt` are expected, not news.
+                if *other_binding != binding && (from_file || *other_from_file) {
+                    tracing::warn!("`{name}`: {key} already does `{other}`, it stays there");
+                }
+                continue;
+            }
+            taken.push((name.clone(), binding, key, from_file));
+        }
+    }
+    taken.into_iter().map(|(_, binding, key, _)| (binding, key)).collect()
 }
 
 /// Where the terminal keys (`terminal_vertical`, `_horizontal`, `_tab`) open a terminal,
@@ -188,16 +389,11 @@ pub struct Config {
     pub repeat_rate: i32,
     pub terminal: String,
     pub modifier: String,
-    /// Keys that point the focused tile's direction indicator at each side.
-    pub direction_keys: Vec<(Side, KeySpec)>,
-    /// An extra key that closes the focused tile, besides Mod+q.
-    pub close_key: Option<KeySpec>,
-    /// The key that toggles the launcher, instead of Mod+d.
-    pub launcher_key: Option<KeySpec>,
-    /// The key that toggles the window switcher, instead of Mod+/.
-    pub switcher_key: Option<KeySpec>,
-    /// Keys set for the terminal actions, instead of Mod+v / Mod+s / Mod+Shift+t.
-    pub terminal_keys: Vec<(TerminalHere, KeySpec)>,
+    /// Every compositor key and what it does, `mod` already read as `modifier`; a key is
+    /// in it once.
+    pub bindings: Vec<(Binding, KeySpec)>,
+    /// What the `lock` key runs, through the shell.
+    pub lock_command: String,
     /// Show the desktop the launcher opens an app on, instead of staying here.
     pub follow: bool,
     /// The tile under the pointer takes focus as the pointer moves.
@@ -234,6 +430,12 @@ impl Config {
         }
     }
 
+    /// The keys of `binding`, as the file writes them (`super+f, super+F11`); empty: none.
+    pub fn key_label(&self, binding: Binding) -> String {
+        let keys: Vec<String> = self.bindings.iter().filter(|(b, _)| *b == binding).map(|(_, k)| k.to_string()).collect();
+        keys.join(", ")
+    }
+
     /// Settings that differ from `old` but only take effect when dune starts again.
     pub fn restart_needed(&self, old: &Config) -> Vec<String> {
         let mut changed = Vec::new();
@@ -256,6 +458,12 @@ impl Config {
         }
         changed
     }
+}
+
+/// The config a file with `text` gives, without the environment.
+#[cfg(test)]
+pub fn from_text(text: &str) -> Config {
+    resolve(&parse(text), &|_| None)
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -297,6 +505,8 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             .or_else(|| file.get(file_key).cloned())
             .unwrap_or_else(|| default.to_string())
     };
+    // Nested inside another compositor Super is usually taken by the host.
+    let modifier = get("DUNE_MOD", "modifier", "alt");
     Config {
         keyboard_rules: get("XKB_DEFAULT_RULES", "keyboard_rules", ""),
         keyboard_model: get("XKB_DEFAULT_MODEL", "keyboard_model", ""),
@@ -305,62 +515,17 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
         keyboard_options: get("XKB_DEFAULT_OPTIONS", "keyboard_options", ""),
         repeat_delay: number(file, "repeat_delay", 500, 100..=2000),
         repeat_rate: number(file, "repeat_rate", 25, 1..=100),
-        terminal: get("DUNE_TERMINAL", "terminal", "dune-term"),
-        // Nested inside another compositor Super is usually taken by the host.
-        modifier: get("DUNE_MOD", "modifier", "alt"),
+        // A new process per window: wezterm's single instance would open every window
+        // from the first one, whose `DUNE_TILE` and pid no longer find the new tile.
+        terminal: get("DUNE_TERMINAL", "terminal", "wezterm start --always-new-process"),
+        modifier: modifier.clone(),
         xwayland: get("DUNE_XWAYLAND", "xwayland", "satellite"),
-        direction_keys: [
-            (Side::Left, "direction_left", "super+ctrl+Left"),
-            (Side::Right, "direction_right", "super+ctrl+Right"),
-            (Side::Up, "direction_up", "super+ctrl+Up"),
-            (Side::Down, "direction_down", "super+ctrl+Down"),
-        ]
-        .into_iter()
-        .filter_map(|(side, key, default)| {
-            let spec = file.get(key).map(String::as_str).unwrap_or(default);
-            let parsed = KeySpec::parse(spec);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `{key} = {spec}`: not a key like super+Right");
-            }
-            Some((side, parsed?))
-        })
-        .collect(),
-        close_key: file.get("close").and_then(|spec| {
-            let parsed = KeySpec::parse(spec);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `close = {spec}`: not a key like super+q");
-            }
-            parsed
-        }),
-        launcher_key: file.get("launcher").and_then(|spec| {
-            let parsed = KeySpec::parse(spec);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `launcher = {spec}`: not a key like super+d");
-            }
-            parsed
-        }),
-        switcher_key: file.get("switcher").and_then(|spec| {
-            let parsed = KeySpec::parse(spec);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `switcher = {spec}`: not a key like super+g");
-            }
-            parsed
-        }),
-        terminal_keys: [
-            (TerminalHere::Right, "terminal_vertical"),
-            (TerminalHere::Below, "terminal_horizontal"),
-            (TerminalHere::Tab, "terminal_tab"),
-        ]
-        .into_iter()
-        .filter_map(|(here, key)| {
-            let spec = file.get(key)?;
-            let parsed = KeySpec::parse(spec);
-            if parsed.is_none() {
-                tracing::warn!("ignoring `{key} = {spec}`: not a key like super+v");
-            }
-            Some((here, parsed?))
-        })
-        .collect(),
+        bindings: bindings(file, &modifier),
+        lock_command: file
+            .get("lock_command")
+            .cloned()
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "swaylock -f".into()),
         follow: flag(file, "follow"),
         focus_follows_mouse: flag(file, "focus_follows_mouse"),
         outputs: outputs(file),
@@ -498,38 +663,151 @@ mod tests {
         assert_eq!(c.keyboard_layout, "us");
         assert_eq!(c.keyboard_variant, "dvorak");
         assert_eq!(c.keyboard_options, "");
-        assert_eq!(c.terminal, "dune-term");
+        assert_eq!(c.terminal, "wezterm start --always-new-process");
         assert_eq!(c.modifier, "alt");
     }
 
     #[test]
     fn key_specs() {
-        let spec = KeySpec::parse("super+Right").unwrap();
+        let spec = KeySpec::parse("super+Right", "alt").unwrap();
         assert!(spec.logo && !spec.alt && spec.key == Keysym::Right);
-        assert_eq!(KeySpec::parse("Ctrl + Alt + h").unwrap().key, Keysym::h);
-        assert!(KeySpec::parse("hyper+Right").is_none());
-        assert!(KeySpec::parse("super+NotAKey").is_none());
-        assert_eq!(KeySpec::parse("super+'").unwrap().key, Keysym::apostrophe);
+        assert_eq!(KeySpec::parse("Ctrl + Alt + h", "alt").unwrap().key, Keysym::h);
+        assert!(KeySpec::parse("hyper+Right", "alt").is_none());
+        assert!(KeySpec::parse("super+NotAKey", "alt").is_none());
+        assert_eq!(KeySpec::parse("super+'", "alt").unwrap().key, Keysym::apostrophe);
         let mods = |logo, shift| ModifiersState { logo, shift, ..Default::default() };
         assert!(spec.matches(&mods(true, false), Keysym::Right));
         assert!(!spec.matches(&mods(true, true), Keysym::Right));
         assert!(!spec.matches(&mods(false, false), Keysym::Right));
     }
 
-    #[test]
-    fn direction_keys_from_file_or_default() {
-        let c = resolve(&parse("direction_left = ctrl+alt+Left\ndirection_up = nonsense+Up\n"), &|_| None);
-        let key = |side| c.direction_keys.iter().find(|(s, _)| *s == side).map(|(_, k)| *k);
-        assert_eq!(key(Side::Left), KeySpec::parse("ctrl+alt+Left"));
-        assert_eq!(key(Side::Right), KeySpec::parse("super+ctrl+Right"));
-        assert_eq!(key(Side::Up), None); // invalid: no binding rather than a wrong one
+    /// The keys `config` gives `binding`.
+    fn keys_of(config: &Config, binding: Binding) -> Vec<KeySpec> {
+        config.bindings.iter().filter(|(b, _)| *b == binding).map(|(_, k)| *k).collect()
+    }
+
+    fn spec(text: &str) -> KeySpec {
+        KeySpec::parse(text, "alt").unwrap()
     }
 
     #[test]
-    fn close_key() {
-        assert_eq!(resolve(&parse(""), &|_| None).close_key, None);
-        let c = resolve(&parse("close = super+'\n"), &|_| None);
-        assert_eq!(c.close_key, KeySpec::parse("super+apostrophe"));
+    fn default_keys_follow_the_modifier() {
+        for (modifier, held) in [("alt", "alt"), ("super", "super"), ("logo", "super"), ("ctrl+alt", "ctrl+alt")] {
+            let c = resolve(&parse(&format!("modifier = {modifier}\n")), &|_| None);
+            assert_eq!(keys_of(&c, Binding::Close), [spec(&format!("{held}+q"))], "{modifier}");
+            assert_eq!(keys_of(&c, Binding::Focus(Direction::Left)), [spec(&format!("{held}+h")), spec(&format!("{held}+Left"))]);
+            assert_eq!(keys_of(&c, Binding::SendToDesk(9)), [spec(&format!("{held}+shift+9"))]);
+            assert_eq!(keys_of(&c, Binding::TileOptions), [spec(&format!("{held}+slash"))]);
+        }
+        // `DUNE_MOD` wins over the file, for the keys too.
+        let env = |k: &str| (k == "DUNE_MOD").then(|| "super".to_string());
+        let c = resolve(&parse("modifier = alt\n"), &env);
+        assert_eq!(keys_of(&c, Binding::Close), [spec("super+q")]);
+        // Every binding has a key by default, but the windows (`/` in dune-finder) and the
+        // private switches (in the tile options).
+        let c = resolve(&parse(""), &|_| None);
+        let unbound = [Binding::Switcher, Binding::PrivateTile];
+        for (name, binding, defaults) in binding_table() {
+            assert_eq!(keys_of(&c, binding).is_empty(), unbound.contains(&binding), "{name}");
+            assert!(key_list(&defaults, "alt").is_some(), "{name} = {defaults}");
+        }
+    }
+
+    #[test]
+    fn a_value_replaces_the_defaults() {
+        let c = resolve(&parse("modifier = super\nclose = super+q, super+'\nlauncher = mod+e\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Close), [spec("super+q"), spec("super+apostrophe")]);
+        assert_eq!(keys_of(&c, Binding::Launcher), [spec("super+e")]);
+        // The others keep theirs.
+        assert_eq!(keys_of(&c, Binding::TileOptions), [spec("super+slash")]);
+        let c = resolve(&parse("terminal_vertical = super+ctrl+v\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Terminal(TerminalHere::Right)), [spec("super+ctrl+v")]);
+        assert_eq!(keys_of(&c, Binding::Terminal(TerminalHere::Below)), [spec("alt+s")]);
+    }
+
+    #[test]
+    fn none_turns_a_key_off() {
+        let c = resolve(&parse("quit = none\nlock = None\n"), &|_| None);
+        assert!(keys_of(&c, Binding::Quit).is_empty());
+        assert!(keys_of(&c, Binding::Lock).is_empty());
+        assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+shift+e")));
+    }
+
+    #[test]
+    fn keys_are_unshifted_and_lowercase() {
+        let c = resolve(&parse("lock = mod+E\nquit = super+shift+Q\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Lock), [spec("alt+e")]);
+        assert_eq!(keys_of(&c, Binding::Quit), [spec("super+shift+q")]);
+        assert_eq!(spec("alt+e").key, Keysym::e);
+    }
+
+    #[test]
+    fn a_bad_value_keeps_the_defaults() {
+        for value in ["hyper+q", "mod+q, mod+NotAKey", "", "mod+"] {
+            let c = resolve(&parse(&format!("close = {value}\n")), &|_| None);
+            assert_eq!(keys_of(&c, Binding::Close), [spec("alt+q")], "{value:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_keys_give_way_under_ctrl_alt() {
+        let c = resolve(&parse("modifier = ctrl+alt\n"), &|_| None);
+        let ctrl_alt_left = spec("ctrl+alt+Left");
+        assert_eq!(c.bindings.iter().find(|(_, k)| *k == ctrl_alt_left).map(|(b, _)| *b), Some(Binding::Focus(Direction::Left)));
+        assert!(keys_of(&c, Binding::MoveTab(Direction::Left)).is_empty());
+        assert!(keys_of(&c, Binding::RowWider).is_empty());
+        assert_eq!(keys_of(&c, Binding::Wider), [spec("ctrl+alt+equal"), spec("ctrl+alt+plus")]);
+    }
+
+    #[test]
+    fn tile_options_and_private_keys() {
+        let c = resolve(&parse(""), &|_| None);
+        assert_eq!(keys_of(&c, Binding::TileOptions), [spec("alt+slash")]);
+        assert!(keys_of(&c, Binding::Switcher).is_empty());
+        assert!(keys_of(&c, Binding::PrivateTile).is_empty());
+        // Still settable; a `switcher` set to Mod+/ gives way to `tile_options`, listed first.
+        let c = resolve(&parse("switcher = mod+w\nprivate_tile = mod+p\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Switcher), [spec("alt+w")]);
+        assert_eq!(keys_of(&c, Binding::PrivateTile), [spec("alt+p")]);
+        // `private_desktop` is gone (desktops lock from the bar): an unknown key, ignored.
+        assert!(!binding_table().iter().any(|(name, ..)| name == "private_desktop"));
+        let c = resolve(&parse("private_desktop = mod+shift+p\n"), &|_| None);
+        assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+shift+p")));
+        let c = resolve(&parse("switcher = mod+slash\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::TileOptions), [spec("alt+slash")]);
+        assert!(keys_of(&c, Binding::Switcher).is_empty());
+    }
+
+    #[test]
+    fn key_labels() {
+        let c = resolve(&parse("modifier = super\nclose = mod+q, super+'\n"), &|_| None);
+        assert_eq!(c.key_label(Binding::Close), "super+q, super+apostrophe");
+        assert_eq!(c.key_label(Binding::PrivateTile), "");
+    }
+
+    #[test]
+    fn lock_key_and_command() {
+        let c = resolve(&parse(""), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Lock), [spec("alt+Escape")]);
+        assert_eq!(keys_of(&c, Binding::Lock)[0].key, Keysym::Escape);
+        assert_eq!(c.lock_command, "swaylock -f");
+        let c = resolve(&parse("lock_command = swaylock -f -c 000000\n"), &|_| None);
+        assert_eq!(c.lock_command, "swaylock -f -c 000000");
+    }
+
+    #[test]
+    fn a_shared_key_stays_with_the_first() {
+        // `close` comes before `lock`: alt+q stays a close key, lock is left with none.
+        let c = resolve(&parse("lock = mod+q\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Close), [spec("alt+q")]);
+        assert!(keys_of(&c, Binding::Lock).is_empty());
+        // Set on the earlier one, it takes the key from the later one's defaults.
+        let c = resolve(&parse("focus_left = mod+t\n"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Focus(Direction::Left)), [spec("alt+t")]);
+        assert!(keys_of(&c, Binding::StackToTabs).is_empty());
+        // Each key once.
+        let keys: Vec<_> = c.bindings.iter().map(|(_, k)| *k).collect();
+        assert!(keys.iter().enumerate().all(|(i, k)| !keys[..i].contains(k)));
     }
 
     #[test]
@@ -590,26 +868,6 @@ mod tests {
         assert_eq!(
             resolve(&parse("file_manager_terminal = foot\n"), &|_| None).file_manager_terminal,
             "foot"
-        );
-    }
-
-    #[test]
-    fn launcher_key() {
-        assert_eq!(resolve(&parse(""), &|_| None).launcher_key, None);
-        let c = resolve(&parse("launcher = super+e\n"), &|_| None);
-        assert_eq!(c.launcher_key, KeySpec::parse("super+e"));
-    }
-
-    #[test]
-    fn terminal_keys() {
-        assert!(resolve(&parse(""), &|_| None).terminal_keys.is_empty());
-        let c = resolve(&parse("terminal_vertical = super+ctrl+v\nterminal_tab = super+n\nterminal_horizontal = nope+s\n"), &|_| None);
-        assert_eq!(
-            c.terminal_keys,
-            vec![
-                (TerminalHere::Right, KeySpec::parse("super+ctrl+v").unwrap()),
-                (TerminalHere::Tab, KeySpec::parse("super+n").unwrap()),
-            ]
         );
     }
 

@@ -1,4 +1,4 @@
-//! Desktop applications (freedesktop `.desktop` entries): what `@` launches.
+//! Desktop applications (freedesktop `.desktop` entries): what the launcher lists.
 
 use std::{
     collections::HashMap,

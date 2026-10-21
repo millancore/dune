@@ -28,8 +28,8 @@ use smithay::{
 
 use crate::layout::{Layout, Rect, Side, TileId};
 
-/// One slot of the layout. `stack[0]` is the tile's terminal; programs started from it
-/// with `@prog` are pushed on top and "swallow" it until they close. The last window
+/// One slot of the layout. `stack[0]` is the tile's terminal; programs it runs in
+/// place (`DUNE_RUN`) are pushed on top and "swallow" it until they close. The last window
 /// is the one shown.
 #[derive(Debug, Default)]
 pub struct Tile {
@@ -78,6 +78,13 @@ pub struct Dune {
     pub next_tile: TileId,
     /// Geometries from the last `arrange`, used for borders, focus and hit testing.
     pub geometries: Vec<(TileId, Rect)>,
+    /// A resize by keys or wheel sliding into place: tiles are drawn on their way there.
+    pub resize_animation: Option<crate::tiling::ResizeAnimation>,
+    /// Sizes sent to toplevels that have not drawn them yet, with when they were sent.
+    pub configure_waits: HashMap<
+        smithay::reexports::wayland_server::backend::ObjectId,
+        (Option<smithay::utils::Size<i32, Logical>>, std::time::Instant),
+    >,
     /// The part of each tile that is on its output; tiles scrolled away are missing.
     pub shown: Vec<(TileId, Rect)>,
     /// Tiles folded into a tab: their bar is drawn, their window is not.
@@ -99,16 +106,16 @@ pub struct Dune {
     pub tab_homes: HashMap<TileId, (String, crate::layout::Home)>,
     /// The desktop each output shows (1 when missing); `layouts` and `floating` hold it.
     pub desks: HashMap<String, u8>,
+    /// The desktop each output showed before the one it shows: where locking that one goes.
+    pub previous_desks: HashMap<String, u8>,
     /// Desktops not shown, by output name and number.
     pub hidden: HashMap<(String, u8), crate::desktops::Desk>,
-    /// Tiles waiting for the window of an `@prog`, with the pid of the shell that started it.
+    /// Tiles waiting for the window of a `DUNE_RUN` command, with the pid of the shell that started it.
     pub swallows: HashMap<TileId, u32>,
     /// Apps the launcher started on their own, by their `DUNE_LAUNCH` number: where their
     /// first window goes, and when they started.
     pub launches: HashMap<u64, crate::launcher::Launch>,
     pub next_launch: u64,
-    /// Per-tile direction indicator: where the next command typed there opens.
-    pub directions: HashMap<TileId, crate::layout::Side>,
     /// `dune-shell` link given to terminals as `$SHELL`, and the shell it starts.
     pub shell_wrapper: Option<PathBuf>,
     pub user_shell: PathBuf,
@@ -159,6 +166,14 @@ pub struct Dune {
     /// The pointer image: clients choose it; dune draws it on a real session.
     pub cursor_status: CursorImageStatus,
     pub cursor: crate::cursor::Cursor,
+    /// swayidle's timers (ext-idle-notify-v1), restarted by any input.
+    pub idle_notifier_state: smithay::wayland::idle_notify::IdleNotifierState<Dune>,
+    /// Surfaces asking to hold off idle (idle-inhibit: videos, games), while they are alive.
+    pub idle_inhibitors: Vec<WlSurface>,
+    /// Screen lock (swaylock, ext-session-lock-v1), see `crate::lock`.
+    pub session_lock: crate::lock::SessionLock,
+    /// Tiles and desktops blocked on screen and in captures, see `crate::privacy`.
+    pub privacy: crate::privacy::Privacy,
 }
 
 pub enum Backend {
@@ -227,6 +242,10 @@ impl Dune {
         let output_capture_source_state = smithay::wayland::image_capture_source::OutputCaptureSourceState::new::<Self>(&dh);
         let image_copy_capture_state = smithay::wayland::image_copy_capture::ImageCopyCaptureState::new::<Self>(&dh);
         let activation_state = smithay::wayland::xdg_activation::XdgActivationState::new::<Self>(&dh);
+        // swayidle: idle timeouts, held off by videos and games; swaylock: the screen lock.
+        let idle_notifier_state = smithay::wayland::idle_notify::IdleNotifierState::new(&dh, event_loop.handle());
+        smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh);
+        let session_lock = crate::lock::SessionLock::new(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
@@ -257,6 +276,8 @@ impl Dune {
             focused: None,
             next_tile: 1,
             geometries: Vec::new(),
+            resize_animation: None,
+            configure_waits: HashMap::new(),
             shown: Vec::new(),
             tabs: Vec::new(),
             tab_bars: Vec::new(),
@@ -267,11 +288,11 @@ impl Dune {
             float_homes: HashMap::new(),
             tab_homes: HashMap::new(),
             desks: HashMap::new(),
+            previous_desks: HashMap::new(),
             hidden: HashMap::new(),
             swallows: HashMap::new(),
             launches: HashMap::new(),
             next_launch: 1,
-            directions: HashMap::new(),
             shell_wrapper: None,
             user_shell: PathBuf::from("/bin/sh"),
 
@@ -305,6 +326,10 @@ impl Dune {
             decorations: Default::default(),
             cursor_status: CursorImageStatus::default_named(),
             cursor: crate::cursor::Cursor::load(),
+            idle_notifier_state,
+            idle_inhibitors: Vec::new(),
+            session_lock,
+            privacy: Default::default(),
         }
     }
 
@@ -339,8 +364,12 @@ impl Dune {
         socket_name
     }
 
-    /// The surface under the pointer: overlay/top layers, then tiles, then bottom/background layers.
+    /// The surface under the pointer (while locked, see `lock_surface_under`): overlay/top layers, then tiles, then bottom/background layers.
     pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // Locked: only the lock surfaces take the pointer.
+        if self.session_lock.is_locked() {
+            return self.lock_surface_under(pos);
+        }
         let output = self.space.outputs().find(|o| self.space.output_geometry(o).is_some_and(|g| g.to_f64().contains(pos)))?;
         let output_loc = self.space.output_geometry(output)?.loc;
         let layers = layer_map_for_output(output);

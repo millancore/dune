@@ -88,6 +88,9 @@ pub fn init_winit(event_loop: &mut EventLoop<Dune>, state: &mut Dune) -> Result<
                 backend.window().request_redraw();
                 state.backend = Backend::Winit(backend);
                 state.capture_frames(&output);
+                if state.session_lock.is_locked() {
+                    state.lock_frame_drawn(&output);
+                }
                 state.post_render(&output);
             }
             WinitEvent::CloseRequested => {

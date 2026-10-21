@@ -584,21 +584,29 @@ impl Dune {
         // (niri leaves them off by default too).
         let flags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
         let mut changed = false;
+        // The screen shows this frame (or the same one already): it counts for a lock.
+        let mut shown = false;
         match surface.drm_output.render_frame(&mut renderer, &elements, BACKGROUND, flags) {
             Ok(result) if !result.is_empty => {
                 changed = true;
                 match surface.drm_output.queue_frame(()) {
-                    Ok(()) => surface.queued = Some(Instant::now()),
+                    Ok(()) => {
+                        surface.queued = Some(Instant::now());
+                        shown = true;
+                    }
                     Err(err) => tracing::warn!("cannot show frame on {}: {err}", output.name()),
                 }
             }
-            Ok(_) => {} // nothing changed
+            Ok(_) => shown = true, // nothing changed
             Err(err) => tracing::warn!("cannot render {}: {err}", output.name()),
         }
         drop(elements);
         udev.renderer = Some(renderer);
         if changed {
             self.capture_frames(&output);
+        }
+        if shown && self.session_lock.is_locked() {
+            self.lock_frame_drawn(&output);
         }
         self.post_render(&output);
     }

@@ -2,7 +2,9 @@
 //!
 //! Every monitor is a workspace group holding desktops 1-9. The desktop it shows is
 //! `active`; an empty one it does not show is `hidden`, which bars leave out. A bar
-//! that activates a desktop and commits makes its monitor show it.
+//! that activates a desktop and commits makes its monitor show it; one that deactivates
+//! it (waybar's `"on-click-right": "deactivate"`) and commits locks it, or unlocks it
+//! (`privacy`). A locked desktop is named "🔒 <n>" (`privacy::workspace_name`).
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -30,8 +32,8 @@ struct Instance {
     manager: ExtWorkspaceManagerV1,
     /// Per monitor: its group and whether it was told which `wl_output` it is.
     groups: HashMap<String, (ExtWorkspaceGroupHandleV1, bool)>,
-    /// Per desktop: its handle and the last state sent.
-    desks: HashMap<Key, (ExtWorkspaceHandleV1, u32)>,
+    /// Per desktop: its handle and the last state and name sent.
+    desks: HashMap<Key, (ExtWorkspaceHandleV1, u32, String)>,
 }
 
 #[derive(Default)]
@@ -39,10 +41,28 @@ pub struct WorkspaceState {
     instances: Vec<Instance>,
 }
 
-/// Data of a manager: the desktop a bar asked for, applied on commit.
+/// What a bar asked of a desktop, applied on commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pending {
+    Show(Key),
+    /// Lock it, or unlock it.
+    ToggleLock(Key),
+}
+
+/// What `request` on the handle of desktop `key` asks for: activate shows it, deactivate
+/// toggles its lock.
+fn pending_of(request: &ext_workspace_handle_v1::Request, key: &Key) -> Option<Pending> {
+    match request {
+        ext_workspace_handle_v1::Request::Activate => Some(Pending::Show(key.clone())),
+        ext_workspace_handle_v1::Request::Deactivate => Some(Pending::ToggleLock(key.clone())),
+        _ => None,
+    }
+}
+
+/// Data of a manager: what a bar asked for, applied in order on commit.
 #[derive(Default)]
 pub struct ManagerData {
-    pending: Mutex<Option<Key>>,
+    pending: Mutex<Vec<Pending>>,
 }
 
 /// Data of a workspace handle: its desktop and the manager it came from.
@@ -63,8 +83,8 @@ impl WorkspaceState {
 
 impl Instance {
     /// Tell the bar about monitors and desktops that changed; `desks` is every desktop
-    /// of `outputs` with its state.
-    fn sync(&mut self, dh: &DisplayHandle, outputs: &[Output], desks: &[(Key, u32)]) {
+    /// of `outputs` with its state and name.
+    fn sync(&mut self, dh: &DisplayHandle, outputs: &[Output], desks: &[(Key, u32, String)]) {
         let Ok(client) = dh.get_client(self.manager.id()) else { return };
         let version = self.manager.version();
         let mut changed = false;
@@ -74,7 +94,7 @@ impl Instance {
         for name in gone {
             let (group, _) = self.groups.remove(&name).unwrap();
             for key in (1..=DESKS).map(|n| (name.clone(), n)) {
-                if let Some((desk, _)) = self.desks.remove(&key) {
+                if let Some((desk, ..)) = self.desks.remove(&key) {
                     group.workspace_leave(&desk);
                     desk.removed();
                 }
@@ -105,13 +125,18 @@ impl Instance {
             }
         }
 
-        for (key, state) in desks {
+        for (key, state, name) in desks {
             let Some((group, _)) = self.groups.get(&key.0) else { continue };
             match self.desks.get_mut(key) {
-                Some((desk, sent)) => {
+                Some((desk, sent, sent_name)) => {
                     if sent != state {
                         desk.state(ext_workspace_handle_v1::State::from_bits_truncate(*state));
                         *sent = *state;
+                        changed = true;
+                    }
+                    if sent_name != name {
+                        desk.name(name.clone());
+                        *sent_name = name.clone();
                         changed = true;
                     }
                 }
@@ -122,12 +147,14 @@ impl Instance {
                     };
                     self.manager.workspace(&desk);
                     desk.id(format!("{}-{}", key.0, key.1));
-                    desk.name(key.1.to_string());
+                    desk.name(name.clone());
                     desk.coordinates(u32::from(key.1 - 1).to_ne_bytes().to_vec());
-                    desk.capabilities(ext_workspace_handle_v1::WorkspaceCapabilities::Activate);
+                    let caps = ext_workspace_handle_v1::WorkspaceCapabilities::Activate
+                        | ext_workspace_handle_v1::WorkspaceCapabilities::Deactivate;
+                    desk.capabilities(caps);
                     desk.state(ext_workspace_handle_v1::State::from_bits_truncate(*state));
                     group.workspace_enter(&desk);
-                    self.desks.insert(key.clone(), (desk, *state));
+                    self.desks.insert(key.clone(), (desk, *state, name.clone()));
                     changed = true;
                 }
             }
@@ -151,14 +178,17 @@ impl Dune {
             let name = output.name();
             let shown = self.desk_of(&name);
             for n in 1..=DESKS {
+                // A locked desktop stays in the bar even empty: its right click unlocks it.
+                let locked = self.privacy.locked(&name, n);
                 let state = if n == shown {
                     ACTIVE
-                } else if self.hidden.contains_key(&(name.clone(), n)) {
+                } else if locked || self.hidden.contains_key(&(name.clone(), n)) {
                     0
                 } else {
                     HIDDEN
                 };
-                desks.push(((name.clone(), n), state));
+                let label = crate::privacy::workspace_name(n, locked);
+                desks.push(((name.clone(), n), state, label));
             }
         }
         let dh = self.display_handle.clone();
@@ -195,8 +225,12 @@ impl Dispatch<ExtWorkspaceManagerV1, ManagerData> for Dune {
     ) {
         match request {
             ext_workspace_manager_v1::Request::Commit => {
-                if let Some((output, n)) = data.pending.lock().unwrap().take() {
-                    state.show_desk_on(&output, n);
+                let pending = std::mem::take(&mut *data.pending.lock().unwrap());
+                for pending in pending {
+                    match pending {
+                        Pending::Show((output, n)) => state.show_desk_on(&output, n),
+                        Pending::ToggleLock((output, n)) => state.toggle_desk_lock(&output, n),
+                    }
                 }
             }
             ext_workspace_manager_v1::Request::Stop => {
@@ -236,10 +270,23 @@ impl Dispatch<ExtWorkspaceHandleV1, DeskData> for Dune {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        if let ext_workspace_handle_v1::Request::Activate = request
+        if let Some(pending) = pending_of(&request, &data.key)
             && let Some(manager) = data.manager.data::<ManagerData>()
         {
-            *manager.pending.lock().unwrap() = Some(data.key.clone());
+            manager.pending.lock().unwrap().push(pending);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activate_shows_and_deactivate_toggles_the_lock() {
+        let key: Key = ("DP-1".into(), 3);
+        assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Activate, &key), Some(Pending::Show(key.clone())));
+        assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Deactivate, &key), Some(Pending::ToggleLock(key.clone())));
+        assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Remove, &key), None);
     }
 }

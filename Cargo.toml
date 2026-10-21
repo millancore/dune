@@ -1,5 +1,5 @@
 [workspace]
-members = ["dune-common", "dune-finder", "dune-term"]
+members = ["dune-common", "dune-finder"]
 
 [package]
 name = "dune"

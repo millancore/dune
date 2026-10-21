@@ -2,7 +2,9 @@
 //! monitor and desktop, in every tab and folded row, the most recently focused first (the
 //! focused one last: Enter right away goes back to the window before). Choosing one
 //! (`goto`) shows the window's desktop and focuses it; chosen for an empty container
-//! (Mod+Enter, then `/` or Mod+/), the window moves into it instead.
+//! (Mod+Enter, then `/`), the window moves into it instead. Private tiles are listed by
+//! their app (`privacy::masked_title`), not their title. Windows of locked desktops are
+//! left out, and not gone to; a `locked_windows` request lists only them (`:l`).
 
 use dune_common::protocol::WindowInfo;
 
@@ -10,10 +12,13 @@ use crate::{Dune, layout::TileId};
 
 impl Dune {
     /// Show the desktop `id` is on and focus it: its tab shows, its row opens and the view
-    /// slides to it (see `arrange`).
+    /// slides to it (see `arrange`). Not on a locked desktop (`unlock_and_go` is).
     pub fn go_to(&mut self, id: TileId) {
         if !self.tiles.contains_key(&id) {
             return;
+        }
+        if self.on_locked_desk(id) {
+            return tracing::info!(tile = id, "window on a locked desktop, not gone to");
         }
         let slot = self.finder.as_mut().and_then(|r| r.slot.take()).map(|(slot, _)| slot);
         if let Some(slot) = slot.filter(|s| *s != id && self.tiles.get(s).is_some_and(|t| t.stack.is_empty())) {
@@ -43,14 +48,15 @@ impl Dune {
 
     /// Every tile with a window, on every monitor and desktop: the most recently focused
     /// first, then the rest monitor by monitor, desktop by desktop; the focused one last.
-    pub fn window_list(&self) -> Vec<WindowInfo> {
+    /// Those of locked desktops are left out, or with `locked` the only ones listed.
+    pub fn window_list(&self, locked: bool) -> Vec<WindowInfo> {
         let outputs = self.numbered_outputs();
         let mut placed: Vec<(TileId, String)> = Vec::new();
         for (m, output) in outputs.iter().enumerate() {
             let name = output.name();
             let monitor = if outputs.len() > 1 { format!(" · m{}", m + 1) } else { String::new() };
             let shown = self.desk_of(&name);
-            for desk in 1..=crate::desktops::DESKS {
+            for desk in self.privacy.listed_desks(&name, locked) {
                 let place = format!("desk {desk}{monitor}");
                 let tiles = if desk == shown {
                     let floats = self.floating.get(&name).into_iter().flatten().map(|(t, _)| *t);
@@ -72,7 +78,7 @@ impl Dune {
             .into_iter()
             .map(|(tile, place)| WindowInfo {
                 tile,
-                title: self.tile_title(tile),
+                title: self.shown_title(tile),
                 app: self.tile_app_id(tile).unwrap_or_default(),
                 place,
             })
