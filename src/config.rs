@@ -21,6 +21,8 @@
 //! file_manager_terminal = foot  # terminal it runs in (foot shows yazi's image previews); default `terminal`
 //! border_color = none     # border of tiles without focus: RRGGBB or RRGGBBAA (no `#`), or none; default ffffff
 //! exec = waybar           # run when dune starts; one line per program, as many as needed
+//! screenshot_dir = ~/shots       # where the `screenshot` keys save; default $XDG_PICTURES_DIR/Screenshots, else ~/Pictures/Screenshots
+//! recording_dir = ~/videos       # where `record` saves; default $XDG_VIDEOS_DIR, else ~/Videos
 //!
 //! # Mice and touchpads (on the real session, not nested)
 //! input.left_handed = true      # swap the left and right buttons
@@ -83,6 +85,9 @@
 //! stack_to_tabs = mod+t
 //! quit = mod+shift+e
 //! lock = mod+Escape                   # runs `lock_command`
+//! screenshot = Print                  # of a region chosen with the mouse (Esc: none)
+//! screenshot_screen = shift+Print     # of the active monitor
+//! record = mod+shift+r                # record a region chosen with the mouse (again: stop)
 //! ```
 //!
 //! The pointer pushing on against the left or right edge of the screens slides the strip
@@ -121,6 +126,11 @@
 //! "deactivate"`) locks it, "🔒 n": it is not shown (Mod+N, a click on it and the window
 //! list leave it alone; locking the one shown switches to another) until another right
 //! click, or a window chosen with `:l`, unlocks it. Tiles can still be sent there.
+//!
+//! Screenshots and recordings (see `screenshot`) need grim, slurp, wf-recorder,
+//! wl-clipboard and libnotify (`notify-send`). A screenshot is saved as
+//! `dune-YYYY-MM-DD_HH-MM-SS.png`, put on the clipboard and announced with its path; a
+//! recording (`.mp4`, no sound) is announced when it starts and when it is saved.
 //!
 //! Night light has no settings here: programs like wlsunset (the waybar night-light
 //! module runs it) set the monitors' gamma through wlr-gamma-control (see `gamma`), on
@@ -239,6 +249,9 @@ pub enum Binding {
     StackToTabs,
     Quit,
     Lock,
+    Screenshot,
+    ScreenshotScreen,
+    Record,
 }
 
 /// Every binding: its name in the file, what it does and its default keys. A key two of
@@ -288,6 +301,9 @@ fn binding_table() -> Vec<(String, Binding, String)> {
         ("stack_to_tabs", StackToTabs, "mod+t"),
         ("quit", Quit, "mod+shift+e"),
         ("lock", Lock, "mod+Escape"),
+        ("screenshot", Screenshot, "Print"),
+        ("screenshot_screen", ScreenshotScreen, "shift+Print"),
+        ("record", Record, "mod+shift+r"),
     ];
     table.extend(rest.map(|(name, binding, keys)| (name.to_string(), binding, keys.to_string())));
     table
@@ -417,6 +433,10 @@ pub struct Config {
     pub border_color: Option<[f32; 4]>,
     /// Shell commands run when dune starts (`exec` lines, in order).
     pub exec: Vec<String>,
+    /// Where screenshots go (`~/` for the home folder); empty: `$XDG_PICTURES_DIR/Screenshots`.
+    pub screenshot_dir: String,
+    /// Where recordings go; empty: `$XDG_VIDEOS_DIR`.
+    pub recording_dir: String,
 }
 
 impl Config {
@@ -544,6 +564,8 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             .unwrap_or_default(),
         border_color: border_color(file),
         exec: Vec::new(),
+        screenshot_dir: file.get("screenshot_dir").cloned().unwrap_or_default(),
+        recording_dir: file.get("recording_dir").cloned().unwrap_or_default(),
     }
 }
 
@@ -793,6 +815,28 @@ mod tests {
         assert_eq!(c.lock_command, "swaylock -f");
         let c = resolve(&parse("lock_command = swaylock -f -c 000000\n"), &|_| None);
         assert_eq!(c.lock_command, "swaylock -f -c 000000");
+    }
+
+    #[test]
+    fn capture_keys_and_folders() {
+        let c = resolve(&parse(""), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Screenshot), [spec("Print")]);
+        assert_eq!(keys_of(&c, Binding::ScreenshotScreen), [spec("shift+Print")]);
+        assert_eq!(keys_of(&c, Binding::Record), [spec("alt+shift+r")]);
+        assert_eq!(keys_of(&c, Binding::CycleWidth), [spec("alt+r")]);
+        assert_eq!((c.screenshot_dir.as_str(), c.recording_dir.as_str()), ("", ""));
+        let c = resolve(&parse("modifier = super
+screenshot = super+p
+record = none
+"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Screenshot), [spec("super+p")]);
+        assert!(keys_of(&c, Binding::Record).is_empty());
+        assert_eq!(keys_of(&c, Binding::ScreenshotScreen), [spec("shift+Print")]);
+        let c = resolve(&parse("screenshot_dir = ~/shots
+recording_dir = /data/videos
+"), &|_| None);
+        assert_eq!(c.screenshot_dir, "~/shots");
+        assert_eq!(c.recording_dir, "/data/videos");
     }
 
     #[test]

@@ -10,11 +10,16 @@ use std::time::Duration;
 use smithay::{
     backend::{
         allocator::{Fourcc, dmabuf::Dmabuf},
-        renderer::{Bind, ExportMem, Offscreen, damage::OutputDamageTracker, gles::{GlesRenderer, GlesTexture}},
+        renderer::{
+            Bind, ExportMem, Offscreen,
+            damage::OutputDamageTracker,
+            element::{RenderElement, utils::{Relocate, RelocateRenderElement}},
+            gles::{GlesRenderer, GlesTexture},
+        },
     },
     output::{Output, WeakOutput},
-    reexports::wayland_server::protocol::wl_shm,
-    utils::{Clock, Monotonic, Rectangle, Size, Transform},
+    reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_shm},
+    utils::{Clock, Monotonic, Physical, Rectangle, Size, Transform},
     wayland::{
         dmabuf::get_dmabuf,
         image_capture_source::{ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler, OutputCaptureSourceState},
@@ -63,17 +68,9 @@ impl ImageCopyCaptureHandler for Dune {
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
         let output = source.user_data().get::<WeakOutput>()?.upgrade()?;
         let mode = output.current_mode()?;
-        let node = self.render_node();
-        let renderer = self.backend.renderer()?;
-        let dma = node.map(|node| {
-            let formats = renderer.egl_context().dmabuf_render_formats();
-            let formats = DMABUF_FORMATS
-                .into_iter()
-                .map(|code| (code, formats.iter().filter(|f| f.code == code).map(|f| f.modifier).collect::<Vec<_>>()))
-                .filter(|(_, modifiers)| !modifiers.is_empty())
-                .collect();
-            DmabufConstraints { node, formats }
-        });
+        // Nothing to draw with yet.
+        self.backend.renderer()?;
+        let dma = self.dmabuf_constraints();
         Some(BufferConstraints {
             size: (mode.size.w, mode.size.h).into(),
             shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
@@ -114,6 +111,7 @@ impl Dune {
         for capture in ready {
             self.capture(capture);
         }
+        self.wlr_capture_frames(output);
     }
 
     /// Draw the capture's monitor into the frame's buffer.
@@ -122,7 +120,11 @@ impl Dune {
         let Some(output) = output.upgrade() else {
             return frame.fail(CaptureFailureReason::Stopped);
         };
-        match self.draw_into(&output, cursor, &frame) {
+        let region = match output.current_mode() {
+            Some(mode) => Rectangle::from_size(mode.size),
+            None => return frame.fail(CaptureFailureReason::Unknown),
+        };
+        match self.draw_output(&output, cursor, region, Transform::Normal, &frame.buffer()) {
             Ok(()) => {
                 let now: Duration = Clock::<Monotonic>::new().now().into();
                 frame.success(Transform::Normal, None, now);
@@ -134,24 +136,51 @@ impl Dune {
         }
     }
 
-    fn draw_into(&mut self, output: &Output, cursor: bool, frame: &Frame) -> Result<(), String> {
-        let mode = output.current_mode().ok_or("monitor without a mode")?;
-        let buffer = frame.buffer();
-        let mut damage = OutputDamageTracker::new(mode.size, 1.0, Transform::Normal);
-        let size = Size::from((mode.size.w, mode.size.h));
+    /// Draw the part `region` (pixels of the monitor, as shown) of `output` into
+    /// `buffer`: shm (Argb8888 or Xrgb8888) or a dmabuf, of the region's size turned by
+    /// `transform`. wlr-screencopy draws with it too (`crate::wlr_screencopy`).
+    pub fn draw_output(
+        &mut self,
+        output: &Output,
+        cursor: bool,
+        region: Rectangle<i32, Physical>,
+        transform: Transform,
+        buffer: &WlBuffer,
+    ) -> Result<(), String> {
+        let buffer_size = transform.transform_size(region.size);
+        let mut damage = OutputDamageTracker::new(buffer_size, 1.0, transform);
+        let size = Size::from((buffer_size.w, buffer_size.h));
         self.with_renderer(|state, renderer| {
-            let elements = state.output_elements(renderer, output, cursor);
-            if let Ok(dmabuf) = get_dmabuf(&buffer) {
+            // Moved so the region's corner is the buffer's.
+            let elements: Vec<_> = state
+                .output_elements(renderer, output, cursor)
+                .into_iter()
+                .map(|e| RelocateRenderElement::from_element(e, (-region.loc.x, -region.loc.y), Relocate::Relative))
+                .collect();
+            if let Ok(dmabuf) = get_dmabuf(buffer) {
                 let mut dmabuf: Dmabuf = dmabuf.clone();
                 let mut target = renderer.bind(&mut dmabuf).map_err(|e| e.to_string())?;
                 let result = damage.render_output(renderer, &mut target, 0, &elements, BACKGROUND).map_err(|e| format!("{e:?}"))?;
                 // The client reads the buffer as soon as it hears the frame is ready.
                 result.sync.wait().map_err(|_| "interrupted while drawing".to_string())
             } else {
-                render_to_shm(renderer, &mut damage, &elements, size, &buffer)
+                render_to_shm(renderer, &mut damage, &elements, size, buffer)
             }
         })
         .ok_or("no renderer")?
+    }
+
+    /// Dmabufs clients may capture into: on the GPU dune renders with, in the formats of
+    /// `DMABUF_FORMATS` it can draw into (real sessions only).
+    pub fn dmabuf_constraints(&mut self) -> Option<DmabufConstraints> {
+        let node = self.render_node()?;
+        let formats = self.backend.renderer()?.egl_context().dmabuf_render_formats();
+        let formats = DMABUF_FORMATS
+            .into_iter()
+            .map(|code| (code, formats.iter().filter(|f| f.code == code).map(|f| f.modifier).collect::<Vec<_>>()))
+            .filter(|(_, modifiers)| !modifiers.is_empty())
+            .collect();
+        Some(DmabufConstraints { node, formats })
     }
 }
 
@@ -160,9 +189,9 @@ impl Dune {
 fn render_to_shm(
     renderer: &mut GlesRenderer,
     damage: &mut OutputDamageTracker,
-    elements: &[crate::render::OutputRenderElements<GlesRenderer>],
+    elements: &[impl RenderElement<GlesRenderer>],
     size: Size<i32, smithay::utils::Buffer>,
-    buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    buffer: &WlBuffer,
 ) -> Result<(), String> {
     let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, size).map_err(|e| e.to_string())?;
     let mapping = {
@@ -176,7 +205,7 @@ fn render_to_shm(
         let stride = data.stride as usize;
         let offset = data.offset as usize;
         if data.width as usize != w || data.height as usize != h || offset + stride * h > len {
-            return Err("the buffer does not fit the monitor".to_string());
+            return Err("the buffer does not fit the capture".to_string());
         }
         let memory = unsafe { std::slice::from_raw_parts_mut(ptr.add(offset), stride * h) };
         for (y, row) in pixels.chunks_exact(w * 4).take(h).enumerate() {

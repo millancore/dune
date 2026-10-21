@@ -66,6 +66,19 @@ impl PrimarySelectionHandler for Dune {
     }
 }
 
+/// Data control: `wl-copy`, `wl-paste` and clipboard managers (ext and wlr protocols).
+impl smithay::wayland::selection::ext_data_control::DataControlHandler for Dune {
+    fn data_control_state(&mut self) -> &mut smithay::wayland::selection::ext_data_control::DataControlState {
+        &mut self.ext_data_control_state
+    }
+}
+
+impl smithay::wayland::selection::wlr_data_control::DataControlHandler for Dune {
+    fn data_control_state(&mut self) -> &mut smithay::wayland::selection::wlr_data_control::DataControlState {
+        &mut self.wlr_data_control_state
+    }
+}
+
 impl DndGrabHandler for Dune {}
 impl WaylandDndGrabHandler for Dune {
     fn dnd_requested<S: Source>(

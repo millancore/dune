@@ -225,6 +225,7 @@ impl Windows {
                     .and_then(|name| icons.cached(name, icon_size)),
                 text: &e.title,
                 detail: Some(format!("{} · {}", e.app, e.place)),
+                sub: None,
                 selected: *i == self.selected,
             })
             .collect();

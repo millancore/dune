@@ -129,6 +129,9 @@ pub struct Dune {
     pub seat_state: SeatState<Dune>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
+    /// Clipboard managers and `wl-copy`/`wl-paste` (data control, ext and wlr flavours).
+    pub ext_data_control_state: smithay::wayland::selection::ext_data_control::DataControlState,
+    pub wlr_data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -149,6 +152,9 @@ pub struct Dune {
     pub activation_state: smithay::wayland::xdg_activation::XdgActivationState,
     pub capture_sessions: Vec<smithay::wayland::image_copy_capture::Session>,
     pub pending_captures: Vec<crate::screencopy::PendingCapture>,
+    /// wlr-screencopy (wf-recorder): its frames waiting for something new, see
+    /// `crate::wlr_screencopy`.
+    pub wlr_screencopy: crate::wlr_screencopy::WlrScreencopy,
     /// Where we draw: a window in another session, or the real hardware.
     pub backend: Backend,
     pub decorations: crate::render::Decorations,
@@ -159,6 +165,8 @@ pub struct Dune {
     pub gamma: crate::gamma::GammaState,
     /// dune-finder (Mod+d, Mod+/, Mod+Enter) while it runs.
     pub finder: Option<crate::launcher::FinderRun>,
+    /// The screen recording (`record` key) while it runs, see `crate::screenshot`.
+    pub recording: Option<crate::screenshot::Recording>,
     /// Tiles focused, the latest first: dune-finder lists windows in this order.
     pub recent: Vec<TileId>,
     /// How far the pointer has pushed against a screen edge (see `input::edge_slide`).
@@ -234,13 +242,27 @@ impl Dune {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // `wl-copy`/`wl-paste` and clipboard managers set and read both selections without
+        // a focused window.
+        let ext_data_control_state = smithay::wayland::selection::ext_data_control::DataControlState::new::<Self, _>(
+            &dh,
+            Some(&primary_selection_state),
+            |_| true,
+        );
+        let wlr_data_control_state = smithay::wayland::selection::wlr_data_control::DataControlState::new::<Self, _>(
+            &dh,
+            Some(&primary_selection_state),
+            |_| true,
+        );
         // Games (through xwayland-satellite too) read raw mouse motion and lock or confine
         // the pointer while playing.
         smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
         smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
-        // Screen capture: grim, and screen sharing through xdg-desktop-portal-wlr.
+        // Screen capture: grim, wf-recorder (wlr-screencopy), and screen sharing through
+        // xdg-desktop-portal-wlr.
         let output_capture_source_state = smithay::wayland::image_capture_source::OutputCaptureSourceState::new::<Self>(&dh);
         let image_copy_capture_state = smithay::wayland::image_copy_capture::ImageCopyCaptureState::new::<Self>(&dh);
+        let wlr_screencopy = crate::wlr_screencopy::WlrScreencopy::new(&dh);
         let activation_state = smithay::wayland::xdg_activation::XdgActivationState::new::<Self>(&dh);
         // swayidle: idle timeouts, held off by videos and games; swaylock: the screen lock.
         let idle_notifier_state = smithay::wayland::idle_notify::IdleNotifierState::new(&dh, event_loop.handle());
@@ -304,10 +326,13 @@ impl Dune {
             seat_state,
             data_device_state,
             primary_selection_state,
+            ext_data_control_state,
+            wlr_data_control_state,
             popups,
             seat,
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family, config.tab_widths),
             finder: None,
+            recording: None,
             recent: Vec::new(),
             edge_push: 0.0,
             workspaces,
@@ -322,6 +347,7 @@ impl Dune {
             activation_state,
             capture_sessions: Vec::new(),
             pending_captures: Vec::new(),
+            wlr_screencopy,
             backend: Backend::None,
             decorations: Default::default(),
             cursor_status: CursorImageStatus::default_named(),

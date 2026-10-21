@@ -6,6 +6,8 @@
 #   make check            tests and clippy for the whole workspace
 #
 # Run it as your own user, not with sudo: the paths below come from $HOME.
+# The screenshot and record keys need grim, slurp, wf-recorder, wl-clipboard and
+# libnotify installed (pacman -S grim slurp wf-recorder wl-clipboard libnotify).
 # A running dune keeps the old binary until the session is restarted.
 
 CARGO      ?= cargo

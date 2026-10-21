@@ -103,7 +103,7 @@ impl Jump {
 
     /// Row `row` of the list was clicked: a terminal in its folder.
     pub fn click(&mut self, row: usize) -> Step {
-        let i = first_shown(self.selected) + row;
+        let i = first_shown(self.selected) + row / 2;
         match self.matches.get(i) {
             Some(f) => Step::Go(self.folders[*f].clone()),
             None => Step::Continue,
@@ -122,8 +122,8 @@ impl Jump {
             .collect();
     }
 
-    /// What the panel shows; icons of `icon_size` pixels. Each folder: its path, then (dim,
-    /// at the right) its name.
+    /// What the panel shows; icons of `icon_size` pixels. Each folder on two lines: its
+    /// name, then (dim) its path.
     pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32) -> View<'a> {
         icons.get(FOLDER_ICON, icon_size);
         let icons: &Icons = icons;
@@ -134,11 +134,12 @@ impl Jump {
             .iter()
             .enumerate()
             .skip(first)
-            .take(ROWS)
+            .take(SHOWN)
             .map(|(i, f)| Row {
                 icon,
-                text: &self.names[*f],
-                detail: self.folders[*f].file_name().map(|n| n.to_string_lossy().into_owned()),
+                text: self.folders[*f].file_name().and_then(|n| n.to_str()).unwrap_or(&self.names[*f]),
+                detail: None,
+                sub: Some(self.names[*f].clone()),
                 selected: i == self.selected,
             })
             .collect();
@@ -160,9 +161,12 @@ fn tilde(path: &Path, home: &Path) -> String {
     }
 }
 
-/// First of the `ROWS` matches shown, so the selected one is among them.
+/// Folders shown at once, two lines each.
+const SHOWN: usize = ROWS / 2;
+
+/// First of the `SHOWN` matches, so the selected one is among them.
 fn first_shown(selected: usize) -> usize {
-    selected.saturating_sub(ROWS - 1)
+    selected.saturating_sub(SHOWN - 1)
 }
 
 #[cfg(test)]
@@ -214,8 +218,22 @@ mod tests {
         assert_eq!(j.feed(&none(), Keysym::Return, None), Step::Go("/srv/app".into()));
         let logo = Modifiers { logo: true, ..Default::default() };
         assert_eq!(j.feed(&logo, Keysym::Return, None), Step::Manage("/srv/app".into()));
-        assert_eq!(j.click(3), Step::Go("/home/me".into()));
-        assert_eq!(j.click(4), Step::Continue);
+        // Two lines a folder: either one is it.
+        assert_eq!(j.click(6), Step::Go("/home/me".into()));
+        assert_eq!(j.click(7), Step::Go("/home/me".into()));
+        assert_eq!(j.click(8), Step::Continue);
+    }
+
+    #[test]
+    fn each_folder_shows_its_name_and_under_it_its_path() {
+        let j = jump();
+        let mut icons = Icons::new("");
+        let view = j.view(&mut icons, 16);
+        let shown: Vec<(&str, Option<&str>)> = view.rows.iter().map(|r| (r.text, r.sub.as_deref())).collect();
+        assert_eq!(
+            shown,
+            [("dune", Some("~/work/dune")), ("app", Some("/srv/app")), ("duenote", Some("~/work/duenote")), ("me", Some("~"))]
+        );
     }
 
     #[test]

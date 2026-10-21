@@ -15,6 +15,7 @@ mod privacy;
 mod reload;
 mod render;
 mod screencopy;
+mod screenshot;
 mod shell;
 mod state;
 mod tab_title;
@@ -22,6 +23,7 @@ mod tiling;
 mod udev;
 mod windows;
 mod winit;
+mod wlr_screencopy;
 mod workspaces;
 
 use std::path::{Path, PathBuf};
@@ -158,9 +160,6 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
     for command in &state.config.exec {
         autostart(command);
     }
-
-    // The basic unit: start with one terminal.
-    let _ = state.spawn_terminal(None, None, None, None);
 
     event_loop.run(None, &mut state, |_| {})?;
 

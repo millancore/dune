@@ -51,12 +51,21 @@ pub fn row_at(font: Option<&Font>, y: f64, rows: usize) -> Option<usize> {
     (row >= 0.0 && row < rows as f64).then_some(row as usize)
 }
 
-/// A row of the list: its icon, its text and, dim at the right, a detail.
+/// A row of the list: its icon, its text and, dim at the right, a detail; with `sub`, a
+/// second line under the text, dim too.
 pub struct Row<'a> {
     pub icon: Option<&'a Icon>,
     pub text: &'a str,
     pub detail: Option<String>,
+    pub sub: Option<String>,
     pub selected: bool,
+}
+
+impl Row<'_> {
+    /// The lines of the list it takes.
+    pub fn lines(&self) -> usize {
+        if self.sub.is_some() { 2 } else { 1 }
+    }
 }
 
 /// What the panel shows.
@@ -68,7 +77,7 @@ pub struct View<'a> {
     pub hint: &'a str,
 }
 
-/// The panel's ARGB8888 pixels (B, G, R, A in memory), `w` × `h`, with `rows` of the list.
+/// The panel's ARGB8888 pixels (B, G, R, A in memory), `w` × `h`, with `rows` lines of the list.
 pub fn draw(font: Option<&mut Font>, view: &View, (w, h): (i32, i32), rows: usize) -> Vec<u8> {
     let mut canvas = Canvas {
         pixels: [BACKGROUND[2], BACKGROUND[1], BACKGROUND[0], 0xff].repeat((w * h) as usize),
@@ -91,10 +100,18 @@ pub fn draw(font: Option<&mut Font>, view: &View, (w, h): (i32, i32), rows: usiz
     let text_cols = cols
         .saturating_sub(((line + ICON_MARGIN) / cell) as usize)
         .max(1);
-    for (i, row) in view.rows.iter().take(rows).enumerate() {
-        let y = row_y(1 + i as i32);
+    let mut at = 0;
+    for row in &view.rows {
+        if at + row.lines() > rows {
+            break;
+        }
+        let y = row_y(1 + at as i32);
+        at += row.lines();
         if row.selected {
-            canvas.fill(FRAME, y, w - 2 * FRAME, line, SELECTED);
+            canvas.fill(FRAME, y, w - 2 * FRAME, line * row.lines() as i32, SELECTED);
+        }
+        if let Some(sub) = &row.sub {
+            canvas.text(font, text_x, y + line, line, sub, DIM, text_cols);
         }
         if let Some(icon) = row.icon {
             canvas.image(PADDING + ICON_MARGIN, y + ICON_MARGIN, icon);

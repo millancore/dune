@@ -70,6 +70,11 @@ enum Action {
     SendToDesk(u8),
     /// Mod+Escape: run `lock_command` (swaylock).
     Lock,
+    /// Print / Shift+Print: a screenshot of a region chosen with the mouse / of the
+    /// active monitor (`true`).
+    Screenshot(bool),
+    /// Mod+Shift+r: record a region chosen with the mouse (again: stop).
+    Record,
     /// Ctrl+Alt+F1..F12 on a real session.
     SwitchVt(i32),
 }
@@ -104,6 +109,9 @@ impl From<Binding> for Action {
             Binding::StackToTabs => Action::StackToTabs,
             Binding::Quit => Action::Quit,
             Binding::Lock => Action::Lock,
+            Binding::Screenshot => Action::Screenshot(false),
+            Binding::ScreenshotScreen => Action::Screenshot(true),
+            Binding::Record => Action::Record,
         }
     }
 }
@@ -308,6 +316,20 @@ mod tests {
     }
 
     #[test]
+    fn print_takes_screenshots() {
+        let config = test_config("alt");
+        let none = ModifiersState::default();
+        let shift = ModifiersState { shift: true, ..Default::default() };
+        let alt_shift = ModifiersState { alt: true, shift: true, ..Default::default() };
+        assert!(matches!(action_for(&config, &none, Keysym::Print), Some(Action::Screenshot(false))));
+        assert!(matches!(action_for(&config, &shift, Keysym::Print), Some(Action::Screenshot(true))));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::r), Some(Action::Record)));
+        // Ctrl+Print is not one: it goes to the client.
+        let ctrl = ModifiersState { ctrl: true, ..Default::default() };
+        assert!(action_for(&config, &ctrl, Keysym::Print).is_none());
+    }
+
+    #[test]
     fn digits_pick_desktops() {
         let config = test_config("super");
         let logo = ModifiersState { logo: true, ..Default::default() };
@@ -493,6 +515,8 @@ impl Dune {
             Action::Desk(n) => self.show_desk(n),
             Action::SendToDesk(n) => self.send_to_desk(n),
             Action::Lock => crate::autostart(&self.config.lock_command),
+            Action::Screenshot(whole) => self.screenshot(whole),
+            Action::Record => self.toggle_recording(),
             Action::SwitchVt(vt) => self.change_vt(vt),
         }
     }

@@ -148,9 +148,13 @@ impl Dune {
                 &self.config.file_manager_terminal,
             ]);
         }
+        // A focused tile on another output (the pointer moved away from it) is not where
+        // dune-finder shows: what it launches goes on its own output. The tile options
+        // are the focused tile's wherever it is.
         let target = match slot {
             Some((_, back)) => back,
-            None => self.focused,
+            None if mode == FinderMode::TileOptions => self.focused,
+            None => self.focused.filter(|&t| self.output_of(t).as_ref() == Some(&output)),
         };
         if let Some(target) = target {
             cmd.args(["--target", &target.to_string()]);

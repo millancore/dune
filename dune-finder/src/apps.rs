@@ -230,6 +230,7 @@ impl Apps {
                     .and_then(|name| icons.cached(name, icon_size)),
                 text: &c.label,
                 detail: None,
+                sub: None,
                 selected: first + i == self.picker.selected() && !self.enter_is_terminal(),
             })
             .collect();

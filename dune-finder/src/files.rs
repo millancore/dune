@@ -283,6 +283,7 @@ impl Files {
                     icon: icons.cached(icon, icon_size),
                     text,
                     detail: None,
+                    sub: None,
                     selected: i == self.selected,
                 }
             })
