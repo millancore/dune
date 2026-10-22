@@ -2,20 +2,28 @@
 //! region, grim takes it (`crate::screencopy`), wl-copy puts it on the clipboard,
 //! wf-recorder records it (`crate::wlr_screencopy`) and notify-send tells where the file
 //! went. They run in a shell of their own, so dune never waits on them; Esc in slurp
-//! cancels, and nothing happens.
+//! cancels, and nothing happens. Each takes a region, the focused tile or the active
+//! monitor (`Capture`).
+//!
+//! The recording's shell tells dune when wf-recorder starts and ends (`dune recording
+//! started|ended`); bars follow it with `dune recording watch` (`watch_recording`), which
+//! dune tells `on SECONDS` (since the epoch, when it started) or `off`.
 
 use std::{
+    io::Write,
+    os::unix::net::UnixStream,
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use nix::{sys::signal, unistd::Pid};
 
-use crate::Dune;
+use crate::{Dune, layout::Rect};
 
 /// The folder a capture goes in: `$1` (from the config, `~/` for the home folder), else
 /// `$XDG_<kind>_DIR` (`xdg-user-dir`, which says `$HOME` for one not set up) with `$3`
@@ -34,10 +42,11 @@ mkdir -p "$dir" || exit 1
 file=$dir/dune-$(date +%Y-%m-%d_%H-%M-%S).$4
 "#;
 
-/// A screenshot: of the region chosen with slurp, or of the monitor `$5` when given.
+/// A screenshot: of the region chosen with slurp, or of `$5 $6` when given (`-o MONITOR`,
+/// `-g GEOMETRY`).
 const SCREENSHOT: &str = r#"
 if [ -n "$5" ]; then
-    set -- "$1" "$2" "$3" "$4" -o "$5"
+    set -- "$1" "$2" "$3" "$4" "$5" "$6"
 else
     region=$(slurp) || exit 0
     set -- "$1" "$2" "$3" "$4" -g "$region"
@@ -52,15 +61,27 @@ else
 fi
 "#;
 
-/// A recording of the region chosen with slurp, until SIGINT reaches the process group
-/// (the `record` key again): wf-recorder finishes the file, then the shell tells.
+/// A recording of the region chosen with slurp, or of `$5 $6` when given (like
+/// `SCREENSHOT`), until SIGINT reaches the process group (a `record` key again):
+/// wf-recorder finishes the file, then the shell tells. `$DUNE_BIN recording` hears when
+/// wf-recorder starts, with the geometry it records unless a whole monitor, and ends.
 const RECORD: &str = r#"
 trap 'stopped=1' INT
-region=$(slurp) || exit 0
+if [ -n "$5" ]; then
+    target=$5 value=$6
+else
+    value=$(slurp) || exit 0
+    target=-g
+fi
 [ -z "$stopped" ] || exit 0
 #FILE
+dune=${DUNE_BIN:-true}
+area=
+[ "$target" = -g ] && area=$value
+"$dune" recording started "$area" > /dev/null 2>&1
 notify-send -a dune "Recording" "$file"
-wf-recorder -g "$region" -f "$file" > /dev/null 2>&1 < /dev/null
+wf-recorder "$target" "$value" -f "$file" > /dev/null 2>&1 < /dev/null
+"$dune" recording ended > /dev/null 2>&1
 if [ -s "$file" ]; then
     notify-send -a dune "Recording saved" "$file"
 else
@@ -68,7 +89,32 @@ else
 fi
 "#;
 
-/// The recording while its shell runs (`record` key).
+/// What a screenshot or recording takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capture {
+    /// A region chosen with the mouse (slurp).
+    Region,
+    /// The focused tile.
+    Tile,
+    /// The active monitor.
+    Screen,
+}
+
+/// The line `dune recording watch` gets: `on SECONDS` with when the recording started
+/// (since the epoch), or `off`.
+pub fn state_line(since: Option<SystemTime>) -> String {
+    match since {
+        Some(t) => format!("on {}", t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())),
+        None => "off".into(),
+    }
+}
+
+/// grim's and wf-recorder's `-g` for `rect`: `X,Y WxH`.
+fn geometry(rect: Rect) -> String {
+    format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h)
+}
+
+/// The recording while its shell runs (`record` keys).
 pub struct Recording {
     /// The shell, which leads its process group (slurp, wf-recorder).
     pid: u32,
@@ -86,6 +132,9 @@ fn capture_command(script: &str, args: &[&str]) -> Command {
     cmd.stdin(Stdio::null()).process_group(0);
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|d| d.is_dir()) {
         cmd.current_dir(home);
+    }
+    if let Ok(exe) = crate::own_binary() {
+        cmd.env("DUNE_BIN", exe);
     }
     cmd
 }
@@ -109,32 +158,76 @@ fn start(mut cmd: Command, what: &str, done: Arc<AtomicBool>) -> Option<u32> {
 }
 
 impl Dune {
-    /// `screenshot`: a region chosen with the mouse; `screenshot_screen` (`whole`): the
-    /// active monitor. Saved in `screenshot_dir` and put on the clipboard.
-    pub fn screenshot(&mut self, whole: bool) {
-        let output = match whole {
-            true => match self.active_output() {
-                Some(output) => output.name(),
-                None => return tracing::warn!("no monitor to take a screenshot of"),
-            },
-            false => String::new(),
+    /// The `-o MONITOR` / `-g GEOMETRY` arguments for `what` (none for a region, chosen in
+    /// the shell); None when there is nothing to take (no monitor, no tile focused).
+    fn capture_target(&self, what: Capture) -> Option<[String; 2]> {
+        match what {
+            Capture::Region => Some([String::new(), String::new()]),
+            Capture::Screen => self.active_output().map(|o| ["-o".into(), o.name()]),
+            Capture::Tile => {
+                let id = self.focused?;
+                let rect = self.float_rect(id).or_else(|| {
+                    let (_, target) = self.geometries.iter().find(|(t, _)| *t == id)?;
+                    self.shown.iter().any(|(t, _)| *t == id).then(|| self.drawn_rect(id, *target))
+                })?;
+                Some(["-g".into(), geometry(rect)])
+            }
+        }
+    }
+
+    /// The `screenshot` keys: of `what`. Saved in `screenshot_dir` and put on the clipboard.
+    pub fn screenshot(&mut self, what: Capture) {
+        let Some([flag, value]) = self.capture_target(what) else {
+            return tracing::warn!(?what, "nothing to take a screenshot of");
         };
         let dir = self.config.screenshot_dir.clone();
-        let cmd = capture_command(SCREENSHOT, &[&dir, "Pictures", "/Screenshots", "png", &output]);
+        let cmd = capture_command(SCREENSHOT, &[&dir, "Pictures", "/Screenshots", "png", &flag, &value]);
         start(cmd, "screenshot", Arc::default());
     }
 
-    /// `record`: record a region chosen with the mouse into `recording_dir`; pressed
-    /// again (while choosing too), stop. One recording at a time.
-    pub fn toggle_recording(&mut self) {
-        if let Some(recording) = self.recording.take_if(|r| !r.done.load(Ordering::Relaxed)) {
-            let _ = signal::killpg(Pid::from_raw(recording.pid as i32), signal::Signal::SIGINT);
+    /// The `record` keys: record `what` into `recording_dir`; any of them again (while
+    /// choosing too), stop. One recording at a time.
+    pub fn toggle_recording(&mut self, what: Capture) {
+        if self.stop_recording() {
             return;
         }
+        let Some([flag, value]) = self.capture_target(what) else {
+            return tracing::warn!(?what, "nothing to record");
+        };
         let dir = self.config.recording_dir.clone();
         let done = Arc::new(AtomicBool::new(false));
-        let cmd = capture_command(RECORD, &[&dir, "Videos", "", "mp4"]);
+        let cmd = capture_command(RECORD, &[&dir, "Videos", "", "mp4", &flag, &value]);
         self.recording = start(cmd, "recording", done.clone()).map(|pid| Recording { pid, done });
+    }
+
+    /// Stop the recording running (`dune recording stop`, a click in the bar); whether
+    /// there was one.
+    pub fn stop_recording(&mut self) -> bool {
+        match self.recording.take_if(|r| !r.done.load(Ordering::Relaxed)) {
+            Some(recording) => {
+                let _ = signal::killpg(Pid::from_raw(recording.pid as i32), signal::Signal::SIGINT);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The recording's shell: wf-recorder started (`started`), recording `area` (framed on
+    /// screen, see `crate::render`), or ended. The watchers hear.
+    pub fn recording_state(&mut self, started: bool, area: Option<Rect>) {
+        self.recording_since = started.then(SystemTime::now);
+        self.recording_area = area.filter(|_| started);
+        self.arrange();
+        let line = state_line(self.recording_since);
+        self.recording_watchers.retain_mut(|w| writeln!(w, "{line}").is_ok());
+    }
+
+    /// A `watch_recording` connection: told the state now, and on every change.
+    pub fn watch_recording(&mut self, mut stream: UnixStream) {
+        let line = state_line(self.recording_since);
+        if writeln!(stream, "{line}").is_ok() && stream.set_nonblocking(true).is_ok() {
+            self.recording_watchers.push(stream);
+        }
     }
 }
 
@@ -161,6 +254,7 @@ mod tests {
     fn run(dir: &Path, script: &str, args: &[&str]) -> Command {
         let mut cmd = capture_command(script, args);
         let path = format!("{}/bin:/usr/bin:/bin", dir.display());
+        cmd.env("DUNE_BIN", dir.join("bin/dune"));
         cmd.env("PATH", path).env("HOME", dir).env_remove("XDG_PICTURES_DIR").env_remove("XDG_VIDEOS_DIR");
         cmd.current_dir(dir);
         cmd
@@ -189,7 +283,7 @@ mod tests {
         tool(&dir, "notify-send", "");
         // xdg-user-dir says $HOME for a folder that is not set up: ~/Pictures then.
         tool(&dir, "xdg-user-dir", "echo \"$HOME\"");
-        let status = run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", ""]).status().unwrap();
+        let status = run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", "", ""]).status().unwrap();
         assert!(status.success());
         let file = saved(&dir.join("Pictures/Screenshots"), "png");
         let log = log(&dir);
@@ -206,7 +300,7 @@ mod tests {
         tool(&dir, "grim", "for f; do :; done; echo png > \"$f\"");
         tool(&dir, "wl-copy", "cat > /dev/null");
         tool(&dir, "notify-send", "");
-        let status = run(&dir, SCREENSHOT, &["~/shots", "Pictures", "/Screenshots", "png", "HDMI-A-1"]).status().unwrap();
+        let status = run(&dir, SCREENSHOT, &["~/shots", "Pictures", "/Screenshots", "png", "-o", "HDMI-A-1"]).status().unwrap();
         assert!(status.success());
         let file = saved(&dir.join("shots"), "png");
         let log = log(&dir);
@@ -222,7 +316,7 @@ mod tests {
         tool(&dir, "grim", "");
         tool(&dir, "notify-send", "");
         for (script, kind) in [(SCREENSHOT, "Pictures"), (RECORD, "Videos")] {
-            let status = run(&dir, script, &["", kind, "", "x", ""]).status().unwrap();
+            let status = run(&dir, script, &["", kind, "", "x", "", ""]).status().unwrap();
             assert!(status.success());
         }
         assert_eq!(log(&dir), "slurp \nslurp \n");
@@ -238,10 +332,10 @@ mod tests {
         tool(&dir, "wl-copy", "cat > /dev/null");
         tool(&dir, "notify-send", "");
         tool(&dir, "xdg-user-dir", "echo \"$HOME/Bilder\"");
-        assert!(run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", ""]).status().unwrap().success());
+        assert!(run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", "", ""]).status().unwrap().success());
         saved(&dir.join("Bilder/Screenshots"), "png");
         // The variable wins over xdg-user-dir.
-        let mut cmd = run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", ""]);
+        let mut cmd = run(&dir, SCREENSHOT, &["", "Pictures", "/Screenshots", "png", "", ""]);
         cmd.env("XDG_PICTURES_DIR", dir.join("Fotos"));
         assert!(cmd.status().unwrap().success());
         saved(&dir.join("Fotos/Screenshots"), "png");
@@ -253,6 +347,7 @@ mod tests {
         let dir = sandbox("record");
         tool(&dir, "slurp", "echo '0,0 400x300'");
         tool(&dir, "notify-send", "");
+        tool(&dir, "dune", "");
         tool(&dir, "xdg-user-dir", "echo \"$HOME\"");
         // Like wf-recorder: records until SIGINT, then finishes the file.
         tool(
@@ -261,7 +356,7 @@ mod tests {
             &format!("trap 'echo video > \"$4\"; echo stopped >> \"{}/log\"; exit 0' INT\nwhile :; do sleep 0.05; done", dir.display()),
         );
         let done = Arc::new(AtomicBool::new(false));
-        let pid = start(run(&dir, RECORD, &["", "Videos", "", "mp4"]), "recording", done.clone()).unwrap();
+        let pid = start(run(&dir, RECORD, &["", "Videos", "", "mp4", "", ""]), "recording", done.clone()).unwrap();
         let wait_for = |what: &dyn Fn() -> bool| {
             for _ in 0..100 {
                 if what() {
@@ -278,8 +373,41 @@ mod tests {
         let file = saved(&dir.join("Videos"), "mp4");
         let log = log(&dir);
         assert!(log.contains(&format!("wf-recorder -g 0,0 400x300 -f {}", file.display())), "{log}");
+        // dune hears when wf-recorder starts and ends.
+        let wf = log.find("wf-recorder").unwrap();
+        assert!(log.find("dune recording started 0,0 400x300").is_some_and(|i| i < wf), "{log}");
+        assert!(log.find("dune recording ended").is_some_and(|i| i > wf), "{log}");
         assert!(log.contains(&format!("notify-send -a dune Recording {}", file.display())), "{log}");
-        assert!(log.contains(&format!("stopped\nnotify-send -a dune Recording saved {}", file.display())), "{log}");
+        assert!(log.contains(&format!("stopped\ndune recording ended\nnotify-send -a dune Recording saved {}", file.display())), "{log}");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn recording_of_a_monitor_or_a_tile() {
+        let dir = sandbox("record-target");
+        tool(&dir, "slurp", "exit 1");
+        tool(&dir, "notify-send", "");
+        tool(&dir, "dune", "");
+        tool(&dir, "wf-recorder", "echo video > \"$4\"");
+        assert!(run(&dir, RECORD, &["~/v", "Videos", "", "mp4", "-o", "DP-1"]).status().unwrap().success());
+        let file = saved(&dir.join("v"), "mp4");
+        assert!(log(&dir).contains(&format!("wf-recorder -o DP-1 -f {}", file.display())), "{}", log(&dir));
+        // A whole monitor: dune is told no area to frame.
+        assert!(log(&dir).contains("dune recording started \n"), "{}", log(&dir));
+        let _ = fs::remove_file(&file);
+        let rect = geometry(Rect::new(10, 20, 300, 400));
+        assert!(run(&dir, RECORD, &["~/v", "Videos", "", "mp4", "-g", &rect]).status().unwrap().success());
+        let file = saved(&dir.join("v"), "mp4");
+        assert!(log(&dir).contains(&format!("wf-recorder -g 10,20 300x400 -f {}", file.display())), "{}", log(&dir));
+        assert!(log(&dir).contains("dune recording started 10,20 300x400\n"), "{}", log(&dir));
+        assert!(!log(&dir).contains("slurp"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_watch_line() {
+        assert_eq!(state_line(None), "off");
+        assert_eq!(state_line(Some(UNIX_EPOCH + Duration::from_secs(1700000000))), "on 1700000000");
+    }
+
 }

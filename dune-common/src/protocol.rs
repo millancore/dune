@@ -20,7 +20,15 @@
 //! - `tile_options\t<tile or empty>` — answered with the rows of the tile options menu for
 //!   that tile, one per line (`TileOption::encode_all`);
 //! - `tile_action\t<tile or empty>\t<action>` — do `action` (`TileAction::code`) on that
-//!   tile; nothing without one. Answered `ok`.
+//!   tile; nothing without one. Answered `ok`;
+//! - `quit\t` — end the session (dune-finder's Log out); answered `ok`;
+//! - `scratchpad_show\t` — what the `scratchpad` key does (`dune scratchpad show`); answered `ok`;
+//! - `watch_scratchpad\t` — the connection stays open: dune writes a waybar JSON line with the
+//!   scratchpad's windows now and on every change (`dune scratchpad watch`);
+//! - `recording\tstarted|ended` — the recording's shell: wf-recorder started / ended;
+//! - `recording_stop\t` — stop the recording running (`dune recording stop`); answered `ok`;
+//! - `watch_recording\t` — the connection stays open: dune writes `on SECONDS` (when the
+//!   recording started, since the epoch) or `off` now and on every change.
 
 use std::{
     io::{Read, Write},
@@ -35,20 +43,10 @@ pub type TileId = u32;
 /// How a tile is divided when a new tile is opened next to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Split {
-    /// Vertical divider: tiles side by side (`prog:v`, like vim's `:vsplit`).
+    /// Vertical divider: tiles side by side.
     Vertical,
-    /// Horizontal divider: tiles stacked top/bottom (`prog:h`).
+    /// Horizontal divider: tiles stacked top/bottom.
     Horizontal,
-}
-
-impl Split {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "v" => Some(Split::Vertical),
-            "h" => Some(Split::Horizontal),
-            _ => None,
-        }
-    }
 }
 
 /// A side of a tile: where a new tile goes, or where focus moves.
@@ -96,7 +94,7 @@ impl Side {
 }
 
 impl From<Split> for Side {
-    /// `:v` opens to the right, `:h` below.
+    /// Side by side opens to the right, stacked below.
     fn from(split: Split) -> Side {
         match split {
             Split::Vertical => Side::Right,
@@ -308,6 +306,8 @@ pub enum TileAction {
     /// Out of its split into a tab of its own (`stack_to_tabs`).
     ToTab,
     SendToDesk(u8),
+    /// Off every desktop, into the scratchpad.
+    Scratchpad,
     Close,
 }
 
@@ -317,7 +317,7 @@ impl TileAction {
         use TileAction::*;
         let mut all = vec![PrivateTile, Float, Center, FullWidth, ToTab];
         all.extend((1..=9).map(SendToDesk));
-        all.push(Close);
+        all.extend([Scratchpad, Close]);
         all
     }
 
@@ -330,6 +330,7 @@ impl TileAction {
             TileAction::FullWidth => "full_width".into(),
             TileAction::ToTab => "stack_to_tabs".into(),
             TileAction::SendToDesk(n) => format!("send_to_desk_{n}"),
+            TileAction::Scratchpad => "send_to_scratchpad".into(),
             TileAction::Close => "close".into(),
         }
     }
@@ -347,6 +348,7 @@ impl TileAction {
             TileAction::FullWidth => "Full width".into(),
             TileAction::ToTab => "To tab".into(),
             TileAction::SendToDesk(n) => format!("Send to desktop {n}"),
+            TileAction::Scratchpad => "Send to scratchpad".into(),
             TileAction::Close => "Close".into(),
         }
     }
@@ -441,6 +443,19 @@ pub enum Request {
         tile: Option<TileId>,
         action: TileAction,
     },
+    /// End the session.
+    Quit,
+    /// Hide the shown scratchpad window focused, or show the next one.
+    ScratchpadShow,
+    /// Keep the connection, writing the scratchpad's state on every change.
+    WatchScratchpad,
+    /// The recording's shell: wf-recorder started (`true`) or ended; `area`: the rectangle
+    /// it records (`x, y, w, h`), when not a whole monitor.
+    Recording { started: bool, area: Option<(i32, i32, i32, i32)> },
+    /// Stop the recording running.
+    RecordingStop,
+    /// Keep the connection, writing whether a recording runs on every change.
+    WatchRecording,
 }
 
 impl Request {
@@ -487,6 +502,15 @@ impl Request {
             Request::TileAction { tile, action } => {
                 format!("tile_action\t{}\t{}", tile.map(|t| t.to_string()).unwrap_or_default(), action.code())
             }
+            Request::Quit => "quit\t".into(),
+            Request::ScratchpadShow => "scratchpad_show\t".into(),
+            Request::WatchScratchpad => "watch_scratchpad\t".into(),
+            Request::Recording { started, area } => {
+                let area = area.map(|(x, y, w, h)| format!("\t{x},{y} {w}x{h}")).unwrap_or_default();
+                format!("recording\t{}{area}", if *started { "started" } else { "ended" })
+            }
+            Request::RecordingStop => "recording_stop\t".into(),
+            Request::WatchRecording => "watch_recording\t".into(),
         }
     }
 
@@ -545,6 +569,20 @@ impl Request {
                 let (tile, action) = rest.split_once('\t')?;
                 Some(Request::TileAction { tile: tile.parse().ok(), action: TileAction::parse(action)? })
             }
+            "quit" => Some(Request::Quit),
+            "scratchpad_show" => Some(Request::ScratchpadShow),
+            "watch_scratchpad" => Some(Request::WatchScratchpad),
+            "recording" => {
+                let (state, area) = rest.split_once('\t').unwrap_or((rest, ""));
+                let started = match state {
+                    "started" => true,
+                    "ended" => false,
+                    _ => return None,
+                };
+                Some(Request::Recording { started, area: parse_geometry(area) })
+            }
+            "recording_stop" => Some(Request::RecordingStop),
+            "watch_recording" => Some(Request::WatchRecording),
             _ => None,
         }
     }
@@ -568,6 +606,13 @@ pub fn send(req: &Request) -> Result<(), String> {
     connect_and_send(req).map(|_| ())
 }
 
+/// Send a request whose answer does not end (`watch_scratchpad`): the stream to read it from.
+pub fn watch(req: &Request) -> Result<UnixStream, String> {
+    let stream = connect_and_send(req)?;
+    stream.shutdown(Shutdown::Write).map_err(|e| e.to_string())?;
+    Ok(stream)
+}
+
 /// Send a request and wait up to `timeout` for dune's answer.
 pub fn ask(req: &Request, timeout: Duration) -> Result<String, String> {
     let mut stream = connect_and_send(req)?;
@@ -582,6 +627,14 @@ pub fn ask(req: &Request, timeout: Duration) -> Result<String, String> {
         .read_to_string(&mut answer)
         .map_err(|e| e.to_string())?;
     Ok(answer)
+}
+
+/// A geometry as slurp, grim and wf-recorder write it: `X,Y WxH`, as `(x, y, w, h)`.
+pub fn parse_geometry(text: &str) -> Option<(i32, i32, i32, i32)> {
+    let (at, size) = text.trim().split_once(' ')?;
+    let (x, y) = at.split_once(',')?;
+    let (w, h) = size.split_once('x')?;
+    Some((x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -642,10 +695,27 @@ mod tests {
             Request::TileAction { tile: Some(4), action: TileAction::PrivateTile },
             Request::TileAction { tile: None, action: TileAction::Close },
             Request::TileAction { tile: Some(2), action: TileAction::SendToDesk(9) },
+            Request::TileAction { tile: Some(2), action: TileAction::Scratchpad },
+            Request::Quit,
+            Request::ScratchpadShow,
+            Request::WatchScratchpad,
+            Request::Recording { started: true, area: None },
+            Request::Recording { started: true, area: Some((-10, 20, 300, 40)) },
+            Request::Recording { started: false, area: None },
+            Request::RecordingStop,
+            Request::WatchRecording,
         ];
         for req in reqs {
             assert_eq!(Request::decode(&req.encode()), Some(req));
         }
+    }
+
+    #[test]
+    fn geometries_as_slurp_writes_them() {
+        assert_eq!(parse_geometry("10,-20 300x40"), Some((10, -20, 300, 40)));
+        assert_eq!(parse_geometry(" 0,0 1x1\n"), Some((0, 0, 1, 1)));
+        assert_eq!(parse_geometry(""), None);
+        assert_eq!(parse_geometry("10,20"), None);
     }
 
     #[test]
@@ -741,12 +811,13 @@ mod tests {
     #[test]
     fn tile_actions_have_their_config_names() {
         let all = TileAction::all();
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 16);
         for action in all {
             assert_eq!(TileAction::parse(&action.code()), Some(action));
         }
         assert_eq!(TileAction::ToTab.code(), "stack_to_tabs");
         assert_eq!(TileAction::SendToDesk(3).label(), "Send to desktop 3");
+        assert_eq!(TileAction::Scratchpad.code(), "send_to_scratchpad");
         assert_eq!(TileAction::parse("bogus"), None);
     }
 

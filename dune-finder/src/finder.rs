@@ -1,7 +1,8 @@
 //! The finder: one panel that is the apps (the launcher), the windows (the switcher), the
 //! files or the folders to jump to, and turns from one into the other: `/` typed first in
 //! the apps shows the windows, `#` the files, `>` the jumps, Backspace with nothing typed
-//! there goes back. Started on the tile options (Mod+/), it stays on them. Keys, clicks and
+//! there goes back; Mod+Tab goes through them all and the system one (power off, reboot,
+//! log out), Mod+Shift+Tab back. Started on the tile options (Mod+/), it stays on them. Keys, clicks and
 //! the wheel come in; what to do with dune comes out (`Action`).
 
 use std::path::{Path, PathBuf};
@@ -17,7 +18,9 @@ use crate::{
     files::{self, Files, quote},
     icons::Icons,
     jump::{self, Jump},
-    panel::View,
+    panel::{Row, View},
+    system::{self, Power, System},
+    tabs::Tab,
     tile_options::{self, TileOptions},
     windows::{self, Entry, Windows},
 };
@@ -30,7 +33,12 @@ pub enum Mode {
     Jump,
     /// The focused tile's options.
     TileOptions,
+    /// Power off, reboot, log out.
+    System,
 }
+
+/// The modes Mod+Tab goes through, in order (not the tile options: they stay).
+const CYCLE: [Mode; 5] = [Mode::Apps, Mode::Windows, Mode::Files, Mode::Jump, Mode::System];
 
 /// What the finder wants done.
 #[derive(Debug, PartialEq, Eq)]
@@ -48,10 +56,15 @@ pub enum Action {
     },
     /// Show that window and focus it, then close.
     GoTo(TileId),
+    /// Bring the browser's tab `id` (titled `title`) to the front, then go to its window:
+    /// the one titled after it, else `tile`; then close.
+    Tab { tile: TileId, id: String, title: String },
     /// Unlock the desktop of that window and go to it (`:l`), then close.
     Unlock(TileId),
     /// Do that to the tile the finder was opened for, then close.
     TileAction(TileAction),
+    /// Power off, reboot or log out, then close.
+    Power(Power),
 }
 
 pub struct Finder {
@@ -63,12 +76,19 @@ pub struct Finder {
     desktop_apps: Vec<App>,
     /// Asks dune for its windows: those of locked desktops with `true` (`:l`), else the rest.
     load_windows: Box<dyn FnMut(bool) -> Vec<WindowInfo>>,
+    /// Asks the browser for its tabs (`tabs::list`), listed with the windows.
+    load_tabs: Box<dyn FnMut() -> Vec<Tab>>,
     /// The files, from `home` when first shown.
     files: Option<Files>,
     /// The folders to jump to, asked for when first shown.
     jump: Option<Jump>,
+    /// The files were gone into from the jump mode (`/`): Backspace at their first folder
+    /// goes back there, not to the apps.
+    files_from_jump: bool,
     /// The tile options, given by `show_tile_options`.
     tile_options: Option<TileOptions>,
+    /// The system actions, afresh each time they are shown.
+    system: System,
     /// The recorded folders, the highest frecency first.
     load_jumps: Box<dyn FnMut() -> Vec<PathBuf>>,
     home: PathBuf,
@@ -76,7 +96,12 @@ pub struct Finder {
     file_manager: String,
     /// The terminal `file_manager` runs in (`foot`); `None`: dune's.
     pub file_manager_terminal: Option<String>,
+    /// `?` typed first: the mode's keys listed instead of its rows, until the next key.
+    help: bool,
 }
+
+/// The footer under every mode; its keys are listed by `?`.
+const HELP_HINT: &str = "?: keys · Mod+Tab: mode · Esc: close";
 
 impl Finder {
     pub fn new(
@@ -84,6 +109,7 @@ impl Finder {
         apps: Apps,
         desktop_apps: Vec<App>,
         load_windows: Box<dyn FnMut(bool) -> Vec<WindowInfo>>,
+        load_tabs: Box<dyn FnMut() -> Vec<Tab>>,
         load_jumps: Box<dyn FnMut() -> Vec<PathBuf>>,
         home: PathBuf,
         file_manager: String,
@@ -94,19 +120,24 @@ impl Finder {
             windows: None,
             desktop_apps,
             load_windows,
+            load_tabs,
             files: None,
             jump: None,
+            files_from_jump: false,
             tile_options: None,
+            system: System::new(),
             load_jumps,
             home,
             file_manager,
             file_manager_terminal: None,
+            help: false,
         };
         match mode {
             Mode::Windows => finder.show_windows(),
             Mode::Files => finder.show_files(),
             Mode::Jump => finder.show_jump(),
             Mode::TileOptions => finder.show_tile_options(Vec::new()),
+            Mode::System => finder.show_system(),
             Mode::Apps => {}
         }
         finder
@@ -119,15 +150,49 @@ impl Finder {
 
     /// Still on the apps with nothing typed or browsed: a compact panel stays compact.
     pub fn untouched(&self) -> bool {
-        self.mode == Mode::Apps && self.apps.untouched()
+        self.mode == Mode::Apps && self.apps.untouched() && !self.help
     }
 
-    /// The windows, listed afresh each time they are shown.
+    /// Nothing typed in the mode shown.
+    fn nothing_typed(&self) -> bool {
+        match self.mode {
+            Mode::Apps => self.apps.nothing_typed(),
+            Mode::Windows => self.windows.as_ref().is_none_or(Windows::nothing_typed),
+            Mode::Files => self.files.as_ref().is_none_or(Files::nothing_typed),
+            Mode::Jump => self.jump.as_ref().is_none_or(Jump::nothing_typed),
+            Mode::TileOptions => self.tile_options.as_ref().is_none_or(TileOptions::nothing_typed),
+            Mode::System => self.system.nothing_typed(),
+        }
+    }
+
+    /// The system actions, nothing typed.
+    fn show_system(&mut self) {
+        self.system = System::new();
+        self.mode = Mode::System;
+    }
+
+    /// Mod+Tab: the next mode (`back`: the one before), shown afresh; the apps keep what
+    /// was typed there. The tile options stay.
+    fn cycle_mode(&mut self, back: bool) {
+        let Some(i) = CYCLE.iter().position(|m| *m == self.mode) else { return };
+        let n = CYCLE.len();
+        match CYCLE[if back { (i + n - 1) % n } else { (i + 1) % n }] {
+            Mode::Windows => self.show_windows(),
+            Mode::Files => self.show_files(),
+            Mode::Jump => self.show_jump(),
+            Mode::System => self.show_system(),
+            mode => self.mode = mode,
+        }
+    }
+
+    /// The windows, listed afresh each time they are shown; a browser's windows by their
+    /// tabs.
     fn show_windows(&mut self) {
         let entries = (self.load_windows)(false)
             .into_iter()
             .map(|w| Entry::new(w, &self.desktop_apps))
             .collect();
+        let entries = windows::with_tabs(entries, (self.load_tabs)());
         self.windows = Some(Windows::new(entries));
         self.mode = Mode::Windows;
     }
@@ -135,6 +200,7 @@ impl Finder {
     /// The files, from the home folder each time they are shown.
     fn show_files(&mut self) {
         self.files = Some(Files::new(self.home.clone(), &self.file_manager));
+        self.files_from_jump = false;
         self.mode = Mode::Files;
     }
 
@@ -153,6 +219,21 @@ impl Finder {
 
     /// A key pressed: `sym` with `mods`, typing `text`.
     pub fn feed(&mut self, mods: &Modifiers, sym: Keysym, text: Option<char>) -> Action {
+        if (mods.logo || mods.alt) && !mods.ctrl && matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) {
+            self.help = false;
+            self.cycle_mode(mods.shift || sym == Keysym::ISO_Left_Tab);
+            return Action::Continue;
+        }
+        if self.help {
+            self.help = false;
+            // Esc, Backspace or `?` only put the keys away; any other key does its work too.
+            if matches!(sym, Keysym::Escape | Keysym::BackSpace) || text == Some('?') {
+                return Action::Continue;
+            }
+        } else if text == Some('?') && !(mods.ctrl || mods.alt || mods.logo) && self.nothing_typed() {
+            self.help = true;
+            return Action::Continue;
+        }
         match self.mode {
             Mode::Apps => {
                 let step = self.apps.feed(mods, sym, text);
@@ -186,6 +267,7 @@ impl Finder {
                     .map_or(tile_options::Step::Close, |o| o.feed(mods, sym, text));
                 tile_options_step(step)
             }
+            Mode::System => system_step(self.system.feed(mods, sym, text)),
         }
     }
 
@@ -194,6 +276,10 @@ impl Finder {
         let Some(row) = row else {
             return Action::Continue;
         };
+        // A click on the keys puts them away.
+        if std::mem::take(&mut self.help) {
+            return Action::Continue;
+        }
         match self.mode {
             Mode::Apps => {
                 let step = self.apps.click(row);
@@ -224,6 +310,7 @@ impl Finder {
                     .map_or(tile_options::Step::Continue, |o| o.click(row));
                 tile_options_step(step)
             }
+            Mode::System => system_step(self.system.click(row)),
         }
     }
 
@@ -276,6 +363,12 @@ impl Finder {
                 folder: Some(folder),
             },
             jump::Step::Manage(folder) => self.manage(folder.clone(), folder),
+            jump::Step::Into(folder) => {
+                self.files = Some(Files::into(folder, &self.file_manager));
+                self.files_from_jump = true;
+                self.mode = Mode::Files;
+                Action::Continue
+            }
             jump::Step::Apps => {
                 self.mode = Mode::Apps;
                 Action::Continue
@@ -323,8 +416,15 @@ impl Finder {
                 let folder = if path.is_dir() { path.clone() } else { path.parent().map_or_else(|| path.clone(), Path::to_path_buf) };
                 self.manage(path, folder)
             }
+            files::Step::Terminal(folder) => Action::Launch {
+                dest,
+                command: String::new(),
+                terminal: true,
+                app: None,
+                folder: Some(folder),
+            },
             files::Step::Apps => {
-                self.mode = Mode::Apps;
+                self.mode = if std::mem::take(&mut self.files_from_jump) { Mode::Jump } else { Mode::Apps };
                 Action::Continue
             }
         }
@@ -342,6 +442,7 @@ impl Finder {
             }
             windows::Step::Close => Action::Close,
             windows::Step::Go(tile) => Action::GoTo(tile),
+            windows::Step::Tab { tile, id, title } => Action::Tab { tile, id, title },
             windows::Step::Unlock(tile) => Action::Unlock(tile),
             windows::Step::Apps => {
                 self.mode = Mode::Apps;
@@ -352,17 +453,55 @@ impl Finder {
 
     /// What the panel shows; icons of `icon_size` pixels.
     pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32) -> View<'a> {
+        let mut view = self.mode_view(icons, icon_size);
+        if self.help {
+            view.prompt = "?▏".into();
+            view.rows = help_rows(view.hint);
+        }
+        view.hint = HELP_HINT;
+        view
+    }
+
+    fn mode_view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32) -> View<'a> {
         if let (Mode::Jump, Some(jump)) = (self.mode, &self.jump) {
             return jump.view(icons, icon_size);
         }
         if let (Mode::TileOptions, Some(options)) = (self.mode, &self.tile_options) {
             return options.view();
         }
+        if self.mode == Mode::System {
+            return self.system.view();
+        }
         match (self.mode, &self.windows, &self.files) {
             (Mode::Windows, Some(windows), _) => windows.view(icons, icon_size),
             (Mode::Files, _, Some(files)) => files.view(icons, icon_size, self.apps.status()),
             _ => self.apps.view(icons, icon_size),
         }
+    }
+}
+
+/// The keys of a mode's `hint` (`key: what it does · ...`), one row each: what it does,
+/// the key at the right.
+fn help_rows(hint: &str) -> Vec<Row<'_>> {
+    hint.split(" · ")
+        .map(|item| {
+            let (key, what) = item.split_once(": ").unwrap_or(("", item));
+            Row {
+                icon: None,
+                text: what,
+                detail: Some(key.to_string()).filter(|k| !k.is_empty()),
+                sub: None,
+                selected: false,
+            }
+        })
+        .collect()
+}
+
+fn system_step(step: system::Step) -> Action {
+    match step {
+        system::Step::Continue => Action::Continue,
+        system::Step::Close => Action::Close,
+        system::Step::Do(power) => Action::Power(power),
     }
 }
 
@@ -414,6 +553,7 @@ mod tests {
             Apps::new(apps.clone(), HashMap::new(), false),
             apps,
             Box::new(windows),
+            Box::new(Vec::new),
             Box::new(move || vec![jump_dir.clone(), "/no/such/folder".into()]),
             home,
             "yazi".into(),
@@ -422,6 +562,31 @@ mod tests {
 
     fn key(f: &mut Finder, sym: Keysym) -> Action {
         f.feed(&Modifiers::default(), sym, sym.key_char())
+    }
+
+    #[test]
+    fn a_question_mark_lists_the_keys_until_the_next_key() {
+        let mut icons = Icons::new("");
+        let mut f = finder(Mode::Apps);
+        assert_eq!(f.view(&mut icons, 16).hint, HELP_HINT);
+        assert_eq!(key(&mut f, Keysym::question), Action::Continue);
+        assert!(!f.untouched());
+        let view = f.view(&mut icons, 16);
+        assert_eq!(view.rows[0].text, "on that desktop");
+        assert_eq!(view.rows[0].detail.as_deref(), Some(":d1-9"));
+        // Esc puts them away; the finder stays open.
+        assert_eq!(key(&mut f, Keysym::Escape), Action::Continue);
+        assert_eq!(f.view(&mut icons, 16).rows[0].text, "Firefox");
+        // Another key also does its work: `/` goes to the windows.
+        key(&mut f, Keysym::question);
+        key(&mut f, Keysym::slash);
+        assert_eq!(f.mode(), Mode::Windows);
+        assert_eq!(f.view(&mut icons, 16).rows[0].text, "Mozilla Firefox");
+        // Typed after something, `?` is part of the query.
+        let mut f = finder(Mode::Apps);
+        key(&mut f, Keysym::f);
+        key(&mut f, Keysym::question);
+        assert_eq!(f.view(&mut icons, 16).prompt, "f?▏");
     }
 
     #[test]
@@ -474,21 +639,55 @@ mod tests {
                 folder: Some(home.clone()),
             }
         );
+        let logo = Modifiers {
+            logo: true,
+            ..Default::default()
+        };
         let mut f = finder(Mode::Files);
         key(&mut f, Keysym::Down); // Music
         assert!(matches!(
-            f.feed(&ctrl, Keysym::Return, None),
+            f.feed(&logo, Keysym::Return, None),
             Action::Launch { command, terminal: true, .. } if command == manage_command("yazi", &home.join("Music"))
+        ));
+        // Ctrl+Enter: a terminal there.
+        assert!(matches!(
+            f.feed(&ctrl, Keysym::Return, None),
+            Action::Launch { command, terminal: true, folder: Some(folder), .. } if command.is_empty() && folder == home.join("Music")
         ));
         // In a terminal of its own: started as a graphical app.
         let mut f = finder(Mode::Files);
         f.file_manager_terminal = Some("foot".into());
         key(&mut f, Keysym::Down); // Music
         assert!(matches!(
-            f.feed(&ctrl, Keysym::Return, None),
+            f.feed(&logo, Keysym::Return, None),
             Action::Launch { command, terminal: false, .. } if command == format!("foot {}", manage_command("yazi", &home.join("Music")))
         ));
         let mut f = finder(Mode::Files);
+        assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
+        assert_eq!(f.mode(), Mode::Apps);
+    }
+
+    #[test]
+    fn a_slash_in_the_jumps_goes_into_the_folder_and_backspace_back() {
+        let mut f = finder(Mode::Jump);
+        let music = f.home.join("Music");
+        std::fs::create_dir_all(music.join("rock")).unwrap();
+        assert_eq!(f.feed(&Modifiers::default(), Keysym::slash, Some('/')), Action::Continue);
+        assert_eq!(f.mode(), Mode::Files);
+        // Narrowed by typing; Ctrl+Enter: a terminal in the folder found.
+        for c in "rk".chars() {
+            f.feed(&Modifiers::default(), Keysym::a, Some(c));
+        }
+        let ctrl = Modifiers { ctrl: true, ..Default::default() };
+        assert!(matches!(
+            f.feed(&ctrl, Keysym::Return, None),
+            Action::Launch { terminal: true, folder: Some(folder), .. } if folder == music.join("rock")
+        ));
+        // Backspace with nothing typed at the folder gone into: the jumps again.
+        let mut f = finder(Mode::Jump);
+        f.feed(&Modifiers::default(), Keysym::slash, Some('/'));
+        assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
+        assert_eq!(f.mode(), Mode::Jump);
         assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
         assert_eq!(f.mode(), Mode::Apps);
     }
@@ -571,6 +770,29 @@ mod tests {
             assert_eq!(f.feed(&Modifiers::default(), Keysym::l, Some(c)), Action::Continue);
         }
         assert_eq!(key(&mut f, Keysym::Return), Action::Unlock(5));
+    }
+
+    #[test]
+    fn mod_tab_goes_through_the_modes_and_the_system_one() {
+        let logo = Modifiers { logo: true, ..Default::default() };
+        let logo_shift = Modifiers { logo: true, shift: true, ..Default::default() };
+        let mut f = finder(Mode::Apps);
+        for mode in [Mode::Windows, Mode::Files, Mode::Jump, Mode::System, Mode::Apps] {
+            assert_eq!(f.feed(&logo, Keysym::Tab, None), Action::Continue);
+            assert_eq!(f.mode(), mode);
+        }
+        // Back, with Shift (which makes Tab ISO_Left_Tab).
+        f.feed(&logo_shift, Keysym::ISO_Left_Tab, None);
+        assert_eq!(f.mode(), Mode::System);
+        // Tab alone still moves the selection; Enter on the second row reboots.
+        key(&mut f, Keysym::Tab);
+        assert_eq!(key(&mut f, Keysym::Return), Action::Power(Power::Reboot));
+        let mut f = finder(Mode::System);
+        assert_eq!(f.click(Some(0)), Action::Power(Power::Shutdown));
+        // The tile options stay.
+        let mut f = finder(Mode::TileOptions);
+        f.feed(&logo, Keysym::Tab, None);
+        assert_eq!(f.mode(), Mode::TileOptions);
     }
 
     #[test]

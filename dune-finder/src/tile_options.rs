@@ -2,8 +2,8 @@
 //! (✓ when it is), float, center, full width, to a tab, send to a desktop, close — each
 //! with its key when it has one. dune gives the rows (a `tile_action` per desktop to send
 //! to, shown as one "Send to desktop #" row whose desktops come up when it is chosen: a
-//! digit sends there); without a focused tile there are none and the finder does not
-//! open. Typing narrows them, fuzzy; Enter or a click does one (a `tile_action` request).
+//! digit sends there, as does typing it after the row's name: "send 4"); without a focused
+//! tile there are none and the finder does not open. Typing narrows them, fuzzy; Enter or a click does one (a `tile_action` request).
 
 use dune_common::protocol::{TileAction, TileOption};
 use nucleo_matcher::{
@@ -58,6 +58,8 @@ pub struct TileOptions {
     desks: Vec<Entry>,
     /// The options, while `entries` are the desktops.
     menu: Option<Vec<Entry>>,
+    /// What "Send to desktop #" does while the query names a desktop: "send 4".
+    send_to: Option<Entry>,
     query: String,
     /// Entries matching `query`, best first.
     matches: Vec<usize>,
@@ -66,6 +68,11 @@ pub struct TileOptions {
 }
 
 impl TileOptions {
+    /// Nothing typed: `?` there lists the keys.
+    pub fn nothing_typed(&self) -> bool {
+        self.query.is_empty()
+    }
+
     /// `options`, in the order dune gives them; those sending to a desktop in one row,
     /// where the first of them is.
     pub fn new(options: Vec<TileOption>) -> Self {
@@ -86,6 +93,7 @@ impl TileOptions {
             entries,
             desks,
             menu: None,
+            send_to: None,
             query: String::new(),
             selected: 0,
             matcher: Matcher::new(Config::DEFAULT),
@@ -146,7 +154,7 @@ impl TileOptions {
 
     /// Entry `e` chosen: do it, or show the desktops to send to.
     fn choose(&mut self, e: usize) -> Step {
-        match self.entries[e].does {
+        match self.entry(e).does {
             Does::Action(action) => Step::Do(action),
             Does::SendTo => {
                 self.menu = Some(std::mem::replace(&mut self.entries, self.desks.clone()));
@@ -166,10 +174,45 @@ impl TileOptions {
         self.selected = self.matches.iter().position(|&e| self.entries[e].does == Does::SendTo).unwrap_or(0);
     }
 
+    /// Entry `e` as shown: "Send to desktop #" sends to the desktop the query names.
+    fn entry(&self, e: usize) -> &Entry {
+        match (&self.send_to, self.entries[e].does) {
+            (Some(send), Does::SendTo) => send,
+            _ => &self.entries[e],
+        }
+    }
+
+    /// The desktop a query ending in a number names, with what comes before it: "send 4".
+    fn desk_named(&self) -> Option<(String, Entry)> {
+        if self.menu.is_some() {
+            return None;
+        }
+        let name = self.query.trim_end_matches(|c: char| c.is_ascii_digit());
+        let n: u8 = self.query[name.len()..].parse().ok()?;
+        let name = name.trim_end();
+        let desk = self.desks.iter().find(|d| d.does == Does::Action(TileAction::SendToDesk(n)))?;
+        (!name.is_empty()).then(|| (name.to_string(), desk.clone()))
+    }
+
     /// The entries matching the query again, fuzzy over label and keys, best first (ties
-    /// keep dune's order).
+    /// keep dune's order). A query naming a desktop after "Send to desktop #" ("send 4")
+    /// leaves that row alone, sending there.
     fn refilter(&mut self) {
         self.selected = 0;
+        self.send_to = None;
+        if let Some((name, desk)) = self.desk_named() {
+            let pattern = Pattern::parse(&name, CaseMatching::Smart, Normalization::Smart);
+            let mut buf = Vec::new();
+            let row = self.entries.iter().position(|e| {
+                e.does == Does::SendTo && pattern.score(Utf32Str::new(&e.text, &mut buf), &mut self.matcher).is_some()
+            });
+            if let Some(row) = row {
+                let Does::Action(TileAction::SendToDesk(n)) = desk.does else { unreachable!() };
+                self.send_to = Some(Entry { does: desk.does, text: format!("Send to desktop {n}"), keys: desk.keys });
+                self.matches = vec![row];
+                return;
+            }
+        }
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
         let mut scored: Vec<(u32, usize)> = self
@@ -195,7 +238,7 @@ impl TileOptions {
             .skip(first)
             .take(ROWS)
             .map(|(i, e)| {
-                let entry = &self.entries[*e];
+                let entry = self.entry(*e);
                 Row {
                     icon: None,
                     text: &entry.text,
@@ -314,6 +357,29 @@ mod tests {
         assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Continue);
         // A click on a desktop sends there too.
         assert_eq!(o.click(2), Step::Do(TileAction::SendToDesk(3)));
+    }
+
+    #[test]
+    fn typing_a_desktop_after_send_sends_there() {
+        let mut o = options();
+        typed(&mut o, "send 2");
+        assert_eq!(listed(&o), [Does::SendTo]);
+        let view = o.view();
+        assert_eq!((view.rows[0].text, view.rows[0].detail.as_deref()), ("Send to desktop 2", Some("super+shift+2")));
+        assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Do(TileAction::SendToDesk(2)));
+        assert_eq!(o.click(0), Step::Do(TileAction::SendToDesk(2)));
+        // Without the space too; a desktop that is not there matches nothing.
+        let mut o = options();
+        typed(&mut o, "s3");
+        assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Do(TileAction::SendToDesk(3)));
+        let mut o = options();
+        typed(&mut o, "send 7");
+        assert!(listed(&o).is_empty());
+        // Taking the number off shows the row again.
+        o.feed(&none(), Keysym::BackSpace, None);
+        assert_eq!(o.view().rows[0].text, "Send to desktop #");
+        assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Continue);
+        assert_eq!(o.view().status, "3 / 3 desktops");
     }
 
     #[test]

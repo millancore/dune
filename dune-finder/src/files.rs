@@ -3,10 +3,11 @@
 //! `.`; typing narrows them, fuzzy. Enter on a folder goes into it, on a file opens it
 //! (`xdg-open`); `..` (or Backspace with nothing typed) goes up, and at the home folder
 //! back to the apps. A path is typed as in a shell: `~` first goes home, `/` first to the
-//! root, a `/` after a name into the highlighted folder (names need not be whole). Mod+Enter (or
-//! Ctrl+Enter) opens the terminal file manager (`file_manager`, yazi) at the highlighted
-//! folder, or with the highlighted file selected. dune hands Mod+Enter to dune-finder while
-//! it is open; Super or Alt, whichever Mod is, counts.
+//! root, a `/` after a name into the highlighted folder (names need not be whole). Mod+Enter
+//! opens the terminal file manager (`file_manager`, yazi) at the highlighted folder, or with
+//! the highlighted file selected; Ctrl+Enter a terminal in the highlighted folder (on `..`
+//! or a file: the one shown). dune hands Mod+Enter to dune-finder while it is open; Super or Alt,
+//! whichever Mod is, counts.
 //!
 //! A folder is read with one `read_dir`, entries told apart by their file type (no `stat`
 //! of each, which a network folder would make slow); only symlinks are followed to see
@@ -38,6 +39,8 @@ pub enum Step {
     Open(PathBuf),
     /// Open the file manager at this folder, or with this file selected.
     Manage(PathBuf),
+    /// Open a terminal in this folder.
+    Terminal(PathBuf),
     /// Backspace with nothing typed at the first folder: back to the apps.
     Apps,
 }
@@ -75,6 +78,11 @@ pub struct Files {
 }
 
 impl Files {
+    /// Nothing typed: `?` there lists the keys.
+    pub fn nothing_typed(&self) -> bool {
+        self.query.is_empty()
+    }
+
     /// The files of `start`; `file_manager` is named in the hint.
     pub fn new(start: PathBuf, file_manager: &str) -> Self {
         let name = file_manager
@@ -89,11 +97,19 @@ impl Files {
             items: Vec::new(),
             selected: 0,
             matcher: Matcher::new(Config::DEFAULT),
-            hint: format!("Enter: open · Mod+Enter: {name} · ⌫: up · Esc: close"),
+            hint: format!("Enter: open · Mod+Enter: {name} · Ctrl+Enter: terminal · ⌫: up · Esc: close"),
             typed_into: false,
             home: std::env::var_os("HOME").map(PathBuf::from),
         };
         files.read();
+        files
+    }
+
+    /// The files of `folder`, gone into by typing `/` after it (in the jump mode): a `/`
+    /// next is the path's own, not the root.
+    pub fn into(folder: PathBuf, file_manager: &str) -> Self {
+        let mut files = Files::new(folder, file_manager);
+        files.typed_into = true;
         files
     }
 
@@ -174,8 +190,20 @@ impl Files {
         let item = self.items.get(self.selected).copied();
         match sym {
             Keysym::Escape => return Step::Close,
-            Keysym::Return | Keysym::KP_Enter if mods.ctrl || mods.logo || mods.alt => {
-                return Step::Manage(item.map_or_else(|| self.dir.clone(), |item| self.path(item)));
+            Keysym::Return | Keysym::KP_Enter if mods.ctrl && !mods.logo && !mods.alt => {
+                let folder = match item {
+                    Some(item @ Item::Entry(i)) if self.entries[i].dir => self.path(item),
+                    // `..`, a file or nothing: the folder shown.
+                    _ => self.dir.clone(),
+                };
+                return Step::Terminal(folder);
+            }
+            Keysym::Return | Keysym::KP_Enter if mods.logo || mods.alt => {
+                // `..` (highlighted on entering a folder) or nothing: the folder shown.
+                return Step::Manage(match item {
+                    Some(item @ Item::Entry(_)) => self.path(item),
+                    _ => self.dir.clone(),
+                });
             }
             Keysym::Return | Keysym::KP_Enter => {
                 return item.map_or(Step::Continue, |item| self.choose(item));
@@ -454,13 +482,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_hands_the_highlighted_entry_to_the_file_manager() {
+    fn mod_enter_hands_the_highlighted_entry_to_the_file_manager() {
         let root = tree("manage");
         let ctrl = Modifiers {
-            ctrl: true,
+            logo: true,
             ..Default::default()
         };
         let mut f = Files::new(root.clone(), "yazi");
+        // `..`, highlighted first: the folder shown, not its parent.
+        assert_eq!(f.feed(&ctrl, Keysym::Return, None), Step::Manage(root.clone()));
         f.feed(&none(), Keysym::Down, None); // docs
         assert_eq!(
             f.feed(&ctrl, Keysym::Return, None),
@@ -481,6 +511,26 @@ mod tests {
             assert_eq!(f.feed(&m, Keysym::Return, None), Step::Manage(root.clone()));
         }
         assert_eq!(f.feed(&none(), Keysym::Escape, None), Step::Close);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ctrl_enter_opens_a_terminal_in_the_highlighted_folder() {
+        let root = tree("terminal");
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let mut f = Files::new(root.clone(), "yazi");
+        // `..`, highlighted first: the folder shown, not its parent.
+        assert_eq!(f.feed(&ctrl, Keysym::Return, None), Step::Terminal(root.clone()));
+        f.feed(&none(), Keysym::Down, None); // docs
+        assert_eq!(f.feed(&ctrl, Keysym::Return, None), Step::Terminal(root.join("docs")));
+        // A file's: the folder shown; nothing matching: that folder too.
+        typed(&mut f, "B.");
+        assert_eq!(f.feed(&ctrl, Keysym::Return, None), Step::Terminal(root.clone()));
+        typed(&mut f, "zzz");
+        assert_eq!(f.feed(&ctrl, Keysym::Return, None), Step::Terminal(root.clone()));
         let _ = std::fs::remove_dir_all(root);
     }
 

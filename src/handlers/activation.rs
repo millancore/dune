@@ -37,20 +37,29 @@ impl XdgActivationHandler for Dune {
     /// Only tokens born of an input event on our seat, after the focused window got the
     /// keyboard: a click on a notification, a key in a terminal opening a link.
     fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
-        let Some((serial, seat)) = data.serial else { return false };
+        let app = data.app_id.clone().unwrap_or_default();
+        let Some((serial, seat)) = data.serial else {
+            tracing::info!(app, "activation token refused: no input event");
+            return false;
+        };
         let Some(seat) = Seat::<Dune>::from_resource(&seat) else { return false };
         let last_enter = seat.get_keyboard().and_then(|k| k.last_enter());
-        fresh(serial, last_enter)
+        let ok = fresh(serial, last_enter);
+        tracing::info!(app, ok, "activation token asked for");
+        ok
     }
 
     fn request_activation(&mut self, token: XdgActivationToken, data: XdgActivationTokenData, surface: WlSurface) {
         self.activation_state.remove_token(&token);
         if data.timestamp.elapsed().as_secs() >= TOKEN_LIFETIME_SECS {
-            return;
+            return tracing::info!("activation with an expired token");
         }
         match self.tile_of_surface(&surface) {
-            Some(id) => self.go_to(id),
-            None => tracing::debug!("activation of a surface that is no tile's window"),
+            Some(id) => {
+                tracing::info!(tile = id, "activation: going to the window");
+                self.go_to(id)
+            }
+            None => tracing::info!("activation of a surface that is no tile's window"),
         }
     }
 }

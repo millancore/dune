@@ -142,6 +142,7 @@ impl Dune {
         cmd.args(["--mode", mode.arg(), "--output", &output]);
         cmd.args(["--font", &self.config.font_family, "--icon-theme", &self.config.icon_theme]);
         cmd.args(["--file-manager", &self.config.file_manager]);
+        cmd.args(["--terminal", &self.config.terminal]);
         if !self.config.file_manager_terminal.is_empty() {
             cmd.args([
                 "--file-manager-terminal",
@@ -270,6 +271,19 @@ impl Dune {
         let Some(id) = self.tab_tile(target) else { return };
         self.tiles.get_mut(&id).unwrap().reserved = true;
         self.launch_in_empty(id, false);
+    }
+
+    /// Mod+Shift+t: a new empty tab right after the focused tile's, dune-finder for it. A
+    /// floating tile has no tabs: an empty container to its right; nothing focused: where
+    /// Mod+Enter opens one.
+    pub fn open_empty_tab_here(&mut self) {
+        let Some(target) = self.focused.filter(|f| self.tiles.contains_key(f)) else {
+            return self.open_empty_container();
+        };
+        if self.is_floating(target) {
+            return self.open_empty(Some(target), Some(Side::Right), false);
+        }
+        self.open_empty_tab(target);
     }
 
     /// Focus the empty container `id` and open dune-finder for it.

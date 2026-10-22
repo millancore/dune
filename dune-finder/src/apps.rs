@@ -20,9 +20,12 @@ use crate::{
     panel::{Row, View},
 };
 
-const HINT: &str = ":d3 :m2 :t :f ^arrows · / windows # files > jump";
+const HINT: &str = ":d1-9: on that desktop · :m1-9: on that monitor · :t: as a tab of this tile · :f: floating \
+    · Ctrl+arrows: on that side of this tile · Ctrl+F Ctrl+T: floating, as a tab · /: windows · #: files \
+    · >: jump to a folder · Esc: close";
 const DEST_HELP: &str = ":  d1-9 desktop · m1-m9 monitor · t tab · n new · f float";
-const SLOT_HINT: &str = "Enter: terminal · pick a program · / windows # files > jump";
+const SLOT_HINT: &str = "Enter: a terminal here · ↑↓ or type: another program · /: windows · #: files \
+    · >: jump to a folder · Esc: close";
 
 /// What a key did in the apps mode.
 #[derive(Debug, PartialEq, Eq)]
@@ -57,6 +60,9 @@ pub struct Apps {
     /// The list was moved through: Enter with nothing typed runs the highlighted app,
     /// not a terminal.
     browsed: bool,
+    /// The user's terminal heads the list (`with_terminal`): in an empty container it is
+    /// highlighted from the start, as Enter gives a terminal.
+    terminal_first: bool,
 }
 
 impl Apps {
@@ -73,12 +79,31 @@ impl Apps {
             place: Place::Column,
             slot,
             browsed: false,
+            terminal_first: false,
         }
+    }
+
+    /// The app running `terminal` (dune's `terminal` command) heads the list shown with
+    /// nothing typed.
+    pub fn with_terminal(mut self, terminal: &str) -> Self {
+        let first = terminal.split_whitespace().next().unwrap_or("");
+        let program = first.rsplit('/').next().unwrap_or(first);
+        // A terminal emulator is a graphical app.
+        if let Some(id) = self.gui.iter().find(|a| !program.is_empty() && a.program() == program).map(|a| a.id.clone()) {
+            self.picker.pin_first(&id);
+            self.terminal_first = true;
+        }
+        self
     }
 
     /// In an empty container, Enter now gives a terminal.
     fn enter_is_terminal(&self) -> bool {
         self.slot && !self.browsed && self.picker.input().trim().is_empty()
+    }
+
+    /// Nothing typed: `?` there lists the keys.
+    pub fn nothing_typed(&self) -> bool {
+        self.picker.input().is_empty()
     }
 
     /// Nothing typed or browsed yet: a compact panel shows no list.
@@ -166,7 +191,7 @@ impl Apps {
             _ => {}
         }
         // Nothing is highlighted yet: the first Down lands on the first app.
-        let first_down = key == Key::Down && self.enter_is_terminal();
+        let first_down = key == Key::Down && self.enter_is_terminal() && !self.terminal_first;
         if matches!(key, Key::Up | Key::Down | Key::Tab | Key::BackTab) {
             self.browsed = true;
         }
@@ -185,11 +210,7 @@ impl Apps {
             Outcome::Continue => Step::Continue,
             Outcome::Cancel => Step::Close,
             Outcome::Run(line) => {
-                let mut dest = self.destination();
-                // `app:v` / `app:h` still name the side themselves.
-                if let Some(split) = line.split {
-                    dest.place = Place::Side(Side::from(split));
-                }
+                let dest = self.destination();
                 let terminal = !runs_gui_app(&self.gui, &line.command);
                 let app = self.picker.chosen().map(str::to_string);
                 Step::Launch {
@@ -231,7 +252,7 @@ impl Apps {
                 text: &c.label,
                 detail: None,
                 sub: None,
-                selected: first + i == self.picker.selected() && !self.enter_is_terminal(),
+                selected: first + i == self.picker.selected() && (self.terminal_first || !self.enter_is_terminal()),
             })
             .collect();
         let hint = if self.slot { SLOT_HINT } else { HINT };
@@ -370,6 +391,24 @@ mod tests {
         let mut a = in_slot();
         press(&mut a, Keysym::Down, false);
         assert_eq!(a.picker.selected(), 0);
+        press(&mut a, Keysym::Down, false);
+        assert_eq!(a.picker.selected(), 1);
+    }
+
+    #[test]
+    fn in_an_empty_container_the_terminal_is_highlighted_from_the_start() {
+        let mut list = apps();
+        list.push(App {
+            id: "org.wezfurlong.wezterm".into(),
+            name: "WezTerm".into(),
+            exec: "wezterm start --cwd .".into(),
+            ..Default::default()
+        });
+        let mut a = Apps::new(list, HashMap::new(), true).with_terminal("wezterm start");
+        let mut icons = Icons::new("");
+        assert!(a.view(&mut icons, 16).rows[0].selected);
+        // Enter: the container's own terminal; Down: the next app.
+        assert_eq!(press(&mut a, Keysym::Return, false), launch("", true, None));
         press(&mut a, Keysym::Down, false);
         assert_eq!(a.picker.selected(), 1);
     }
@@ -550,4 +589,27 @@ mod tests {
         assert_eq!(a.click(5), Step::Continue);
         assert!(matches!(a.click(0), Step::Launch { app: Some(app), .. } if app == "firefox"));
     }
+
+    #[test]
+    fn the_terminal_heads_the_list_before_anything_is_typed() {
+        let mut list = apps();
+        list.push(App {
+            id: "org.wezfurlong.wezterm".into(),
+            name: "WezTerm".into(),
+            exec: "wezterm start --cwd .".into(),
+            ..Default::default()
+        });
+        let uses = HashMap::from([("firefox".to_string(), 9)]);
+        let mut a = Apps::new(list, uses, false).with_terminal("wezterm start --always-new-process");
+        assert_eq!(a.picker.window().1[0].insert, "org.wezfurlong.wezterm");
+        assert!(matches!(
+            press(&mut a, Keysym::Return, false),
+            Step::Launch { app: Some(app), terminal: false, .. } if app == "org.wezfurlong.wezterm"
+        ));
+        // Typing filters as usual.
+        let mut a = Apps::new(apps(), HashMap::new(), false).with_terminal("/usr/bin/wezterm");
+        typed(&mut a, "fire");
+        assert_eq!(a.picker.window().1[0].insert, "firefox");
+    }
+
 }

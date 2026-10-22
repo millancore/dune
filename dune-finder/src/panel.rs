@@ -8,6 +8,8 @@ use crate::icons::Icon;
 
 /// Text size, in pixels.
 pub const FONT_SIZE: f32 = 18.0;
+/// Size of a row's second line (`Row::sub`), in pixels.
+pub const SMALL_FONT_SIZE: f32 = FONT_SIZE * 0.75;
 /// Characters across the panel.
 pub const COLUMNS: usize = 60;
 pub const PADDING: i32 = 16;
@@ -52,7 +54,7 @@ pub fn row_at(font: Option<&Font>, y: f64, rows: usize) -> Option<usize> {
 }
 
 /// A row of the list: its icon, its text and, dim at the right, a detail; with `sub`, a
-/// second line under the text, dim too.
+/// second line under the text, dim too and smaller.
 pub struct Row<'a> {
     pub icon: Option<&'a Icon>,
     pub text: &'a str,
@@ -77,8 +79,9 @@ pub struct View<'a> {
     pub hint: &'a str,
 }
 
-/// The panel's ARGB8888 pixels (B, G, R, A in memory), `w` × `h`, with `rows` lines of the list.
-pub fn draw(font: Option<&mut Font>, view: &View, (w, h): (i32, i32), rows: usize) -> Vec<u8> {
+/// The panel's ARGB8888 pixels (B, G, R, A in memory), `w` × `h`, with `rows` lines of the list;
+/// rows' second lines in `small` (none: in `font`).
+pub fn draw(font: Option<&mut Font>, mut small: Option<&mut Font>, view: &View, (w, h): (i32, i32), rows: usize) -> Vec<u8> {
     let mut canvas = Canvas {
         pixels: [BACKGROUND[2], BACKGROUND[1], BACKGROUND[0], 0xff].repeat((w * h) as usize),
         w,
@@ -111,7 +114,13 @@ pub fn draw(font: Option<&mut Font>, view: &View, (w, h): (i32, i32), rows: usiz
             canvas.fill(FRAME, y, w - 2 * FRAME, line * row.lines() as i32, SELECTED);
         }
         if let Some(sub) = &row.sub {
-            canvas.text(font, text_x, y + line, line, sub, DIM, text_cols);
+            match small.as_deref_mut() {
+                Some(small) => {
+                    let small_cols = ((w - PADDING - text_x) / small.cell_width.max(1) as i32).max(1) as usize;
+                    canvas.text(small, text_x, y + line, line, sub, DIM, small_cols);
+                }
+                None => canvas.text(font, text_x, y + line, line, sub, DIM, text_cols),
+            }
         }
         if let Some(icon) = row.icon {
             canvas.image(PADDING + ICON_MARGIN, y + ICON_MARGIN, icon);
@@ -278,6 +287,7 @@ mod tests {
         // Compact: the prompt and the two footer lines.
         assert_eq!(panel_size(None, 4000, 0).1, 3 * line_height(None) + 2 * PADDING);
         let pixels = draw(
+            None,
             None,
             &View {
                 prompt: String::new(),

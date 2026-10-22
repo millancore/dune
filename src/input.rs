@@ -22,7 +22,8 @@ use crate::{
     config::{Binding, Config, TerminalHere},
     launcher::FinderMode,
     layout::{Direction, Layout, Rect, Side, TileId, split_band, split_edge},
-    state::{Dune, MoveDrag},
+    screenshot::Capture,
+    state::{Dune, MoveDrag, ResizeDrag},
 };
 
 /// What compositor keys do: the config's bindings (`Binding`), and VT switching.
@@ -30,8 +31,12 @@ use crate::{
 enum Action {
     /// Mod+Enter: an empty container, dune-finder to choose what goes in it.
     EmptyContainer,
+    /// Mod+Shift+t: an empty tile as the next tab of the focused tile's container.
+    EmptyTab,
     Focus(Direction),
     Swap(Direction),
+    /// Focus the monitor that way.
+    FocusMonitor(Direction),
     /// Column width / tile height, as a share of the output.
     Width(f64),
     Height(f64),
@@ -43,6 +48,12 @@ enum Action {
     Center,
     /// Float the focused tile in the middle of its monitor (again: back into the strip).
     ToggleFloat,
+    /// Enter on a focused folded tile: it opens (the window does not get the key).
+    OpenFolded(TileId),
+    /// Mod+Shift+`: the focused tile into the scratchpad.
+    SendToScratchpad,
+    /// Mod+`: the shown scratchpad window focused back into it, else the next one out.
+    Scratchpad,
     Close,
     Quit,
     /// Mod+d: show dune-finder on the apps (again: hide it).
@@ -53,6 +64,8 @@ enum Action {
     TileOptions,
     /// Block the focused tile on screen and in captures (again: show it).
     PrivateTile,
+    /// Fold the focused tile into the accordion (folded: open it).
+    Fold,
     /// Mod+v / Mod+s / Mod+Shift+t: a terminal to the right of the focused tile, below it
     /// or as a tab of its container, in its folder.
     Terminal(TerminalHere),
@@ -70,11 +83,11 @@ enum Action {
     SendToDesk(u8),
     /// Mod+Escape: run `lock_command` (swaylock).
     Lock,
-    /// Print / Shift+Print: a screenshot of a region chosen with the mouse / of the
-    /// active monitor (`true`).
-    Screenshot(bool),
-    /// Mod+Shift+r: record a region chosen with the mouse (again: stop).
-    Record,
+    /// Print / Ctrl+Print / Shift+Print: a screenshot of a region chosen with the mouse,
+    /// of the focused tile, of the active monitor.
+    Screenshot(Capture),
+    /// Mod+Shift+r / Mod+Ctrl+r / Mod+Ctrl+Shift+r: record the same (again: stop).
+    Record(Capture),
     /// Ctrl+Alt+F1..F12 on a real session.
     SwitchVt(i32),
 }
@@ -85,9 +98,11 @@ impl From<Binding> for Action {
             Binding::Focus(dir) => Action::Focus(dir),
             Binding::Swap(dir) => Action::Swap(dir),
             Binding::MoveTab(dir) => Action::MoveTab(dir),
+            Binding::FocusMonitor(dir) => Action::FocusMonitor(dir),
             Binding::Desk(n) => Action::Desk(n),
             Binding::SendToDesk(n) => Action::SendToDesk(n),
             Binding::EmptyContainer => Action::EmptyContainer,
+            Binding::EmptyTab => Action::EmptyTab,
             Binding::NextTab => Action::CycleTab(1),
             Binding::PrevTab => Action::CycleTab(-1),
             Binding::Wider => Action::Width(RESIZE_STEP),
@@ -100,18 +115,24 @@ impl From<Binding> for Action {
             Binding::FullWidth => Action::FullWidth,
             Binding::Center => Action::Center,
             Binding::Float => Action::ToggleFloat,
+            Binding::SendToScratchpad => Action::SendToScratchpad,
+            Binding::Scratchpad => Action::Scratchpad,
             Binding::Close => Action::Close,
             Binding::Launcher => Action::Launcher,
             Binding::Switcher => Action::Switcher,
             Binding::TileOptions => Action::TileOptions,
             Binding::PrivateTile => Action::PrivateTile,
+            Binding::Fold => Action::Fold,
             Binding::Terminal(here) => Action::Terminal(here),
             Binding::StackToTabs => Action::StackToTabs,
             Binding::Quit => Action::Quit,
             Binding::Lock => Action::Lock,
-            Binding::Screenshot => Action::Screenshot(false),
-            Binding::ScreenshotScreen => Action::Screenshot(true),
-            Binding::Record => Action::Record,
+            Binding::Screenshot => Action::Screenshot(Capture::Region),
+            Binding::ScreenshotTile => Action::Screenshot(Capture::Tile),
+            Binding::ScreenshotScreen => Action::Screenshot(Capture::Screen),
+            Binding::Record => Action::Record(Capture::Region),
+            Binding::RecordTile => Action::Record(Capture::Tile),
+            Binding::RecordScreen => Action::Record(Capture::Screen),
         }
     }
 }
@@ -147,7 +168,21 @@ fn edge_slide(pushed: &mut f64, at_edge: bool, over: f64) -> i32 {
     (past * EDGE_SPEED * over.signum()).round() as i32
 }
 
-/// Width/height change for a Super+scroll: a wheel notch is one resize step, up grows.
+/// Pixels the strip slides per pixel of a Super+scroll: a wheel notch (`SCROLL_NOTCH`)
+/// slides 120 px; a touchpad's scroll, already in pixels, a bit more than it moves.
+const STRIP_WHEEL_SPEED: f64 = 8.0;
+const STRIP_FINGER_SPEED: f64 = 2.0;
+
+/// How far a Super+scroll slides the strip: down or right shows what is to the right.
+fn strip_scroll_dx(source: AxisSource, horizontal: f64, vertical: f64) -> i32 {
+    let speed = match source {
+        AxisSource::Wheel | AxisSource::WheelTilt => STRIP_WHEEL_SPEED,
+        _ => STRIP_FINGER_SPEED,
+    };
+    ((horizontal + vertical) * speed).round() as i32
+}
+
+/// Width/height change for an Alt+scroll: a wheel notch is one resize step, up grows.
 fn scroll_resize_delta(vertical_scroll: f64) -> f64 {
     -vertical_scroll / SCROLL_NOTCH * RESIZE_STEP
 }
@@ -227,6 +262,10 @@ mod tests {
     #[test]
     fn scroll_resize_steps() {
         assert_eq!(scroll_resize_delta(-15.0), RESIZE_STEP); // one notch up grows
+        // A notch down slides the strip 120 px to the right, one up back; a touchpad less.
+        assert_eq!(strip_scroll_dx(AxisSource::Wheel, 0.0, SCROLL_NOTCH), 120);
+        assert_eq!(strip_scroll_dx(AxisSource::Wheel, 0.0, -SCROLL_NOTCH), -120);
+        assert_eq!(strip_scroll_dx(AxisSource::Finger, -10.0, 0.0), -20);
         assert_eq!(scroll_resize_delta(30.0), -2.0 * RESIZE_STEP);
     }
 
@@ -295,7 +334,7 @@ mod tests {
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::Left), Some(Action::MoveTab(Direction::Left))));
         assert!(matches!(action_for(&config, &alt_ctrl, Keysym::j), Some(Action::MoveTab(Direction::Down))));
         assert!(matches!(action_for(&config, &alt, Keysym::t), Some(Action::StackToTabs)));
-        assert!(matches!(action_for(&config, &alt_shift, Keysym::t), Some(Action::Terminal(TerminalHere::Tab))));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::t), Some(Action::EmptyTab)));
         assert!(matches!(action_for(&config, &alt, Keysym::slash), Some(Action::TileOptions)));
         assert!(matches!(action_for(&config, &alt_shift, Keysym::Left), Some(Action::Swap(Direction::Left))));
         // With Ctrl in the modifier, Ctrl+direction stays a focus move.
@@ -321,12 +360,15 @@ mod tests {
         let none = ModifiersState::default();
         let shift = ModifiersState { shift: true, ..Default::default() };
         let alt_shift = ModifiersState { alt: true, shift: true, ..Default::default() };
-        assert!(matches!(action_for(&config, &none, Keysym::Print), Some(Action::Screenshot(false))));
-        assert!(matches!(action_for(&config, &shift, Keysym::Print), Some(Action::Screenshot(true))));
-        assert!(matches!(action_for(&config, &alt_shift, Keysym::r), Some(Action::Record)));
-        // Ctrl+Print is not one: it goes to the client.
         let ctrl = ModifiersState { ctrl: true, ..Default::default() };
-        assert!(action_for(&config, &ctrl, Keysym::Print).is_none());
+        let alt_ctrl = ModifiersState { alt: true, ctrl: true, ..Default::default() };
+        let alt_ctrl_shift = ModifiersState { shift: true, ..alt_ctrl };
+        assert!(matches!(action_for(&config, &none, Keysym::Print), Some(Action::Screenshot(Capture::Region))));
+        assert!(matches!(action_for(&config, &ctrl, Keysym::Print), Some(Action::Screenshot(Capture::Tile))));
+        assert!(matches!(action_for(&config, &shift, Keysym::Print), Some(Action::Screenshot(Capture::Screen))));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::r), Some(Action::Record(Capture::Region))));
+        assert!(matches!(action_for(&config, &alt_ctrl, Keysym::r), Some(Action::Record(Capture::Tile))));
+        assert!(matches!(action_for(&config, &alt_ctrl_shift, Keysym::r), Some(Action::Record(Capture::Screen))));
     }
 
     #[test]
@@ -396,8 +438,8 @@ impl Dune {
 
     /// Mod+right drag: the tile under the pointer follows it, right/down growing it.
     fn drag_resize(&mut self, pos: Point<f64, Logical>) {
-        let Some((id, last)) = self.resize_drag else { return };
-        self.resize_drag = Some((id, pos));
+        let Some(drag) = self.resize_drag.as_mut() else { return };
+        let (id, last) = (drag.tile, std::mem::replace(&mut drag.last, pos));
         if self.is_floating(id) {
             return self.resize_float(id, pos.x - last.x, pos.y - last.y);
         }
@@ -410,7 +452,7 @@ impl Dune {
         });
     }
 
-    /// A resize key or Super+scroll: a float grows by `dw`/`dh` around its middle, a tile in
+    /// A resize key or Alt+scroll: a float grows by `dw`/`dh` around its middle, a tile in
     /// the strip takes `change`.
     fn resize_tile(&mut self, id: TileId, dw: f64, dh: f64, change: impl Fn(&mut Layout, TileId)) {
         if self.is_floating(id) {
@@ -429,8 +471,8 @@ impl Dune {
     }
 
     /// `focus_follows_mouse`: the tile under the pointer takes focus, unless part of it is
-    /// off screen (focusing it would slide the view under the pointer), a button or drag
-    /// is going on, dune-finder is open or the session is locked.
+    /// off screen or the focused column is centered (focusing it would slide the view under
+    /// the pointer), a button or drag is going on, dune-finder is open or the session is locked.
     fn hover_focus(&mut self, pos: Point<f64, Logical>) {
         let busy = self.move_drag.is_some()
             || self.resize_drag.is_some()
@@ -442,7 +484,8 @@ impl Dune {
         }
         let Some((id, shown)) = self.shown.iter().find(|(_, r)| r.contains(pos.x, pos.y)).copied() else { return };
         let whole = self.geometries.iter().any(|(t, r)| *t == id && *r == shown);
-        if whole && self.focused != Some(id) {
+        let centered = self.focused.is_some_and(|f| self.layouts.values().any(|l| l.ends_centering(f, id)));
+        if whole && !centered && self.focused != Some(id) {
             self.focus_tile(id);
         }
     }
@@ -489,11 +532,18 @@ impl Dune {
     fn run_action(&mut self, action: Action) {
         match action {
             Action::EmptyContainer => self.open_empty_container(),
+            Action::EmptyTab => self.open_empty_tab_here(),
             Action::Launcher => self.toggle_finder(FinderMode::Apps),
             Action::Switcher => self.toggle_finder(FinderMode::Windows),
             Action::TileOptions => self.toggle_finder(FinderMode::TileOptions),
             Action::PrivateTile => self.toggle_private_focused(),
+            Action::Fold => {
+                if let Some(id) = self.focused {
+                    self.toggle_fold(id);
+                }
+            }
             Action::Focus(dir) => self.focus_direction(dir),
+            Action::FocusMonitor(dir) => self.focus_output_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
             Action::Width(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_width(id, delta)),
             Action::Height(delta) => self.resize_focused(0.0, delta, |l, id| l.resize_height(id, delta)),
@@ -506,6 +556,13 @@ impl Dune {
                     self.toggle_floating(id);
                 }
             }
+            Action::SendToScratchpad => {
+                if let Some(id) = self.focused {
+                    self.send_to_scratchpad(id);
+                }
+            }
+            Action::Scratchpad => self.toggle_scratchpad(),
+            Action::OpenFolded(id) => self.open_folded(id),
             Action::Close => self.close_focused(),
             Action::Quit => self.loop_signal.stop(),
             Action::CycleTab(delta) => self.cycle_tab(delta),
@@ -515,8 +572,8 @@ impl Dune {
             Action::Desk(n) => self.show_desk(n),
             Action::SendToDesk(n) => self.send_to_desk(n),
             Action::Lock => crate::autostart(&self.config.lock_command),
-            Action::Screenshot(whole) => self.screenshot(whole),
-            Action::Record => self.toggle_recording(),
+            Action::Screenshot(what) => self.screenshot(what),
+            Action::Record(what) => self.toggle_recording(what),
             Action::SwitchVt(vt) => self.change_vt(vt),
         }
     }
@@ -542,6 +599,8 @@ impl Dune {
         // While dune-finder is open, Mod+Enter is its own (files: the file manager).
         let finder_open = self.finder.is_some();
         let locked = self.session_lock.is_locked();
+        // A focused folded tile opens with Enter (no modifiers) instead of getting it.
+        let folded = self.focused.filter(|f| self.is_folded(*f));
 
         let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
             self,
@@ -549,11 +608,15 @@ impl Dune {
             state,
             serial,
             time,
-            |_, mods, handle| match handle
-                .raw_latin_sym_or_raw_current_sym()
-                .and_then(|sym| action_for(&config, mods, sym))
-            {
-                Some(Action::EmptyContainer) if finder_open => FilterResult::Forward,
+            |_, mods, handle| match handle.raw_latin_sym_or_raw_current_sym().and_then(|sym| {
+                let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+                match folded {
+                    Some(id) if plain && matches!(sym, Keysym::Return | Keysym::KP_Enter) => Some(Action::OpenFolded(id)),
+                    _ => action_for(&config, mods, sym),
+                }
+            }) {
+                // While dune-finder is open, Mod+Enter and Mod+Tab are its own.
+                Some(Action::EmptyContainer | Action::CycleTab(_)) if finder_open => FilterResult::Forward,
                 Some(action) if locked && !allowed_while_locked(&action) => FilterResult::Forward,
                 Some(action) if pressed => FilterResult::Intercept(action),
                 _ => FilterResult::Forward,
@@ -672,19 +735,36 @@ impl Dune {
                     return self.close_finder();
                 }
 
-                // Mod+right button drags resize the tile instead of reaching the client.
                 let mods = self.seat.get_keyboard().unwrap().modifier_state();
+                let mod_held = modifier_held(&self.config.modifier, &mods);
+                let fold = self.config.fold_click.is_some_and(|c| c.matches(&mods, event.button_code()));
+
+                // `fold_click` folds the tile under the pointer into the accordion (opens a
+                // folded one). On a button Mod drags with, only a click does (on release).
+                if fold && button_state == ButtonState::Pressed && !(mod_held && [BTN_LEFT, BTN_RIGHT].contains(&event.button_code())) {
+                    let pos = pointer.current_location();
+                    if let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y)) {
+                        return self.toggle_fold(id);
+                    }
+                }
+
+                // Mod+right button drags resize the tile instead of reaching the client.
                 if event.button_code() == BTN_RIGHT {
-                    if button_state == ButtonState::Released && self.resize_drag.take().is_some() {
+                    let pos = pointer.current_location();
+                    if button_state == ButtonState::Released
+                        && let Some(drag) = self.resize_drag.take()
+                    {
+                        if drag.fold && (pos.x - drag.start.x).hypot(pos.y - drag.start.y) <= CLICK_SLOP {
+                            self.toggle_fold(drag.tile);
+                        }
                         return;
                     }
-                    let pos = pointer.current_location();
                     if button_state == ButtonState::Pressed
-                        && modifier_held(&self.config.modifier, &mods)
-                        && let Some(id) = self.tile_at(pos.x, pos.y)
+                        && mod_held
+                        && let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y))
                     {
                         self.focus_tile(id);
-                        self.resize_drag = Some((id, pos));
+                        self.resize_drag = Some(ResizeDrag { tile: id, start: pos, last: pos, fold });
                         return;
                     }
                 }
@@ -703,6 +783,7 @@ impl Dune {
                         if !drag.moved {
                             match drag.split {
                                 Some(side) => self.open_empty_split(drag.tile, side),
+                                None if drag.fold => self.toggle_fold(drag.tile),
                                 None => self.toggle_floating(drag.tile),
                             }
                         } else if drag.from.is_none() {
@@ -714,13 +795,13 @@ impl Dune {
                         return;
                     }
                     if button_state == ButtonState::Pressed
-                        && modifier_held(&self.config.modifier, &mods)
+                        && mod_held
                         && let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y))
                     {
                         let split = self.split_hint_at(pos).filter(|(t, ..)| *t == id).map(|(_, side, _)| side);
                         self.focus_tile(id);
                         let from = self.float_rect(id);
-                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from, split });
+                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from, split, fold });
                         return;
                     }
                 }
@@ -740,7 +821,10 @@ impl Dune {
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
                     if let Some(id) = self.tab_at(pos.x, pos.y).or_else(|| self.tile_at(pos.x, pos.y)) {
-                        if self.focused != Some(id) {
+                        // A click on a folded tile's bar opens it; hovering only focuses it.
+                        if self.is_folded(id) {
+                            self.open_folded(id);
+                        } else if self.focused != Some(id) {
                             self.focus_tile(id);
                         }
                     }
@@ -792,10 +876,35 @@ impl Dune {
                     }
                 }
 
-                // Super+scroll resizes the tile under the pointer: the column's width, or with
-                // Shift its height. Always Super, whatever the bindings modifier. Not while locked.
+                // Always Super and Alt, whatever the bindings modifier; not while locked.
+                // Super+Alt+scroll over a tile with neighbours side by side resizes it inside
+                // its row; anywhere else the scroll goes to the window.
                 let mods = self.seat.get_keyboard().unwrap().modifier_state();
-                if !locked && mods.logo && vertical_amount != 0.0 {
+                if !locked && mods.logo && mods.alt && !mods.ctrl && vertical_amount != 0.0 {
+                    let pos = self.seat.get_pointer().unwrap().current_location();
+                    let tile = self.tile_at(pos.x, pos.y);
+                    if let Some(id) = tile.filter(|id| self.layouts.values().any(|l| l.shares_row(*id))) {
+                        let delta = scroll_resize_delta(vertical_amount);
+                        self.change_tile(id, |l, id| l.resize_row_width(id, delta));
+                        return;
+                    }
+                }
+
+                // Super+scroll (up/down or sideways) slides the strip of the monitor under the
+                // pointer, focus staying where it is.
+                if !locked && mods.logo && !mods.alt {
+                    let pos = self.seat.get_pointer().unwrap().current_location();
+                    // A wheel notch jumps 120 px: the tiles glide there instead.
+                    if matches!(source, AxisSource::Wheel | AxisSource::WheelTilt) {
+                        self.animate_resize();
+                    }
+                    self.slide_strip(pos, strip_scroll_dx(source, horizontal_amount, vertical_amount));
+                    return;
+                }
+
+                // Alt+scroll resizes the tile under the pointer: the column's width, or with
+                // Shift its height.
+                if !locked && mods.alt && !mods.logo && !mods.ctrl && vertical_amount != 0.0 {
                     let pos = self.seat.get_pointer().unwrap().current_location();
                     if let Some(id) = self.tile_at(pos.x, pos.y).or(self.focused) {
                         let delta = scroll_resize_delta(vertical_amount);
@@ -806,18 +915,6 @@ impl Dune {
                         }
                     }
                     return;
-                }
-
-                // Alt+scroll over a tile with neighbours side by side resizes it inside its
-                // row; anywhere else the scroll goes to the window.
-                if !locked && mods.alt && !mods.ctrl && vertical_amount != 0.0 {
-                    let pos = self.seat.get_pointer().unwrap().current_location();
-                    let tile = self.tile_at(pos.x, pos.y);
-                    if let Some(id) = tile.filter(|id| self.layouts.values().any(|l| l.shares_row(*id))) {
-                        let delta = scroll_resize_delta(vertical_amount);
-                        self.change_tile(id, |l, id| l.resize_row_width(id, delta));
-                        return;
-                    }
                 }
 
                 let pointer = self.seat.get_pointer().unwrap();

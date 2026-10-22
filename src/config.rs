@@ -20,6 +20,7 @@
 //! file_manager = yazi     # terminal file manager dune-finder's `#` opens with Mod+Enter; default yazi
 //! file_manager_terminal = foot  # terminal it runs in (foot shows yazi's image previews); default `terminal`
 //! border_color = none     # border of tiles without focus: RRGGBB or RRGGBBAA (no `#`), or none; default ffffff
+//! fold_click = mod+right  # fold the tile under the pointer into the accordion (on a folded one: open it); default none
 //! exec = waybar           # run when dune starts; one line per program, as many as needed
 //! screenshot_dir = ~/shots       # where the `screenshot` keys save; default $XDG_PICTURES_DIR/Screenshots, else ~/Pictures/Screenshots
 //! recording_dir = ~/videos       # where `record` saves; default $XDG_VIDEOS_DIR, else ~/Videos
@@ -59,9 +60,14 @@
 //! move_tab_down = mod+ctrl+j, mod+ctrl+Down
 //! move_tab_up = mod+ctrl+k, mod+ctrl+Up
 //! move_tab_right = mod+ctrl+l, mod+ctrl+Right
+//! focus_monitor_left = none           # focus the monitor that way (monitors stacked: mod+Up / mod+Down,
+//! focus_monitor_down = none           # with those keys taken out of focus_up / focus_down)
+//! focus_monitor_up = none
+//! focus_monitor_right = none
 //! desk_1 = mod+1                      # show that desktop (desk_1 .. desk_9: mod+1 .. mod+9)
 //! send_to_desk_1 = mod+shift+1        # send the tile there (send_to_desk_1 .. _9: mod+shift+1 .. 9)
 //! empty_container = mod+Return        # an empty container, dune-finder to fill it
+//! empty_tab = mod+shift+t             # one as the next tab of the focused tile's container
 //! next_tab = mod+Tab
 //! prev_tab = mod+shift+Tab, mod+shift+ISO_Left_Tab
 //! wider = mod+equal, mod+plus         # the column's width
@@ -74,20 +80,26 @@
 //! full_width = mod+f
 //! center = mod+space                  # center the column (again: stop)
 //! float = mod+shift+space             # float the tile (again: back into the strip)
+//! send_to_scratchpad = mod+shift+grave  # the tile off every desktop, into the scratchpad
+//! scratchpad = mod+grave              # the next scratchpad window floats here (on it again: back)
 //! close = mod+q
 //! launcher = mod+d                    # dune-finder on the apps
 //! tile_options = mod+slash            # dune-finder on the focused tile's options (private, float, ...)
 //! switcher = none                     # dune-finder on the windows (`/` in it gets there too)
 //! private_tile = none                 # block the focused tile on screen and in captures (again: show it)
+//! fold = none                         # fold the focused tile into the accordion (on a folded one: open it)
 //! terminal_vertical = mod+v           # a terminal right of the tile, in its folder
 //! terminal_horizontal = mod+s         # one below it
-//! terminal_tab = mod+shift+t          # one as a new tab of its container
+//! terminal_tab = none                 # one as a new tab of its container
 //! stack_to_tabs = mod+t
 //! quit = mod+shift+e
 //! lock = mod+Escape                   # runs `lock_command`
 //! screenshot = Print                  # of a region chosen with the mouse (Esc: none)
+//! screenshot_tile = ctrl+Print        # of the focused tile
 //! screenshot_screen = shift+Print     # of the active monitor
-//! record = mod+shift+r                # record a region chosen with the mouse (again: stop)
+//! record = mod+shift+r                # record a region chosen with the mouse (any record key again: stop)
+//! record_tile = mod+ctrl+r            # record the focused tile
+//! record_screen = mod+ctrl+shift+r    # record the active monitor
 //! ```
 //!
 //! The pointer pushing on against the left or right edge of the screens slides the strip
@@ -130,7 +142,9 @@
 //! Screenshots and recordings (see `screenshot`) need grim, slurp, wf-recorder,
 //! wl-clipboard and libnotify (`notify-send`). A screenshot is saved as
 //! `dune-YYYY-MM-DD_HH-MM-SS.png`, put on the clipboard and announced with its path; a
-//! recording (`.mp4`, no sound) is announced when it starts and when it is saved.
+//! recording (`.mp4`, no sound) is announced when it starts and when it is saved. Bars
+//! show a recording running with `dune recording watch` (waybar `custom` module,
+//! `return-type: json`; `on-click: dune recording stop`).
 //!
 //! Night light has no settings here: programs like wlsunset (the waybar night-light
 //! module runs it) set the monitors' gamma through wlr-gamma-control (see `gamma`), on
@@ -184,28 +198,76 @@ impl KeySpec {
                 key = Keysym::from_char(l);
             }
         }
-        let mut spec = KeySpec { logo: false, alt: false, ctrl: false, shift: false, key };
-        for m in parts {
-            match m.to_lowercase().as_str() {
-                "mod" => match modifier {
-                    "super" | "logo" => spec.logo = true,
-                    "ctrl+alt" => (spec.ctrl, spec.alt) = (true, true),
-                    _ => spec.alt = true,
-                },
-                "super" | "logo" | "mod4" => spec.logo = true,
-                "alt" | "mod1" => spec.alt = true,
-                "ctrl" | "control" => spec.ctrl = true,
-                "shift" => spec.shift = true,
-                _ => return None,
-            }
-        }
-        Some(spec)
+        let (logo, alt, ctrl, shift) = modifiers(&parts, modifier)?;
+        Some(KeySpec { logo, alt, ctrl, shift, key })
     }
 
     /// Exactly these modifiers (so `super+Right` is not taken by `super+shift+Right`).
     pub fn matches(&self, mods: &ModifiersState, key: Keysym) -> bool {
         key == self.key && mods.logo == self.logo && mods.alt == self.alt && mods.ctrl == self.ctrl && mods.shift == self.shift
     }
+}
+
+/// The modifiers of a key or click (`super`, `alt`, `ctrl`, `shift`, `mod` for
+/// `modifier`), as (logo, alt, ctrl, shift); `None` if one is not a modifier.
+fn modifiers(parts: &[&str], modifier: &str) -> Option<(bool, bool, bool, bool)> {
+    let (mut logo, mut alt, mut ctrl, mut shift) = (false, false, false, false);
+    for m in parts {
+        match m.to_lowercase().as_str() {
+            "mod" => match modifier {
+                "super" | "logo" => logo = true,
+                "ctrl+alt" => (ctrl, alt) = (true, true),
+                _ => alt = true,
+            },
+            "super" | "logo" | "mod4" => logo = true,
+            "alt" | "mod1" => alt = true,
+            "ctrl" | "control" => ctrl = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+    Some((logo, alt, ctrl, shift))
+}
+
+/// A mouse button with its modifiers, written like `mod+right` or `ctrl+middle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickSpec {
+    pub logo: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+    /// The evdev code of the button (`BTN_LEFT`, ...).
+    pub button: u32,
+}
+
+impl ClickSpec {
+    /// The button is `left`, `right` or `middle`; `mod` stands for `modifier`.
+    pub fn parse(spec: &str, modifier: &str) -> Option<ClickSpec> {
+        let mut parts: Vec<&str> = spec.split('+').map(str::trim).collect();
+        let button = match parts.pop()?.to_lowercase().as_str() {
+            "left" => 0x110,
+            "right" => 0x111,
+            "middle" => 0x112,
+            _ => return None,
+        };
+        let (logo, alt, ctrl, shift) = modifiers(&parts, modifier)?;
+        Some(ClickSpec { logo, alt, ctrl, shift, button })
+    }
+
+    /// This button with exactly these modifiers.
+    pub fn matches(&self, mods: &ModifiersState, button: u32) -> bool {
+        button == self.button && mods.logo == self.logo && mods.alt == self.alt && mods.ctrl == self.ctrl && mods.shift == self.shift
+    }
+}
+
+/// `fold_click`: a click, or `none` (the default); a value that is not one is warned about.
+fn fold_click(file: &HashMap<String, String>, modifier: &str) -> Option<ClickSpec> {
+    let value = file.get("fold_click").filter(|v| !v.eq_ignore_ascii_case("none"))?;
+    let click = ClickSpec::parse(value, modifier);
+    if click.is_none() {
+        tracing::warn!("ignoring `fold_click = {value}`: not modifiers and left, right or middle, nor none");
+    }
+    click
 }
 
 impl std::fmt::Display for KeySpec {
@@ -225,9 +287,11 @@ pub enum Binding {
     Focus(Direction),
     Swap(Direction),
     MoveTab(Direction),
+    FocusMonitor(Direction),
     Desk(u8),
     SendToDesk(u8),
     EmptyContainer,
+    EmptyTab,
     NextTab,
     PrevTab,
     Wider,
@@ -240,18 +304,24 @@ pub enum Binding {
     FullWidth,
     Center,
     Float,
+    SendToScratchpad,
+    Scratchpad,
     Close,
     Launcher,
     TileOptions,
     Switcher,
     PrivateTile,
+    Fold,
     Terminal(TerminalHere),
     StackToTabs,
     Quit,
     Lock,
     Screenshot,
+    ScreenshotTile,
     ScreenshotScreen,
     Record,
+    RecordTile,
+    RecordScreen,
 }
 
 /// Every binding: its name in the file, what it does and its default keys. A key two of
@@ -274,10 +344,12 @@ fn binding_table() -> Vec<(String, Binding, String)> {
             table.push((format!("{prefix}_{side}"), binding(dir), format!("{mods}+{letter}, {mods}+{arrow}")));
         }
     }
+    table.extend(sides.map(|(side, dir, _, _)| (format!("focus_monitor_{side}"), FocusMonitor(dir), "none".to_string())));
     table.extend((1..=9).map(|n| (format!("desk_{n}"), Desk(n), format!("mod+{n}"))));
     table.extend((1..=9).map(|n| (format!("send_to_desk_{n}"), SendToDesk(n), format!("mod+shift+{n}"))));
     let rest = [
         ("empty_container", EmptyContainer, "mod+Return"),
+        ("empty_tab", EmptyTab, "mod+shift+t"),
         ("next_tab", NextTab, "mod+Tab"),
         ("prev_tab", PrevTab, "mod+shift+Tab, mod+shift+ISO_Left_Tab"),
         ("wider", Wider, "mod+equal, mod+plus"),
@@ -290,20 +362,26 @@ fn binding_table() -> Vec<(String, Binding, String)> {
         ("full_width", FullWidth, "mod+f"),
         ("center", Center, "mod+space"),
         ("float", Float, "mod+shift+space"),
+        ("send_to_scratchpad", SendToScratchpad, "mod+shift+grave"),
+        ("scratchpad", Scratchpad, "mod+grave"),
         ("close", Close, "mod+q"),
         ("launcher", Launcher, "mod+d"),
         ("tile_options", TileOptions, "mod+slash"),
         ("switcher", Switcher, "none"),
         ("private_tile", PrivateTile, "none"),
+        ("fold", Fold, "none"),
         ("terminal_vertical", Terminal(TerminalHere::Right), "mod+v"),
         ("terminal_horizontal", Terminal(TerminalHere::Below), "mod+s"),
-        ("terminal_tab", Terminal(TerminalHere::Tab), "mod+shift+t"),
+        ("terminal_tab", Terminal(TerminalHere::Tab), "none"),
         ("stack_to_tabs", StackToTabs, "mod+t"),
         ("quit", Quit, "mod+shift+e"),
         ("lock", Lock, "mod+Escape"),
         ("screenshot", Screenshot, "Print"),
+        ("screenshot_tile", ScreenshotTile, "ctrl+Print"),
         ("screenshot_screen", ScreenshotScreen, "shift+Print"),
         ("record", Record, "mod+shift+r"),
+        ("record_tile", RecordTile, "mod+ctrl+r"),
+        ("record_screen", RecordScreen, "mod+ctrl+shift+r"),
     ];
     table.extend(rest.map(|(name, binding, keys)| (name.to_string(), binding, keys.to_string())));
     table
@@ -414,6 +492,8 @@ pub struct Config {
     pub follow: bool,
     /// The tile under the pointer takes focus as the pointer moves.
     pub focus_follows_mouse: bool,
+    /// The click that folds the tile under the pointer into the accordion (opens a folded one).
+    pub fold_click: Option<ClickSpec>,
     /// `satellite` (default) or `off`.
     pub xwayland: String,
     /// Monitors by connector name, like `HDMI-A-1`.
@@ -548,6 +628,7 @@ fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>)
             .unwrap_or_else(|| "swaylock -f".into()),
         follow: flag(file, "follow"),
         focus_follows_mouse: flag(file, "focus_follows_mouse"),
+        fold_click: fold_click(file, &modifier),
         outputs: outputs(file),
         input: input(file),
         font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
@@ -725,14 +806,37 @@ mod tests {
         let env = |k: &str| (k == "DUNE_MOD").then(|| "super".to_string());
         let c = resolve(&parse("modifier = alt\n"), &env);
         assert_eq!(keys_of(&c, Binding::Close), [spec("super+q")]);
-        // Every binding has a key by default, but the windows (`/` in dune-finder) and the
-        // private switches (in the tile options).
+        // Every binding has a key by default, but the windows (`/` in dune-finder), the
+        // private switches (in the tile options), folding (`fold_click`), a terminal tab (Mod+Shift+t opens
+        // an empty one) and the monitors (their keys depend on how they are placed).
         let c = resolve(&parse(""), &|_| None);
-        let unbound = [Binding::Switcher, Binding::PrivateTile];
+        let unbound = [Binding::Switcher, Binding::PrivateTile, Binding::Fold, Binding::Terminal(TerminalHere::Tab)];
         for (name, binding, defaults) in binding_table() {
-            assert_eq!(keys_of(&c, binding).is_empty(), unbound.contains(&binding), "{name}");
+            let none = unbound.contains(&binding) || matches!(binding, Binding::FocusMonitor(_));
+            assert_eq!(keys_of(&c, binding).is_empty(), none, "{name}");
             assert!(key_list(&defaults, "alt").is_some(), "{name} = {defaults}");
         }
+    }
+
+    #[test]
+    fn fold_click_is_a_button_with_modifiers() {
+        let c = resolve(&parse("modifier = super\nfold_click = mod+right\n"), &|_| None);
+        let click = c.fold_click.unwrap();
+        assert_eq!((click.logo, click.alt, click.ctrl, click.shift, click.button), (true, false, false, false, 0x111));
+        assert_eq!(ClickSpec::parse("ctrl+shift+Middle", "alt").map(|c| (c.ctrl, c.shift, c.button)), Some((true, true, 0x112)));
+        // None by default; `none`, a key or an unknown modifier: none.
+        for text in ["", "fold_click = none\n", "fold_click = mod+q\n", "fold_click = hyper+left\n"] {
+            assert_eq!(resolve(&parse(text), &|_| None).fold_click, None, "{text}");
+        }
+    }
+
+    #[test]
+    fn monitor_focus_takes_keys_given_up_by_tile_focus() {
+        let c = resolve(&parse("focus_up = mod+k
+focus_monitor_up = mod+Up
+"), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Focus(Direction::Up)), [spec("alt+k")]);
+        assert_eq!(keys_of(&c, Binding::FocusMonitor(Direction::Up)), [spec("alt+Up")]);
     }
 
     #[test]
@@ -782,6 +886,16 @@ mod tests {
     }
 
     #[test]
+    fn scratchpad_keys() {
+        let c = resolve(&parse(""), &|_| None);
+        assert_eq!(keys_of(&c, Binding::Scratchpad), [spec("alt+grave")]);
+        assert_eq!(keys_of(&c, Binding::SendToScratchpad), [spec("alt+shift+grave")]);
+        let c = resolve(&parse("scratchpad = none
+"), &|_| None);
+        assert!(keys_of(&c, Binding::Scratchpad).is_empty());
+    }
+
+    #[test]
     fn tile_options_and_private_keys() {
         let c = resolve(&parse(""), &|_| None);
         assert_eq!(keys_of(&c, Binding::TileOptions), [spec("alt+slash")]);
@@ -823,6 +937,9 @@ mod tests {
         assert_eq!(keys_of(&c, Binding::Screenshot), [spec("Print")]);
         assert_eq!(keys_of(&c, Binding::ScreenshotScreen), [spec("shift+Print")]);
         assert_eq!(keys_of(&c, Binding::Record), [spec("alt+shift+r")]);
+        assert_eq!(keys_of(&c, Binding::ScreenshotTile), [spec("ctrl+Print")]);
+        assert_eq!(keys_of(&c, Binding::RecordTile), [spec("alt+ctrl+r")]);
+        assert_eq!(keys_of(&c, Binding::RecordScreen), [spec("alt+ctrl+shift+r")]);
         assert_eq!(keys_of(&c, Binding::CycleWidth), [spec("alt+r")]);
         assert_eq!((c.screenshot_dir.as_str(), c.recording_dir.as_str()), ("", ""));
         let c = resolve(&parse("modifier = super

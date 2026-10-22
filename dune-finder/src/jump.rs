@@ -2,7 +2,8 @@
 //! worked in and the finder opened, by frecency (see `dune_common::jumps`). Typing narrows
 //! them, fuzzy over the path, keeping the frecency order; Enter opens a terminal in the
 //! folder, where the apps' `:` word and Ctrl keys say. Mod+Enter (or Ctrl+Enter) opens the file
-//! manager there instead.
+//! manager there instead. `/` goes into the highlighted folder, in the files mode: its
+//! folders and files narrowed by typing (Backspace there with nothing typed comes back).
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,8 @@ pub enum Step {
     Go(PathBuf),
     /// Open the file manager at this folder.
     Manage(PathBuf),
+    /// `/`: show this folder's files.
+    Into(PathBuf),
     /// Backspace with nothing typed: back to the apps.
     Apps,
 }
@@ -45,6 +48,11 @@ pub struct Jump {
 }
 
 impl Jump {
+    /// Nothing typed: `?` there lists the keys.
+    pub fn nothing_typed(&self) -> bool {
+        self.query.is_empty()
+    }
+
     /// `folders`, the highest frecency first; `home` is shown as `~`; `file_manager` is
     /// named in the hint.
     pub fn new(folders: Vec<PathBuf>, home: &Path, file_manager: &str) -> Self {
@@ -57,7 +65,7 @@ impl Jump {
             query: String::new(),
             selected: 0,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
-            hint: format!("Enter: terminal there · Mod+Enter: {name} · ⌫: apps · Esc: close"),
+            hint: format!("Enter: terminal there · Mod+Enter: {name} · /: into it · ⌫: apps · Esc: close"),
         }
     }
 
@@ -91,6 +99,11 @@ impl Jump {
                 self.refilter();
             }
             _ => match text {
+                Some('/') => {
+                    if let Some(i) = self.matches.get(self.selected) {
+                        return Step::Into(self.folders[*i].clone());
+                    }
+                }
                 Some(c) if !c.is_control() && !mods.ctrl && !mods.alt && !mods.logo => {
                     self.query.push(c);
                     self.refilter();
@@ -111,15 +124,25 @@ impl Jump {
     }
 
     /// The folders matching the query again, in frecency order (as `z`: the query picks,
-    /// the frecency ranks).
+    /// the frecency ranks); those whose own name matches first (`proj`: the `projects`
+    /// folders before the ones in them).
     fn refilter(&mut self) {
         self.selected = 0;
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
         let matcher = &mut self.matcher;
-        self.matches = (0..self.folders.len())
+        let matches: Vec<usize> = (0..self.folders.len())
             .filter(|i| pattern.score(Utf32Str::new(&self.names[*i], &mut buf), matcher).is_some())
             .collect();
+        if self.query.is_empty() {
+            self.matches = matches;
+            return;
+        }
+        let (named, inside): (Vec<usize>, Vec<usize>) = matches.into_iter().partition(|i| {
+            let name = self.folders[*i].file_name().and_then(|n| n.to_str()).unwrap_or(&self.names[*i]);
+            pattern.score(Utf32Str::new(name, &mut buf), matcher).is_some()
+        });
+        self.matches = named.into_iter().chain(inside).collect();
     }
 
     /// What the panel shows; icons of `icon_size` pixels. Each folder on two lines: its
@@ -234,6 +257,28 @@ mod tests {
             shown,
             [("dune", Some("~/work/dune")), ("app", Some("/srv/app")), ("duenote", Some("~/work/duenote")), ("me", Some("~"))]
         );
+    }
+
+    #[test]
+    fn folders_named_like_the_query_come_before_the_ones_in_them() {
+        let folders = ["/home/me/work/projects/canatec", "/srv/app", "/home/me/work/projects", "/home/me/work"];
+        let mut j = Jump::new(folders.iter().map(PathBuf::from).collect(), Path::new("/home/me"), "yazi");
+        typed(&mut j, "proj");
+        assert_eq!(listed(&j), vec!["~/work/projects", "~/work/projects/canatec"]);
+        // `/` goes into the highlighted one, the first or the one chosen.
+        assert_eq!(j.feed(&none(), Keysym::slash, Some('/')), Step::Into("/home/me/work/projects".into()));
+        j.feed(&none(), Keysym::Down, None);
+        assert_eq!(j.feed(&none(), Keysym::slash, Some('/')), Step::Into("/home/me/work/projects/canatec".into()));
+    }
+
+    #[test]
+    fn a_slash_goes_into_the_highlighted_folder() {
+        let mut j = jump();
+        typed(&mut j, "app");
+        assert_eq!(j.feed(&none(), Keysym::slash, Some('/')), Step::Into("/srv/app".into()));
+        // Nothing highlighted: nothing to go into.
+        typed(&mut j, "zzz");
+        assert_eq!(j.feed(&none(), Keysym::slash, Some('/')), Step::Continue);
     }
 
     #[test]

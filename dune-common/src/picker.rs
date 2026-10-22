@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{desktop::App, protocol::Split};
+use crate::desktop::App;
 
 /// Suggestions shown at once; the list scrolls to keep the selection visible.
 pub const MAX_ROWS: usize = 8;
@@ -74,26 +74,10 @@ pub fn parse_keys(bytes: &[u8]) -> Vec<Key> {
     keys
 }
 
-/// A finished `:` line.
+/// A finished line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
-    /// `None` runs the command in place, swallowing the tile.
-    pub split: Option<Split>,
     pub command: String,
-}
-
-/// Parse the text typed after `:`: `prog[:v|:h] args`.
-pub fn parse_line(input: &str) -> Line {
-    let word_end = input.find(char::is_whitespace).unwrap_or(input.len());
-    let (word, rest) = input.split_at(word_end);
-    let (prog, split) = match word.rsplit_once(':').map(|(p, s)| (p, Split::parse(s))) {
-        Some((prog, Some(split))) => (prog, Some(split)),
-        _ => (word, None),
-    };
-    Line {
-        split,
-        command: format!("{prog}{rest}").trim().to_string(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +108,8 @@ pub struct Picker {
     uses: HashMap<String, u32>,
     /// The app the last Enter ran, if it ran one.
     chosen: Option<String>,
+    /// Browsing with nothing typed, this app (by id) heads the list: the user's terminal.
+    first: Option<String>,
 }
 
 impl Picker {
@@ -138,6 +124,7 @@ impl Picker {
             browse: false,
             uses: HashMap::new(),
             chosen: None,
+            first: None,
         }
     }
 
@@ -147,6 +134,12 @@ impl Picker {
         let mut picker = Picker { browse: true, uses, ..Picker::new(apps, cwd) };
         picker.refresh();
         picker
+    }
+
+    /// Put the app `id` at the head of the list shown with nothing typed.
+    pub fn pin_first(&mut self, id: &str) {
+        self.first = Some(id.to_string());
+        self.refresh();
     }
 
     pub fn input(&self) -> &str {
@@ -197,7 +190,7 @@ impl Picker {
                     (line, app.map(|a| a.id.clone()))
                 });
                 self.chosen = chosen;
-                return if line.command.is_empty() && line.split.is_none() {
+                return if line.command.is_empty() {
                     Outcome::Cancel
                 } else {
                     Outcome::Run(line)
@@ -209,8 +202,7 @@ impl Picker {
     }
 
     /// Browsing (dune-finder's launcher), a last word starting with `:` says where
-    /// the app opens: `firefox :d2`. It is not part of the command; `:v` / `:h` are
-    /// splits, not destinations.
+    /// the app opens: `firefox :d2`. It is not part of the command.
     pub fn dest(&self) -> Option<&str> {
         self.dest_start().map(|i| self.input[i..].trim_start())
     }
@@ -222,8 +214,7 @@ impl Picker {
         }
         let word = self.input.rfind(' ').map_or(0, |i| i + 1);
         let start = self.input[..word].trim_end().len();
-        let dest = self.input[word..].strip_prefix(':')?;
-        Split::parse(dest).is_none().then_some(start)
+        self.input[word..].starts_with(':').then_some(start)
     }
 
     /// Run `f` with the destination word put aside, so that completion and the command
@@ -290,35 +281,24 @@ impl Picker {
     /// name) turned into its command, with the typed arguments. A name that matches
     /// no app runs as typed. Also the app it runs.
     fn resolve(&self) -> (Line, Option<&App>) {
-        // `:v` / `:h` alone: an empty terminal on that side, as at the prompt.
-        if let Some(split) = Split::parse(self.input.trim()) {
-            return (Line { split: Some(split), command: String::new() }, None);
-        }
         let word_end = self.input.find(char::is_whitespace).unwrap_or(self.input.len());
-        let (word, args) = self.input.split_at(word_end);
-        let (name, split) = match word.rsplit_once(':').map(|(p, s)| (p, Split::parse(s))) {
-            Some((name, Some(split))) => (name, Some(split)),
-            _ => (word, None),
-        };
+        let (name, args) = self.input.split_at(word_end);
         let app = self.app(name).or_else(|| {
             // The highlighted suggestion while typing the name, else the best match.
             let highlighted = self.candidates.get(self.selected).and_then(|c| self.app(&c.insert));
-            highlighted.filter(|_| !word.contains(':')).or_else(|| self.matching(name).first().copied())
+            highlighted.or_else(|| self.matching(name).first().copied())
         });
         match app {
             // Browsing, Enter with nothing typed runs the highlighted app.
-            Some(app) if !name.is_empty() || self.browse => (Line { split, command: app.command(args) }, Some(app)),
-            _ => (Line { split, command: format!("{name}{args}").trim().to_string() }, None),
+            Some(app) if !name.is_empty() || self.browse => (Line { command: app.command(args) }, Some(app)),
+            _ => (Line { command: format!("{name}{args}").trim().to_string() }, None),
         }
     }
 
     /// Byte offset where the token under completion starts.
     fn token_start(&self) -> usize {
         if self.in_first_word() {
-            match self.input.rfind(':') {
-                Some(i) => i + 1,
-                None => 0,
-            }
+            0
         } else {
             self.input.rfind(char::is_whitespace).map_or(0, |i| i + 1)
         }
@@ -332,23 +312,13 @@ impl Picker {
         self.selected = 0;
         let token = &self.input[self.token_start()..];
         self.candidates = if self.in_first_word() {
-            if self.input.contains(':') {
-                [("v", "new tile side by side"), ("h", "new tile stacked below")]
-                    .into_iter()
-                    .filter(|(s, _)| s.starts_with(token))
-                    .map(|(s, label)| Candidate {
-                        insert: s.into(),
-                        label: format!("{s}  {label}"),
-                        icon: None,
-                    })
-                    .collect()
-            } else if token.is_empty() && !self.browse {
+            if token.is_empty() && !self.browse {
                 Vec::new()
             } else {
                 let mut apps = self.matching(token);
                 if token.is_empty() {
                     apps = self.apps.iter().collect();
-                    apps.sort_by_key(|a| (self.uses(a), a.name.to_lowercase()));
+                    apps.sort_by_key(|a| (self.first.as_ref() != Some(&a.id), self.uses(a), a.name.to_lowercase()));
                 }
                 apps.into_iter()
                     .map(|a| Candidate { insert: a.id.clone(), label: a.name.clone(), icon: a.icon.clone() })
@@ -439,11 +409,18 @@ mod tests {
         // Backspace on nothing keeps it open; Enter runs the highlighted app.
         assert_eq!(p.feed(Key::Backspace), Outcome::Continue);
         p.feed(Key::Down);
-        assert_eq!(p.feed(Key::Enter), Outcome::Run(Line { split: None, command: "/usr/lib/firefox/firefox".into() }));
+        assert_eq!(p.feed(Key::Enter), Outcome::Run(Line { command: "/usr/lib/firefox/firefox".into() }));
         assert_eq!(p.chosen(), Some("firefox"));
         // Typing filters as usual.
         typed(&mut p, "neo");
         assert_eq!(labels(&p), ["Neovim"]);
+    }
+
+    #[test]
+    fn a_lone_v_is_the_start_of_an_app_name() {
+        let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
+        assert_eq!(typed(&mut p, "v\r"), Outcome::Run(Line { command: "/usr/bin/code".into() }));
+        assert_eq!(p.chosen(), Some("code"));
     }
 
     #[test]
@@ -473,7 +450,7 @@ mod tests {
         assert_eq!(labels(&p), ["Firefox"]);
         p.feed(Key::Tab);
         assert_eq!(p.input(), "firefox :d2");
-        assert_eq!(p.feed(Key::Enter), Outcome::Run(Line { split: None, command: "/usr/lib/firefox/firefox".into() }));
+        assert_eq!(p.feed(Key::Enter), Outcome::Run(Line { command: "/usr/lib/firefox/firefox".into() }));
 
         // Only a destination: the highlighted app.
         let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
@@ -481,27 +458,15 @@ mod tests {
         assert_eq!(p.dest(), Some(":s"));
         assert!(matches!(p.feed(Key::Enter), Outcome::Run(_)));
 
-        // `:v` / `:h` are splits, `@` is typed like any other character.
+        // `@` is typed like any other character.
         let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
-        typed(&mut p, "fire :v");
-        assert_eq!(p.dest(), None);
-        typed(&mut p, "\x15fire @2");
+        typed(&mut p, "fire @2");
         assert_eq!(p.dest(), None);
 
         // Not browsing: no destinations.
         let mut p = picker();
         typed(&mut p, "fire :d2");
         assert_eq!(p.dest(), None);
-    }
-
-    #[test]
-    fn parses_lines() {
-        assert_eq!(parse_line("vim:v index.php"), Line { split: Some(Split::Vertical), command: "vim index.php".into() });
-        assert_eq!(parse_line("vim:h"), Line { split: Some(Split::Horizontal), command: "vim".into() });
-        assert_eq!(parse_line("vim index.php"), Line { split: None, command: "vim index.php".into() });
-        assert_eq!(parse_line(":v"), Line { split: Some(Split::Vertical), command: "".into() });
-        assert_eq!(parse_line("vim:x a"), Line { split: None, command: "vim:x a".into() });
-        assert_eq!(parse_line("git:v log a:v"), Line { split: Some(Split::Vertical), command: "git log a:v".into() });
     }
 
     #[test]
@@ -540,33 +505,19 @@ mod tests {
     }
 
     #[test]
-    fn split_suffix_choices() {
-        let mut p = picker();
-        typed(&mut p, "nvim:");
-        assert_eq!(labels(&p), vec!["v  new tile side by side", "h  new tile stacked below"]);
-        typed(&mut p, "\x1b[B\t");
-        assert_eq!(p.input(), "nvim:h");
-    }
-
-    #[test]
     fn enter_runs_the_app_command() {
         let run = |text: &str| typed(&mut picker(), text);
-        let line = |split, command: &str| Outcome::Run(Line { split, command: command.into() });
+        let line = |command: &str| Outcome::Run(Line { command: command.into() });
         // A partial name runs the highlighted app, through its Exec line.
-        assert_eq!(run("fire\r"), line(None, "/usr/lib/firefox/firefox"));
-        assert_eq!(run("naut\r"), line(None, "nautilus --new-window"));
+        assert_eq!(run("fire\r"), line("/usr/lib/firefox/firefox"));
+        assert_eq!(run("naut\r"), line("nautilus --new-window"));
         // Arguments go where the Exec line wants them.
-        assert_eq!(run("firefox https://a\r"), line(None, "/usr/lib/firefox/firefox https://a"));
-        assert_eq!(run("code:v .\r"), line(Some(Split::Vertical), "/usr/bin/code ."));
-        assert_eq!(run("fire:h\r"), line(Some(Split::Horizontal), "/usr/lib/firefox/firefox"));
+        assert_eq!(run("firefox https://a\r"), line("/usr/lib/firefox/firefox https://a"));
+        assert_eq!(run("code .\r"), line("/usr/bin/code ."));
         // Down picks the second suggestion.
-        assert_eq!(run("fi\x1b[B\r"), line(None, "/usr/lib/firefox/firefox"));
+        assert_eq!(run("fi\x1b[B\r"), line("/usr/lib/firefox/firefox"));
         // Unknown names run as typed.
-        assert_eq!(run("zzz --x\r"), line(None, "zzz --x"));
-        // `:v` / `:h` alone open an empty terminal, even with apps matching the letter.
-        assert_eq!(run("v\r"), line(Some(Split::Vertical), ""));
-        assert_eq!(run("h\r"), line(Some(Split::Horizontal), ""));
-        assert_eq!(run(":v\r"), line(Some(Split::Vertical), ""));
+        assert_eq!(run("zzz --x\r"), line("zzz --x"));
     }
 
     #[test]
@@ -584,10 +535,10 @@ mod tests {
         std::fs::write(dir.join("index.php"), "").unwrap();
         std::fs::write(dir.join(".hidden"), "").unwrap();
         let mut p = Picker::new(vec![app("nvim", "Neovim", "nvim %F")], dir.clone());
-        typed(&mut p, "nvim:v ");
+        typed(&mut p, "nvim ");
         assert_eq!(labels(&p), vec!["index.php", "src/"]);
         typed(&mut p, "in\t");
-        assert_eq!(p.input(), "nvim:v index.php");
+        assert_eq!(p.input(), "nvim index.php");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

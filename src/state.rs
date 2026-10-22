@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{collections::{HashMap, HashSet}, ffi::OsString, path::PathBuf, sync::Arc};
 
 use smithay::{
     backend::{renderer::gles::GlesRenderer, winit::WinitGraphicsBackend},
@@ -36,6 +36,8 @@ pub struct Tile {
     pub stack: Vec<Window>,
     /// An empty container (Mod+Enter): it takes its place before any window is in it.
     pub reserved: bool,
+    /// Process of the window put in it last.
+    pub pid: Option<u32>,
 }
 
 impl Tile {
@@ -56,6 +58,19 @@ pub struct MoveDrag {
     pub from: Option<Rect>,
     /// Pressed near this edge of the tile (`split_edge`): a click there opens a split.
     pub split: Option<Side>,
+    /// It is the `fold_click`: a click folds the tile instead of floating it.
+    pub fold: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct ResizeDrag {
+    pub tile: TileId,
+    /// Where the button went down.
+    pub start: Point<f64, Logical>,
+    /// The pointer when last seen.
+    pub last: Point<f64, Logical>,
+    /// It is the `fold_click`: a click (no drag) folds the tile.
+    pub fold: bool,
 }
 
 pub struct Dune {
@@ -91,10 +106,19 @@ pub struct Dune {
     pub tabs: Vec<TileId>,
     /// Bars of the tabbed containers on the outputs (shown ones only), from the last `arrange`.
     pub tab_bars: Vec<crate::layout::TabBar>,
+    /// Tiles of folded tabbed columns' bars on the outputs, with the column's tab count.
+    pub fold_counts: Vec<(TileId, usize)>,
+    /// Processes playing sound now, and the tiles they belong to (`crate::sound`): alone
+    /// in their process, or sharing it (they play if their title says so), with the titles
+    /// the media players play.
+    pub sound_pids: HashSet<u32>,
+    pub sounding: HashSet<TileId>,
+    pub sounding_shared: HashSet<TileId>,
+    pub sound_titles: Vec<String>,
     /// By output: how many tiles of its strip are past its left and its right edge.
     pub edge_counts: HashMap<String, (usize, usize)>,
-    /// Mod+right button drag resizing a tile: the tile and the last pointer position.
-    pub resize_drag: Option<(TileId, Point<f64, Logical>)>,
+    /// Mod+right button drag resizing a tile.
+    pub resize_drag: Option<ResizeDrag>,
     /// Mod+left button drag moving a tile: it is dropped where the button is released.
     pub move_drag: Option<MoveDrag>,
     /// Floating tiles of each output, by output name, back to front.
@@ -110,12 +134,23 @@ pub struct Dune {
     pub previous_desks: HashMap<String, u8>,
     /// Desktops not shown, by output name and number.
     pub hidden: HashMap<(String, u8), crate::desktops::Desk>,
+    /// Tiles waiting in the scratchpad, in order, with where they floated (`crate::scratchpad`).
+    pub scratchpad: Vec<(TileId, Option<Rect>)>,
+    /// Scratchpad tiles shown, floating: the `scratchpad` key puts them back.
+    pub scratch_shown: HashSet<TileId>,
+    /// `dune scratchpad watch` connections, and the last line they were sent.
+    pub scratchpad_watchers: Vec<std::os::unix::net::UnixStream>,
+    pub scratchpad_status: String,
     /// Tiles waiting for the window of a `DUNE_RUN` command, with the pid of the shell that started it.
     pub swallows: HashMap<TileId, u32>,
     /// Apps the launcher started on their own, by their `DUNE_LAUNCH` number: where their
     /// first window goes, and when they started.
     pub launches: HashMap<u64, crate::launcher::Launch>,
     pub next_launch: u64,
+    /// The latest window nothing claimed (a tile of its own), its process and when: it
+    /// takes the place of a window of that process closing right after (see
+    /// `REPLACE_WINDOW`).
+    pub unclaimed_window: Option<(TileId, u32, std::time::Instant)>,
     /// `dune-shell` link given to terminals as `$SHELL`, and the shell it starts.
     pub shell_wrapper: Option<PathBuf>,
     pub user_shell: PathBuf,
@@ -167,6 +202,12 @@ pub struct Dune {
     pub finder: Option<crate::launcher::FinderRun>,
     /// The screen recording (`record` key) while it runs, see `crate::screenshot`.
     pub recording: Option<crate::screenshot::Recording>,
+    /// When wf-recorder started, while it records (the recording's shell says).
+    pub recording_since: Option<std::time::SystemTime>,
+    /// What the recording takes, unless a whole monitor: framed on screen while it runs.
+    pub recording_area: Option<crate::layout::Rect>,
+    /// `dune recording watch` connections (bars), told when a recording starts and ends.
+    pub recording_watchers: Vec<std::os::unix::net::UnixStream>,
     /// Tiles focused, the latest first: dune-finder lists windows in this order.
     pub recent: Vec<TileId>,
     /// How far the pointer has pushed against a screen edge (see `input::edge_slide`).
@@ -303,6 +344,11 @@ impl Dune {
             shown: Vec::new(),
             tabs: Vec::new(),
             tab_bars: Vec::new(),
+            fold_counts: Vec::new(),
+            sound_pids: HashSet::new(),
+            sounding: HashSet::new(),
+            sounding_shared: HashSet::new(),
+            sound_titles: Vec::new(),
             edge_counts: HashMap::new(),
             resize_drag: None,
             move_drag: None,
@@ -312,9 +358,14 @@ impl Dune {
             desks: HashMap::new(),
             previous_desks: HashMap::new(),
             hidden: HashMap::new(),
+            scratchpad: Vec::new(),
+            scratch_shown: HashSet::new(),
+            scratchpad_watchers: Vec::new(),
+            scratchpad_status: String::new(),
             swallows: HashMap::new(),
             launches: HashMap::new(),
             next_launch: 1,
+            unclaimed_window: None,
             shell_wrapper: None,
             user_shell: PathBuf::from("/bin/sh"),
 
@@ -333,6 +384,9 @@ impl Dune {
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family, config.tab_widths),
             finder: None,
             recording: None,
+            recording_since: None,
+            recording_area: None,
+            recording_watchers: Vec::new(),
             recent: Vec::new(),
             edge_push: 0.0,
             workspaces,

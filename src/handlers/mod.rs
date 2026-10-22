@@ -34,6 +34,16 @@ impl SeatHandler for Dune {
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: smithay::input::pointer::CursorImageStatus) {
+        use smithay::input::pointer::CursorImageStatus::*;
+        let kind = |c: &smithay::input::pointer::CursorImageStatus| match c {
+            Hidden => "hidden",
+            Named(_) => "named",
+            Surface(_) => "surface",
+        };
+        // Which kind of cursor clients ask for (a game may hide it): for pointer bugs.
+        if kind(&image) != kind(&self.cursor_status) {
+            tracing::debug!(cursor = kind(&image), "cursor image");
+        }
         self.cursor_status = image;
     }
 
@@ -147,7 +157,15 @@ impl PointerConstraintsHandler for Dune {
     /// A constraint on the surface under the pointer starts right away; others when the
     /// pointer gets there (see the pointer motion handling).
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        if pointer.current_focus().as_ref() == Some(surface) {
+        let on_it = pointer.current_focus().as_ref() == Some(surface);
+        with_pointer_constraint(surface, pointer, |constraint| {
+            let kind = constraint.map(|c| match &*c {
+                smithay::wayland::pointer_constraints::PointerConstraint::Locked(_) => "locked",
+                smithay::wayland::pointer_constraints::PointerConstraint::Confined(_) => "confined",
+            });
+            tracing::debug!(?kind, on_it, "pointer constraint");
+        });
+        if on_it {
             with_pointer_constraint(surface, pointer, |constraint| {
                 if let Some(constraint) = constraint {
                     constraint.activate();

@@ -12,8 +12,10 @@ use crate::{
     layout::{Rect, Side, TileId},
 };
 
-/// Share of the output a tile takes when it starts floating.
-const FLOAT_SHARE: f64 = 0.6;
+/// Shares of the output's width and height a tile takes when it starts floating: taller
+/// than wide, as most of what floats (terminals, editors, chats) reads top to bottom.
+const FLOAT_WIDTH: f64 = 0.6;
+const FLOAT_HEIGHT: f64 = 0.85;
 /// Share of the output a dialog without a size of its own takes.
 const DIALOG_SHARE: f64 = 0.5;
 /// Smallest floating tile, so a resize cannot make it vanish.
@@ -27,7 +29,7 @@ pub fn centered(area: Rect, w: i32, h: i32) -> Rect {
 
 /// Size of a tile that starts floating in `area`.
 pub fn start_size(area: Rect) -> (i32, i32) {
-    ((area.w as f64 * FLOAT_SHARE) as i32, (area.h as f64 * FLOAT_SHARE) as i32)
+    ((area.w as f64 * FLOAT_WIDTH) as i32, (area.h as f64 * FLOAT_HEIGHT) as i32)
 }
 
 /// `rect` grown by `dw`/`dh` shares of `area` around its middle, kept inside `area`.
@@ -126,7 +128,7 @@ impl Dune {
         self.arrange();
     }
 
-    /// A resize key or Super+scroll on a float: it grows (or shrinks) around its middle by
+    /// A resize key or Alt+scroll on a float: it grows (or shrinks) around its middle by
     /// `dw`/`dh`, shares of its output, like a column's width.
     pub fn scale_float(&mut self, id: TileId, dw: f64, dh: f64) {
         let Some(r) = self.float_rect(id) else { return };
@@ -215,6 +217,11 @@ mod tests {
         assert_eq!(centered(AREA, 600, 360), Rect::new(300, 120, 600, 360));
         // Never bigger than the output.
         assert_eq!(centered(AREA, 5000, 360), Rect::new(100, 120, 1000, 360));
+    }
+
+    #[test]
+    fn floats_start_taller_than_their_share_of_the_width() {
+        assert_eq!(start_size(AREA), (600, 510));
     }
 
     #[test]

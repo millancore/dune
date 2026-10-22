@@ -7,6 +7,10 @@
 //! Windows of locked desktops are not among them: `:l` typed first lists those instead
 //! (asked of dune then, marked 🔒), the rest of the query narrowing them as usual; Enter
 //! unlocks the window's desktop and goes to it.
+//!
+//! A browser that lets dune-finder see its tabs (`tabs`) has its windows listed by their
+//! tabs, the one shown first: typing finds a tab by its title or address, Enter brings it to
+//! the front and goes to its window.
 
 use dune_common::{
     desktop::App,
@@ -21,9 +25,11 @@ use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
 use crate::{
     icons::Icons,
     panel::{ROWS, Row, View},
+    tabs::{self, Tab},
 };
 
-const HINT: &str = ":d2 :m1 :l · Enter: go · ↑↓ Tab: choose · ⌫: apps · Esc: close";
+const HINT: &str = ":d1-9: only that desktop · :m1-9: only that monitor · :l: on locked desktops \
+    · Enter: go · ↑↓ Tab: choose · ⌫: apps · Esc: close";
 
 /// A window to go to.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +43,8 @@ pub struct Entry {
     pub monitor: u8,
     /// Theme icon name (or path) of its app.
     pub icon: Option<String>,
+    /// A tab of the browser window: this entry is that tab, `title` its title.
+    pub tab: Option<Tab>,
 }
 
 impl Entry {
@@ -51,8 +59,32 @@ impl Entry {
             app: window.app,
             place: window.place,
             icon,
+            tab: None,
         }
     }
+}
+
+/// `entries` with each browser window among them replaced by its `tabs` (see
+/// `tabs::by_window`), the one it shows first.
+pub fn with_tabs(entries: Vec<Entry>, tabs: Vec<Tab>) -> Vec<Entry> {
+    if tabs.is_empty() {
+        return entries;
+    }
+    let titles: Vec<&str> = entries.iter().map(|e| e.title.as_str()).collect();
+    let mut owned = tabs::by_window(&titles, tabs);
+    entries
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, window)| match owned.remove(&i) {
+            Some(mut tabs) => {
+                tabs.sort_by_key(|t| !tabs::shows(&window.title, &t.title));
+                tabs.into_iter()
+                    .map(|tab| Entry { title: tabs::clean(&tab.title).to_string(), tab: Some(tab), ..window.clone() })
+                    .collect()
+            }
+            None => vec![window],
+        })
+        .collect()
 }
 
 /// What a key did in the windows mode.
@@ -61,6 +93,9 @@ pub enum Step {
     Continue,
     Close,
     Go(TileId),
+    /// A browser tab: bring it to the front, then go to its window (`tile`, or the one
+    /// titled after it by then).
+    Tab { tile: TileId, id: String, title: String },
     /// A window of a locked desktop (`:l`): unlock it and go there.
     Unlock(TileId),
     /// Backspace with nothing typed: back to the apps.
@@ -79,6 +114,11 @@ pub struct Windows {
 }
 
 impl Windows {
+    /// Nothing typed: `?` there lists the keys.
+    pub fn nothing_typed(&self) -> bool {
+        self.query.is_empty()
+    }
+
     /// `entries`, in the order to list them.
     pub fn new(entries: Vec<Entry>) -> Self {
         let matches = (0..entries.len()).collect();
@@ -117,8 +157,12 @@ impl Windows {
     /// What choosing the `i`th listed entry does.
     fn choose(&self, i: usize) -> Step {
         let (entries, _, locked) = self.listing();
-        let tile = entries[i].tile;
-        if locked { Step::Unlock(tile) } else { Step::Go(tile) }
+        let entry = &entries[i];
+        match &entry.tab {
+            _ if locked => Step::Unlock(entry.tile),
+            Some(tab) => Step::Tab { tile: entry.tile, id: tab.id.clone(), title: entry.title.clone() },
+            None => Step::Go(entry.tile),
+        }
     }
 
     /// A key pressed: `sym` with `mods`, typing `text`.
@@ -191,7 +235,8 @@ impl Windows {
             .enumerate()
             .filter(|(_, e)| desk.is_none_or(|d| e.desk == Some(d)) && monitor.is_none_or(|m| e.monitor == m))
             .filter_map(|(i, e)| {
-                let haystack = format!("{} {} {}", e.title, e.app, e.place);
+                let url = e.tab.as_ref().map_or("", |t| t.url.as_str());
+                let haystack = format!("{} {} {} {url}", e.title, e.app, e.place);
                 pattern.score(Utf32Str::new(&haystack, &mut buf), &mut self.matcher).map(|score| (score, i))
             })
             .collect();
@@ -300,6 +345,29 @@ mod tests {
     fn listed(w: &Windows) -> Vec<TileId> {
         let (entries, ..) = w.listing();
         w.matches.iter().map(|i| entries[*i].tile).collect()
+    }
+
+    #[test]
+    fn a_browser_window_is_listed_by_its_tabs_the_shown_one_first() {
+        let tab = |id: &str, title: &str, url: &str| Tab { id: id.into(), title: title.into(), url: url.into(), window: Some(7) };
+        let entries = vec![
+            entry(1, "dune — nvim", "wezterm", "desk 1"),
+            entry(2, "(2) Inbox - Vivaldi", "vivaldi-stable", "desk 2"),
+            entry(3, "Files", "org.gnome.Nautilus", "desk 3 · m2"),
+        ];
+        let tabs = vec![tab("a", "Rust docs", "https://doc.rust-lang.org"), tab("b", "(2) Inbox", "https://mail.example")];
+        let mut w = Windows::new(with_tabs(entries, tabs));
+        let titles: Vec<&str> = w.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["dune — nvim", "Inbox", "Rust docs", "Files"]);
+        assert_eq!(listed(&w), vec![1, 2, 2, 3]);
+        // Found by its address too; Enter brings it to the front.
+        typed(&mut w, "rust-lang");
+        assert_eq!(
+            w.feed(&none(), Keysym::Return, None),
+            Step::Tab { tile: 2, id: "a".into(), title: "Rust docs".into() }
+        );
+        // No browser to ask: the windows as they are.
+        assert_eq!(with_tabs(vec![entry(2, "Inbox - Vivaldi", "vivaldi-stable", "desk 2")], Vec::new())[0].title, "Inbox - Vivaldi");
     }
 
     #[test]

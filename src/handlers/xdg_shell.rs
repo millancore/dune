@@ -48,6 +48,11 @@ impl XdgShellHandler for Dune {
     // resized with keybindings instead, so these requests are ignored.
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
 
+    // Not honoured yet; logged since games ask for it (and may behave differently without).
+    fn fullscreen_request(&mut self, _surface: ToplevelSurface, _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>) {
+        tracing::debug!("fullscreen requested (ignored)");
+    }
+
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
         // TODO popup grabs
     }

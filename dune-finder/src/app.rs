@@ -42,7 +42,8 @@ use crate::{
     apps::Apps,
     finder::{Action, Finder, Mode},
     icons::Icons,
-    panel::{self, FONT_SIZE},
+    panel::{self, FONT_SIZE, SMALL_FONT_SIZE},
+    tabs,
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -67,6 +68,8 @@ pub struct Options {
     pub file_manager: String,
     /// The terminal `file_manager` runs in; `None`: dune's.
     pub file_manager_terminal: Option<String>,
+    /// dune's terminal (`wezterm start`): its app heads the apps; empty: none.
+    pub terminal: String,
 }
 
 impl Default for Options {
@@ -82,6 +85,7 @@ impl Default for Options {
             icon_theme: String::new(),
             file_manager: "yazi".into(),
             file_manager_terminal: None,
+            terminal: String::new(),
         }
     }
 }
@@ -107,6 +111,8 @@ struct App {
     /// Wheel motion not yet turned into a step (touchpads scroll in pixels).
     wheel_rest: f64,
     font: Option<Font>,
+    /// For rows' second lines (`panel::SMALL_FONT_SIZE`).
+    small_font: Option<Font>,
     icons: Icons,
     finder: Finder,
     options: Options,
@@ -126,14 +132,16 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| Font::load("monospace", FONT_SIZE))
         .inspect_err(|err| eprintln!("dune-finder: no text: {err}"))
         .ok();
+    let small_font = Font::load(&options.font, SMALL_FONT_SIZE).or_else(|_| Font::load("monospace", SMALL_FONT_SIZE)).ok();
     let apps = desktop::apps();
-    let picker = Apps::new(apps.clone(), desktop::launches(), options.slot.is_some());
+    let picker = Apps::new(apps.clone(), desktop::launches(), options.slot.is_some()).with_terminal(&options.terminal);
     let home = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
     let mut finder = Finder::new(
         options.mode,
         picker,
         apps,
         Box::new(windows),
+        Box::new(tabs::list),
         Box::new(|| dune_common::jumps::ranked(dune_common::jumps::now()).into_iter().map(|j| j.path).collect()),
         home,
         options.file_manager.clone(),
@@ -168,6 +176,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         modifiers: Modifiers::default(),
         wheel_rest: 0.0,
         font,
+        small_font,
         icons: Icons::new(&options.icon_theme),
         finder,
         options,
@@ -198,6 +207,18 @@ fn windows(locked: bool) -> Vec<WindowInfo> {
             Vec::new()
         }
     }
+}
+
+/// The window titled after the browser tab `title`, which the browser shows once that tab
+/// is brought to the front: waited for a moment, as its title follows a little later.
+fn tab_window(title: &str) -> Option<TileId> {
+    for _ in 0..10 {
+        if let Some(window) = windows(false).into_iter().find(|w| tabs::shows(&w.title, title)) {
+            return Some(window.tile);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
 }
 
 /// The rows of the tile options menu for `tile`, from dune.
@@ -306,7 +327,7 @@ impl App {
         let rows = self.rows();
         let icon_size = panel::icon_size(self.font.as_ref());
         let view = self.finder.view(&mut self.icons, icon_size);
-        let pixels = panel::draw(self.font.as_mut(), &view, (w, h), rows);
+        let pixels = panel::draw(self.font.as_mut(), self.small_font.as_mut(), &view, (w, h), rows);
         let Ok((buffer, canvas)) = self
             .pool
             .create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)
@@ -367,6 +388,13 @@ impl App {
                     eprintln!("dune-finder: cannot go to the window: {err}");
                 }
             }
+            Action::Tab { tile, id, title } => {
+                tabs::activate(&id);
+                let tile = tab_window(&title).unwrap_or(tile);
+                if let Err(err) = protocol::ask(&Request::GoTo { tile }, ANSWER) {
+                    eprintln!("dune-finder: cannot go to the window: {err}");
+                }
+            }
             Action::Unlock(tile) => {
                 if let Err(err) = protocol::ask(&Request::Unlock { tile }, ANSWER) {
                     eprintln!("dune-finder: cannot unlock the window's desktop: {err}");
@@ -378,6 +406,19 @@ impl App {
                     eprintln!("dune-finder: cannot do `{}`: {err}", action.code());
                 }
             }
+            Action::Power(power) => match power.command() {
+                // Through the shell, so `systemctl` is looked up as it would be typed.
+                Some(command) => {
+                    if let Err(err) = std::process::Command::new("sh").args(["-c", command]).spawn() {
+                        eprintln!("dune-finder: cannot run `{command}`: {err}");
+                    }
+                }
+                None => {
+                    if let Err(err) = protocol::ask(&Request::Quit, ANSWER) {
+                        eprintln!("dune-finder: cannot log out: {err}");
+                    }
+                }
+            },
         }
         self.exit = true;
     }

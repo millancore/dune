@@ -10,6 +10,7 @@ use std::{
 use smithay::{
     backend::input::{InputTime, KeyState},
     desktop::{Window, layer_map_for_output},
+    input::pointer::MotionEvent,
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -40,6 +41,9 @@ const RESIZE_ANIMATION: Duration = Duration::from_millis(150);
 /// A size sent to a client that has not drawn it after this long no longer holds back
 /// the next one (a client that never answers must not freeze its size).
 const CONFIGURE_WAIT: Duration = Duration::from_millis(150);
+
+/// How soon after an unclaimed window opens a window of its app closing leaves it its place.
+const REPLACE_WINDOW: Duration = Duration::from_secs(3);
 
 /// A resize sliding into place: where each tile it moves started, and since when.
 pub struct ResizeAnimation {
@@ -164,9 +168,14 @@ impl Dune {
     /// `launch` is the launcher's `DUNE_LAUNCH` number when the launcher placed it.
     pub fn start_terminal(&mut self, id: TileId, cwd: Option<PathBuf>, run: Option<String>, launch: Option<u64>) -> bool {
         let terminal = &self.config.terminal;
+        let dir = cwd.filter(|d| d.is_dir()).or_else(|| std::env::var_os("HOME").map(PathBuf::from));
         let mut cmd = Command::new("/bin/sh");
-        // `exec` keeps the pid, so the Wayland client pid is the terminal's own.
-        cmd.arg("-c").arg(format!("exec {terminal}"));
+        // `exec` keeps the pid, so the Wayland client pid is the terminal's own. The folder
+        // is `$1`, so it needs no quoting.
+        cmd.arg("-c").arg(format!("exec {}", with_cwd_flag(terminal))).arg("sh");
+        if let Some(dir) = &dir {
+            cmd.arg(dir);
+        }
         cmd.env("DUNE_TILE", id.to_string()).env_remove("DUNE_RUN").env_remove("DUNE_LAUNCH");
         if let Some(n) = launch {
             cmd.env("DUNE_LAUNCH", n.to_string());
@@ -177,11 +186,8 @@ impl Dune {
         if let Some(run) = run.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) {
             cmd.env("DUNE_RUN", run);
         }
-        match cwd.filter(|d| d.is_dir()).or_else(|| std::env::var_os("HOME").map(PathBuf::from)) {
-            Some(dir) => {
-                cmd.current_dir(dir);
-            }
-            None => {}
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
         }
 
         match cmd.spawn() {
@@ -342,6 +348,8 @@ impl Dune {
             stack.retain(|(t, _)| *t != id);
         }
         self.remove_from_hidden(id);
+        self.scratchpad.retain(|(t, _)| *t != id);
+        self.scratch_shown.remove(&id);
     }
 
     /// The tile focus goes to when `id` leaves its spot: a neighbour, else the first of its output.
@@ -455,6 +463,7 @@ impl Dune {
             }
             self.next_tile += 1;
             self.tiles.insert(id, Tile::default());
+            self.unclaimed_window = pid.map(|pid| (id, pid, Instant::now()));
             (id, "new tile")
         };
         tracing::info!(tile = id, "placing window: {how}");
@@ -466,9 +475,12 @@ impl Dune {
             state.states.set(xdg_toplevel::State::TiledBottom);
         });
 
-        self.tiles.get_mut(&id).unwrap().stack.push(window.clone());
-        // On a desktop not shown, the window waits unmapped and focus stays where it is.
-        if self.hidden_desk(id).is_none() {
+        let tile = self.tiles.get_mut(&id).unwrap();
+        tile.stack.push(window.clone());
+        tile.pid = pid.or(tile.pid);
+        // On a desktop not shown (or in the scratchpad), the window waits unmapped and focus
+        // stays where it is.
+        if !self.put_away(id) {
             self.space.map_element(window, (0, 0), false);
             self.focused = Some(id);
             self.raise_float(id);
@@ -495,8 +507,22 @@ impl Dune {
 
         if let Some(top) = tile.top().cloned() {
             tracing::info!(tile = id, "window closed, tile keeps {} window(s)", tile.stack.len());
-            if pos == tile.stack.len() && self.hidden_desk(id).is_none() {
+            if pos == tile.stack.len() && !self.put_away(id) {
                 self.space.map_element(top, (0, 0), false);
+            }
+        } else if let Some(fresh) = self.replacement_for(id) {
+            // A window that opens one to replace it (a browser's profile picker) and
+            // closes right after: the new one takes its place.
+            tracing::info!(tile = id, from = fresh, "window closed, replaced by its app's new window");
+            let window = self.tiles.remove(&fresh).unwrap().stack.remove(0);
+            self.remove_from_layouts(fresh);
+            let tile = self.tiles.get_mut(&id).unwrap();
+            tile.stack.push(window.clone());
+            if !self.put_away(id) {
+                self.space.map_element(window, (0, 0), false);
+            }
+            if matches!(self.focused, Some(f) if f == id || f == fresh) {
+                self.focused = Some(id);
             }
         } else {
             tracing::info!(tile = id, "window closed, tile removed");
@@ -510,6 +536,16 @@ impl Dune {
 
         self.arrange();
         self.update_focus();
+    }
+
+    /// The tile of the window that opened just before the last window of `id` closed,
+    /// from the same process and claimed by nothing (it got a tile of its own).
+    fn replacement_for(&mut self, id: TileId) -> Option<TileId> {
+        let (fresh, pid, at) = self.unclaimed_window?;
+        let same_app = self.tiles.get(&id).and_then(|t| t.pid) == Some(pid);
+        let alone = self.tiles.get(&fresh).is_some_and(|t| t.stack.len() == 1);
+        let replaces = fresh != id && same_app && alone && at.elapsed() < REPLACE_WINDOW;
+        replaces.then(|| self.unclaimed_window.take().map(|(t, ..)| t)).flatten()
     }
 
     /// Lay out every tile on its output and send the new sizes to the clients.
@@ -531,12 +567,11 @@ impl Dune {
         }
         self.adopt_desks(&outputs, &first.name());
 
-        // A focused accordion tab (by keyboard, click or after a close) opens; so does
-        // the tab of a tabbed column a focused tile is in.
+        // The tab of a tabbed column a focused tile is in shows. A folded (accordion) tile
+        // stays folded when focused: a click or Enter opens it (`open_folded`).
         if let Some(id) = self.focused {
             for layout in self.layouts.values_mut() {
                 layout.activate_tab(id);
-                layout.open_tab(id);
             }
         }
 
@@ -551,6 +586,7 @@ impl Dune {
         let mut shown = Vec::new();
         let mut tabs = Vec::new();
         let mut tab_bars = Vec::new();
+        let mut fold_counts = Vec::new();
         let mut edge_counts = HashMap::new();
         // Floats first, front to back: what is first is hit (and drawn) first.
         for output in &outputs {
@@ -577,6 +613,7 @@ impl Dune {
                 geometries.push((id, rect));
             }
             tab_bars.extend(layout.tab_bars().iter().filter(|b| b.rect.intersection(&area).is_some()).cloned());
+            fold_counts.extend(layout.fold_counts().iter().copied());
         }
         tracing::debug!(?geometries, shown = ?shown.iter().map(|(id, _)| id).collect::<Vec<_>>(), ?tabs, "arranged");
         self.geometries = geometries;
@@ -605,9 +642,11 @@ impl Dune {
             }
         }
         self.tab_bars = tab_bars;
+        self.fold_counts = fold_counts;
 
         self.place_windows();
         self.refresh_workspaces();
+        self.refresh_scratchpad();
     }
 
     /// Map the windows of the strip where `geometries` (or a resize sliding into place)
@@ -735,6 +774,19 @@ impl Dune {
         keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
     }
 
+    /// Whether `id` is folded into an accordion bar.
+    pub fn is_folded(&self, id: TileId) -> bool {
+        self.layouts.values().any(|l| l.is_tab(id))
+    }
+
+    /// Open the folded tile `id` (a click or Enter on its bar), focused.
+    pub fn open_folded(&mut self, id: TileId) {
+        for layout in self.layouts.values_mut() {
+            layout.open_tab(id);
+        }
+        self.focus_tile(id);
+    }
+
     pub fn focus_tile(&mut self, id: TileId) {
         if self.tiles.contains_key(&id) {
             self.focused = Some(id);
@@ -755,9 +807,11 @@ impl Dune {
     pub fn swap_direction(&mut self, dir: Direction) {
         let Some(from) = self.focused.filter(|f| !self.is_floating(*f)) else { return };
         if let Some(other) = neighbor(&self.geometries, from, dir) {
-            // Tiles on different monitors trade places between their layouts too.
+            // Tiles on different monitors trade places between their layouts too. A
+            // folded tile stays folded where it goes, an open one open.
+            let (from_folded, other_folded) = (self.is_folded(from), self.is_folded(other));
             for layout in self.layouts.values_mut() {
-                layout.swap(from, other);
+                layout.swap_keeping_folds(from, other, from_folded, other_folded);
             }
             self.arrange();
         } else if let Some(output) = self.output_toward(from, dir) {
@@ -772,9 +826,50 @@ impl Dune {
         }
     }
 
+    /// Focus the monitor next to the active one in `dir`: the tile focused there last
+    /// (shown), else its first one. The pointer goes to the middle of that tile, or of the
+    /// monitor when it has none, so the next motion does not take focus back.
+    pub fn focus_output_direction(&mut self, dir: Direction) {
+        let Some(from) = self.active_output().map(|o| o.name()) else { return };
+        let Some(name) = self.output_next_to(&from, dir) else { return };
+        let shown_there = |id: &TileId| {
+            self.output_of(*id).as_deref() == Some(name.as_str()) && self.geometries.iter().any(|(t, _)| t == id)
+        };
+        let tile = (self.recent.iter())
+            .chain(self.geometries.iter().map(|(id, _)| id))
+            .find(|id| shown_there(id))
+            .copied();
+        let center = match tile.and_then(|id| self.geometries.iter().find(|(t, _)| *t == id)) {
+            Some((_, rect)) => rect.center(),
+            None => {
+                let Some(output) = self.space.outputs().find(|o| o.name() == name).cloned() else { return };
+                let Some(geo) = self.space.output_geometry(&output) else { return };
+                (geo.loc.x + geo.size.w / 2, geo.loc.y + geo.size.h / 2)
+            }
+        };
+        match tile {
+            Some(id) => self.focus_tile(id),
+            None => self.active_output = Some(name),
+        }
+        self.warp_pointer(Point::from((center.0 as f64, center.1 as f64)));
+    }
+
+    /// Move the pointer to `pos`, pointer focus to what is under it there.
+    fn warp_pointer(&mut self, pos: Point<f64, Logical>) {
+        let pointer = self.seat.get_pointer().unwrap();
+        let under = self.surface_under(pos);
+        let event = MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time: InputTime::now() };
+        pointer.motion(self, under, &event);
+        pointer.frame(self);
+    }
+
     /// The output next to the one holding `id`, in `dir`.
     fn output_toward(&self, id: TileId, dir: Direction) -> Option<String> {
-        let name = self.output_of(id)?;
+        self.output_next_to(&self.output_of(id)?, dir)
+    }
+
+    /// The output next to the one named `name`, in `dir`.
+    fn output_next_to(&self, name: &str, dir: Direction) -> Option<String> {
         let geo = |o: &Output| self.space.output_geometry(o);
         let cur = geo(self.space.outputs().find(|o| o.name() == name)?)?;
         let rects: Vec<(TileId, Rect)> = self
@@ -878,6 +973,14 @@ impl Dune {
         }
     }
 
+    /// Fold `id` into the accordion, or open it when folded (`Layout::toggle_fold`).
+    pub fn toggle_fold(&mut self, id: TileId) {
+        if self.is_folded(id) {
+            return self.open_folded(id);
+        }
+        self.change_tile(id, Layout::toggle_fold);
+    }
+
     pub fn change_tile(&mut self, id: TileId, change: impl Fn(&mut Layout, TileId)) {
         if let Some(layout) = self.layouts.values_mut().find(|l| l.contains(id)) {
             change(layout, id);
@@ -918,6 +1021,12 @@ impl Dune {
     pub fn tile_app_id(&self, id: TileId) -> Option<String> {
         let surface = self.tiles.get(&id)?.top()?.toplevel()?.wl_surface().clone();
         with_states(&surface, |states| states.data_map.get::<XdgToplevelSurfaceData>()?.lock().unwrap().app_id.clone())
+    }
+
+    /// Pid of the process behind the tile's window.
+    pub fn tile_pid(&self, id: TileId) -> Option<u32> {
+        let surface = self.tiles.get(&id)?.top()?.toplevel()?.wl_surface().clone();
+        self.client_pid(&surface)
     }
 
     /// Pid of the process behind a Wayland client.
@@ -965,6 +1074,22 @@ impl Dune {
                 self.run_tile_action(tile, action);
                 return Some("ok".into());
             }
+            Request::Quit => {
+                tracing::info!("quit asked over the control socket");
+                self.loop_signal.stop();
+                return Some("ok".into());
+            }
+            Request::ScratchpadShow => {
+                self.toggle_scratchpad();
+                return Some("ok".into());
+            }
+            Request::Recording { started, area } => self.recording_state(started, area.map(|(x, y, w, h)| Rect::new(x, y, w, h))),
+            Request::RecordingStop => {
+                self.stop_recording();
+                return Some("ok".into());
+            }
+            // The listener keeps the connection (`ipc::listen`).
+            Request::WatchScratchpad | Request::WatchRecording => {}
             Request::Keys(keys) => {
                 if std::env::var("DUNE_DEBUG").as_deref() != Ok("1") {
                     tracing::warn!("ignoring key injection: DUNE_DEBUG=1 is not set");
@@ -1002,7 +1127,7 @@ fn process_env(pid: u32) -> HashMap<String, String> {
 }
 
 /// Whether `pid` is `ancestor` or one of its descendants.
-fn is_descendant(mut pid: u32, ancestor: u32) -> bool {
+pub fn is_descendant(mut pid: u32, ancestor: u32) -> bool {
     for _ in 0..64 {
         if pid == ancestor {
             return true;
@@ -1017,6 +1142,19 @@ fn is_descendant(mut pid: u32, ancestor: u32) -> bool {
 
 fn parent_pid(pid: u32) -> Option<u32> {
     stat_field(pid, 4)?.parse().ok()
+}
+
+/// The `terminal` command run by `start_terminal`, its folder `$1`. Most terminals start
+/// their shell in their own working folder; `wezterm start` in the home folder unless
+/// given `--cwd` (empty `$1`: nothing, it stays home).
+fn with_cwd_flag(terminal: &str) -> String {
+    let mut words = terminal.split_whitespace();
+    let wezterm = words.next().and_then(|p| p.rsplit('/').next()) == Some("wezterm");
+    let start = words.clone().any(|w| w == "start");
+    if !wezterm || !start || words.any(|w| w == "--cwd" || w.starts_with("--cwd=") || w == "--") {
+        return terminal.to_string();
+    }
+    format!("{terminal} ${{1:+--cwd \"$1\"}}")
 }
 
 /// The child process of `pid` (of any of its threads) started last.
@@ -1049,6 +1187,27 @@ mod tests {
         assert_eq!(lerp_rect(from, to, ease_out(2.0)), to);
         // Eased out: more than half the way at half the time.
         assert!(lerp_rect(from, to, ease_out(0.5)).w > 550);
+    }
+
+    #[test]
+    fn wezterm_start_is_given_the_folder() {
+        assert_eq!(with_cwd_flag("wezterm start --always-new-process"), "wezterm start --always-new-process ${1:+--cwd \"$1\"}");
+        assert_eq!(with_cwd_flag("/usr/bin/wezterm start"), "/usr/bin/wezterm start ${1:+--cwd \"$1\"}");
+        // Its own folder already, a program after `--`, or another terminal: as it is.
+        for terminal in ["wezterm start --cwd /tmp", "wezterm start -- htop", "wezterm", "foot", "kitty --single-instance"] {
+            assert_eq!(with_cwd_flag(terminal), terminal);
+        }
+        let run = |dir: &str| {
+            let out = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '[%s]' {}", with_cwd_flag("wezterm start")))
+                .args(["sh", dir])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(run("/tmp/a b"), "[wezterm][start][--cwd][/tmp/a b]");
+        assert_eq!(run(""), "[wezterm][start]");
     }
 
     #[test]

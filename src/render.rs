@@ -27,6 +27,7 @@ use smithay::{
 use crate::{
     Dune,
     layout::{Rect, Side, TileId},
+    tab_title::WAVES,
     tiling::{BORDER, GAP},
 };
 
@@ -38,6 +39,10 @@ const DROP_COLOR: [f32; 4] = [0.36 * 0.35, 0.62 * 0.35, 0.95 * 0.35, 0.35];
 const EDGE_MARK_INSET: i32 = 4;
 /// How thick the edge a Mod+click would split is drawn.
 const SPLIT_EDGE_WIDTH: i32 = 3;
+/// The frame around what a recording takes: the red of the bar's recording mark.
+const RECORDING_COLOR: [f32; 4] = [0xef as f32 / 255.0, 0x44 as f32 / 255.0, 0x44 as f32 / 255.0, 1.0];
+/// How thick that frame is, drawn just outside the area so the video does not show it.
+const RECORDING_FRAME: i32 = 2;
 /// Darkens the tile being dragged (premultiplied, translucent).
 const DRAGGED_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
 /// Under each tiled window, where its client has not drawn yet (it grew): the dark of a
@@ -46,7 +51,22 @@ const BACKDROP_COLOR: [f32; 4] = [0x1e as f32 / 255.0, 0x20 as f32 / 255.0, 0x29
 /// What private tiles show instead (`crate::privacy`): opaque, the dark of a
 /// tab strip like the mark in their middle.
 const PRIVATE_COLOR: [f32; 4] = BACKDROP_COLOR;
+/// What fills an empty container (Mod+Enter) until a window goes in: glass, the dark of a
+/// tab strip letting the wallpaper show through (premultiplied, translucent).
+const GLASS_ALPHA: f32 = 0.55;
+const GLASS_COLOR: [f32; 4] = [
+    BACKDROP_COLOR[0] * GLASS_ALPHA,
+    BACKDROP_COLOR[1] * GLASS_ALPHA,
+    BACKDROP_COLOR[2] * GLASS_ALPHA,
+    GLASS_ALPHA,
+];
+/// The light catching the top edge of the glass (premultiplied white).
+const GLASS_SHEEN: [f32; 4] = [0.16, 0.16, 0.16, 0.16];
+/// How thick that edge is.
+const GLASS_SHEEN_HEIGHT: i32 = 1;
 const PRIVATE_LABEL: &str = "🔒 private";
+/// How long each stage of a folded bar's speaker waves shows (see `tab_title::WAVES`).
+const WAVE_STEP_MS: u128 = 300;
 
 render_elements! {
     /// Everything on an output, front first: pointer, decorations, then clients.
@@ -73,8 +93,12 @@ pub struct Decorations {
     split_edge: SolidColorBuffer,
     /// What shows under each tiled window (`BACKDROP_COLOR`).
     backdrops: HashMap<TileId, SolidColorBuffer>,
+    /// The sheen along the top of each empty container (`GLASS_SHEEN`).
+    sheens: HashMap<TileId, SolidColorBuffer>,
     /// What covers each private tile.
     private: HashMap<TileId, SolidColorBuffer>,
+    /// Top, bottom, left, right edges of the frame around what is being recorded.
+    recording: [SolidColorBuffer; 4],
 }
 
 impl Dune {
@@ -135,6 +159,27 @@ impl Dune {
         elements
     }
 
+    /// While a recording of a region or a tile runs: a frame just outside what it takes,
+    /// where it falls on `output`.
+    fn recording_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
+        let (Some(area), Some(geo)) = (self.recording_area, self.space.output_geometry(output)) else {
+            return Vec::new();
+        };
+        let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - geo.loc.x, y - geo.loc.y));
+        let on_output = |(x, y, w, h): &(i32, i32, i32, i32)| {
+            x + w > geo.loc.x && *x < geo.loc.x + geo.size.w && y + h > geo.loc.y && *y < geo.loc.y + geo.size.h
+        };
+        let mut elements = Vec::new();
+        for (buffer, edge) in self.decorations.recording.iter_mut().zip(border_edges(area, RECORDING_FRAME)) {
+            if on_output(&edge) {
+                let (x, y, w, h) = edge;
+                buffer.update((w, h), RECORDING_COLOR);
+                elements.push(SolidColorRenderElement::from_buffer(buffer, place(x, y), 1.0, 1.0, Kind::Unspecified));
+            }
+        }
+        elements
+    }
+
     /// Borders of the tiles picked by `only` that fall on `output`,
     /// front first, in the output's coordinates.
     pub fn decoration_elements(&mut self, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<SolidColorRenderElement> {
@@ -165,7 +210,7 @@ impl Dune {
                 continue;
             };
             let buffers = decorations.borders.entry(*tile).or_default();
-            for (buffer, (x, y, w, h)) in buffers.iter_mut().zip(border_edges(rect)) {
+            for (buffer, (x, y, w, h)) in buffers.iter_mut().zip(border_edges(rect, BORDER.min(GAP))) {
                 buffer.update((w, h), color);
                 elements.push(SolidColorRenderElement::from_buffer(buffer, place(x, y), 1.0, 1.0, Kind::Unspecified));
             }
@@ -184,8 +229,14 @@ impl Dune {
         let mut elements = Vec::new();
         for tile in self.tabs.clone() {
             let Some(rect) = self.shown_rect(tile, output) else { continue };
-            let title = self.shown_title(tile);
-            let buffer = self.tab_titles.bar(tile, &title, (rect.w, rect.h));
+            // A folded tabbed column's bar shows its tab count instead of a title.
+            let count = self.fold_counts.iter().find(|(t, _)| *t == tile).map(|(_, n)| n.to_string());
+            let leading = count.is_some();
+            let title = count.unwrap_or_else(|| self.shown_title(tile));
+            // While its sound plays, the speaker's waves come one after another.
+            let waves = (self.start_time.elapsed().as_millis() / WAVE_STEP_MS % (WAVES as u128 + 1)) as u8;
+            let sound = self.plays_sound(tile).then_some(waves);
+            let buffer = self.tab_titles.bar(tile, &title, (rect.w, rect.h), sound, leading);
             let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
             if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
                 elements.push(OutputRenderElements::Image(e));
@@ -276,6 +327,7 @@ impl Dune {
         } else {
             Vec::new()
         };
+        elements.extend(self.recording_elements(output).into_iter().map(OutputRenderElements::Solid));
         elements.extend(
             self.drag_elements(output)
                 .into_iter()
@@ -424,26 +476,32 @@ impl Dune {
         elements
     }
 
-    /// A solid tile under each window picked by `only` on `output`, at its tile's place.
+    /// A solid tile under each window picked by `only` on `output`, at its tile's place;
+    /// glass, with a sheen along its top, filling each empty container.
     fn backdrop_elements(&mut self, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<SolidColorRenderElement> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
-        let rects: Vec<(TileId, Rect)> = self
+        let rects: Vec<(TileId, Rect, bool)> = self
             .tiles
             .iter()
-            .filter(|(t, tile)| only(**t) && tile.top().is_some() && !self.tabs.contains(t))
-            .filter_map(|(t, _)| Some((*t, self.shown_rect(*t, output)?)))
+            .filter(|(t, tile)| only(**t) && (tile.top().is_some() || tile.reserved) && !self.tabs.contains(t))
+            .filter_map(|(t, tile)| Some((*t, self.shown_rect(*t, output)?, tile.top().is_none())))
             .collect();
-        let backdrops = &mut self.decorations.backdrops;
-        backdrops.retain(|t, _| rects.iter().any(|(r, _)| r == t));
-        rects
-            .into_iter()
-            .map(|(t, rect)| {
-                let buffer = backdrops.entry(t).or_default();
-                buffer.update((rect.w, rect.h), BACKDROP_COLOR);
-                let at = Point::<i32, Physical>::from((rect.x - origin.x, rect.y - origin.y));
-                SolidColorRenderElement::from_buffer(buffer, at, 1.0, 1.0, Kind::Unspecified)
-            })
-            .collect()
+        let decorations = &mut self.decorations;
+        decorations.backdrops.retain(|t, _| rects.iter().any(|(r, _, _)| r == t));
+        decorations.sheens.retain(|t, _| rects.iter().any(|(r, _, empty)| r == t && *empty));
+        let mut elements = Vec::new();
+        for (t, rect, empty) in rects {
+            let at = Point::<i32, Physical>::from((rect.x - origin.x, rect.y - origin.y));
+            if empty {
+                let sheen = decorations.sheens.entry(t).or_default();
+                sheen.update((rect.w, GLASS_SHEEN_HEIGHT), GLASS_SHEEN);
+                elements.push(SolidColorRenderElement::from_buffer(sheen, at, 1.0, 1.0, Kind::Unspecified));
+            }
+            let buffer = decorations.backdrops.entry(t).or_default();
+            buffer.update((rect.w, rect.h), if empty { GLASS_COLOR } else { BACKDROP_COLOR });
+            elements.push(SolidColorRenderElement::from_buffer(buffer, at, 1.0, 1.0, Kind::Unspecified));
+        }
+        elements
     }
 
     /// Layer surfaces (bars, launchers, wallpapers) of `output` on `layers`, front first;
@@ -515,9 +573,8 @@ impl Dune {
     }
 }
 
-/// The four edges of the border around a tile, inside the gap.
-fn border_edges(rect: Rect) -> [(i32, i32, i32, i32); 4] {
-    let b = BORDER.min(GAP);
+/// The four edges, `b` pixels thick, of a border around `rect` (a tile's: inside the gap).
+fn border_edges(rect: Rect, b: i32) -> [(i32, i32, i32, i32); 4] {
     [
         (rect.x - b, rect.y - b, rect.w + 2 * b, b),
         (rect.x - b, rect.y + rect.h, rect.w + 2 * b, b),

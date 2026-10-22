@@ -4,7 +4,8 @@
 //! (`goto`) shows the window's desktop and focuses it; chosen for an empty container
 //! (Mod+Enter, then `/`), the window moves into it instead. Private tiles are listed by
 //! their app (`privacy::masked_title`), not their title. Windows of locked desktops are
-//! left out, and not gone to; a `locked_windows` request lists only them (`:l`).
+//! left out, and not gone to; a `locked_windows` request lists only them (`:l`). Windows in
+//! the scratchpad are listed too, as `scratchpad`; choosing one shows it.
 
 use dune_common::protocol::WindowInfo;
 
@@ -20,6 +21,9 @@ impl Dune {
         if self.on_locked_desk(id) {
             return tracing::info!(tile = id, "window on a locked desktop, not gone to");
         }
+        if self.in_scratchpad(id) {
+            return self.show_scratchpad(id);
+        }
         let slot = self.finder.as_mut().and_then(|r| r.slot.take()).map(|(slot, _)| slot);
         if let Some(slot) = slot.filter(|s| *s != id && self.tiles.get(s).is_some_and(|t| t.stack.is_empty())) {
             return self.fill_slot(id, slot);
@@ -27,7 +31,8 @@ impl Dune {
         if let Some((output, desk)) = self.hidden_desk(id) {
             self.show_desk_on(&output, desk);
         }
-        self.focus_tile(id);
+        // Chosen by name: a folded one opens, as with a click.
+        self.open_folded(id);
     }
 
     /// `id` leaves wherever it is (any monitor, desktop, tab or float) and takes the place
@@ -66,6 +71,9 @@ impl Dune {
                 };
                 placed.extend(tiles.into_iter().map(|t| (t, place.clone())));
             }
+        }
+        if !locked {
+            placed.extend(self.scratchpad.iter().map(|(t, _)| (*t, "scratchpad".to_string())));
         }
         placed.retain(|(t, _)| self.tiles.get(t).is_some_and(|tile| tile.top().is_some()));
         let rank = |t: TileId| match self.recent.iter().position(|r| *r == t) {

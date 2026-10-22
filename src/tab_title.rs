@@ -26,13 +26,16 @@ const MARK_TEXT: [u8; 3] = [0xfa, 0x9e, 0x38];
 /// What a tabbed container's bar shows: its tabs' titles, which is shown, its size.
 type Strip = (Vec<String>, usize, (i32, i32));
 
+/// What a folded tile's bar shows: its title, size, sound (its speaker's waves) and whether the title leads.
+type Bar = (String, (i32, i32), Option<u8>, bool);
+
 /// Rendered tab bars, redrawn only when their title or size changes.
 pub struct TabTitles {
     /// Loaded on first use: fontconfig runs a process.
     font: Option<Option<Font>>,
     family: String,
     widths: TabWidths,
-    bars: HashMap<TileId, (String, (i32, i32), MemoryRenderBuffer)>,
+    bars: HashMap<TileId, (Bar, MemoryRenderBuffer)>,
     /// Bars of tabbed containers, by their shown tab.
     strips: HashMap<TileId, (Strip, MemoryRenderBuffer)>,
     /// The marks at the edges of the screens, by their label, with their size.
@@ -108,28 +111,104 @@ impl TabTitles {
     }
 
     /// The bar of `tile`, `size` pixels, showing `title`. A bar taller than wide (a tile
-    /// folded inside its row) has its title turned, read from the bottom up.
-    pub fn bar(&mut self, tile: TileId, title: &str, size: (i32, i32)) -> &MemoryRenderBuffer {
-        let fresh = self.bars.get(&tile).is_some_and(|(t, s, _)| t == title && *s == size);
-        if !fresh {
-            let (w, h) = size;
-            let pixels = if h > w { upright(&draw(self.font(), title, (h, w)), (h, w)) } else { draw(self.font(), title, size) };
+    /// folded inside its row) has its title turned, read from the bottom up. With `sound`
+    /// (its window plays some), a speaker at the end of the title, with that many waves
+    /// (0 to `WAVES`): on top of an upright bar. A `leading` title (a folded tabbed
+    /// column's tab count) goes at that end instead, the speaker after it; a number, it is
+    /// not turned.
+    pub fn bar(&mut self, tile: TileId, title: &str, size: (i32, i32), sound: Option<u8>, leading: bool) -> &MemoryRenderBuffer {
+        let key = (title.to_string(), size, sound, leading);
+        if self.bars.get(&tile).is_none_or(|(k, _)| *k != key) {
+            let pixels = bar_pixels(self.font(), title, size, sound, leading);
             let buffer = MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, size, 1, Transform::Normal, None);
-            self.bars.insert(tile, (title.to_string(), size, buffer));
+            self.bars.insert(tile, (key, buffer));
         }
-        &self.bars[&tile].2
+        &self.bars[&tile].1
     }
 }
 
-/// ARGB8888 pixels (B, G, R, A in memory) of a bar with `title` on it, cut with `…`
-/// when it does not fit.
-fn draw(font: Option<&mut Font>, title: &str, (w, h): (i32, i32)) -> Vec<u8> {
+/// ARGB8888 pixels of the bar of a folded tile (see `TabTitles::bar`).
+fn bar_pixels(mut font: Option<&mut Font>, title: &str, (w, h): (i32, i32), sound: Option<u8>, leading: bool) -> Vec<u8> {
+    let long = w.max(h);
+    let cell = font.as_ref().map_or(8, |f| f.cell_width as i32);
+    // The title's span along the bar, and how far from its end the speaker goes.
+    let (span, speaker_at) = if leading {
+        let width = (2 * PADDING + cell * title.chars().count() as i32).min(long);
+        ((long - width, long), width)
+    } else {
+        ((0, if sound.is_some() { long - SPEAKER - PADDING } else { long }), PADDING)
+    };
+    let mut pixels = if h > w && leading {
+        // The count read as it is, centered across the top of the bar.
+        let mut pixels = draw(None, "", (w, h), (0, 0));
+        if let Some(font) = font {
+            let band = speaker_at.min(h).max(0) as usize;
+            let x0 = ((w - cell * title.chars().count() as i32) / 2 - PADDING).max(0);
+            text(&mut pixels[..band * w.max(1) as usize * 4], (w.max(1) as usize, band), font, title, (x0, w), TEXT);
+        }
+        pixels
+    } else if h > w {
+        upright(&draw(font.take(), title, (h, w), span), (h, w))
+    } else {
+        draw(font, title, (w, h), span)
+    };
+    if let Some(waves) = sound {
+        let at = if h > w { ((w - SPEAKER) / 2, speaker_at) } else { (w - speaker_at - SPEAKER, (h - SPEAKER) / 2) };
+        speaker(&mut pixels, (w, h), at, waves, TEXT);
+    }
+    pixels
+}
+
+/// ARGB8888 pixels (B, G, R, A in memory) of a bar with `title` on it between `x0` and
+/// `x1`, cut with `…` when it does not fit.
+fn draw(font: Option<&mut Font>, title: &str, (w, h): (i32, i32), (x0, x1): (i32, i32)) -> Vec<u8> {
     let (w, h) = (w.max(1) as usize, h.max(1) as usize);
     let mut pixels: Vec<u8> = [BACKGROUND[2], BACKGROUND[1], BACKGROUND[0], 0xff].repeat(w * h);
     if let Some(font) = font {
-        text(&mut pixels, (w, h), font, title, (0, w as i32), TEXT);
+        text(&mut pixels, (w, h), font, title, (x0.max(0), x1.max(0)), TEXT);
     }
     pixels
+}
+
+/// Side of the speaker drawn on the bar of a tile playing sound, in pixels.
+const SPEAKER: i32 = 16;
+
+/// The sound waves of the speaker at most: while the sound plays they come one after
+/// another (none, one, both) and start again.
+pub const WAVES: u8 = 2;
+
+/// Paint a speaker with `waves` sound waves (inner first), `SPEAKER` pixels square, in
+/// `color` with its top left corner `at` of a `w`×`h` ARGB8888 image (smoothed: each pixel
+/// sampled 4×4 times).
+fn speaker(pixels: &mut [u8], (w, h): (i32, i32), at: (i32, i32), waves: u8, color: [u8; 3]) {
+    // In a 16×16 box: the magnet, the cone widening to the right, and two arcs around (8, 8).
+    let inside = |x: f64, y: f64| {
+        let magnet = (1.0..5.0).contains(&x) && (5.5..10.5).contains(&y);
+        let cone = (5.0..8.5).contains(&x) && (y - 8.0).abs() <= 2.5 + (x - 5.0) * 1.3;
+        let (dx, dy) = (x - 8.0, y - 8.0);
+        let r = dx.hypot(dy);
+        let wave = dx > 0.0 && dy.abs() < dx * 1.2 && ((waves >= 1 && (r - 4.5).abs() < 0.8) || (waves >= 2 && (r - 7.0).abs() < 0.8));
+        magnet || cone || wave
+    };
+    let scale = 16.0 / SPEAKER as f64;
+    for py in 0..SPEAKER {
+        for px in 0..SPEAKER {
+            let (x, y) = (at.0 + px, at.1 + py);
+            if x < 0 || y < 0 || x >= w || y >= h {
+                continue;
+            }
+            let hits = (0..16).filter(|s| inside((px as f64 + (s % 4) as f64 / 4.0 + 0.125) * scale, (py as f64 + (s / 4) as f64 / 4.0 + 0.125) * scale)).count() as u32;
+            if hits == 0 {
+                continue;
+            }
+            let alpha = hits * 255 / 16;
+            let at = ((y * w + x) * 4) as usize;
+            for (channel, value) in [(2, color[0]), (1, color[1]), (0, color[2])] {
+                let under = pixels[at + channel] as u32;
+                pixels[at + channel] = ((value as u32 * alpha + under * (255 - alpha)) / 255) as u8;
+            }
+        }
+    }
 }
 
 /// The ARGB8888 `pixels` of a `(w, h)` image turned a quarter counter-clockwise: an image
@@ -307,18 +386,67 @@ mod tests {
     }
 
     #[test]
+    fn a_bar_playing_sound_has_a_speaker_at_the_end() {
+        let lit = |px: &[u8]| px.chunks(4).filter(|p| p[0] > BACKGROUND[2] + 40).count();
+        let mut titles = TabTitles::new("monospace", TabWidths::default());
+        // Upright (folded in its row): the speaker on top, the title kept below it.
+        let (w, h) = (36, 300);
+        let mut pixels = upright(&draw(None, "", (h, w), (0, h - SPEAKER - PADDING)), (h, w));
+        speaker(&mut pixels, (w, h), ((w - SPEAKER) / 2, PADDING), WAVES, TEXT);
+        let rows = |from: i32, to: i32| lit(&pixels[(from * w * 4) as usize..(to * w * 4) as usize]);
+        assert!(rows(PADDING, PADDING + SPEAKER) > 40, "the speaker is drawn");
+        assert_eq!(rows(0, PADDING) + rows(PADDING + SPEAKER, h), 0, "and nothing else");
+        // The bar is drawn again when the sound starts or stops, and as its waves come.
+        titles.bar(1, "mpv", (w, h), None, false);
+        assert_eq!(titles.bars[&1].0.2, None);
+        titles.bar(1, "mpv", (w, h), Some(1), false);
+        assert_eq!(titles.bars[&1].0.2, Some(1));
+    }
+
+    #[test]
+    fn the_speaker_waves_come_one_after_another() {
+        let lit = |px: &[u8]| px.chunks(4).filter(|p| p[0] > BACKGROUND[2] + 40).count();
+        let drawn = |waves| {
+            let mut pixels = draw(None, "", (SPEAKER, SPEAKER), (0, 0));
+            speaker(&mut pixels, (SPEAKER, SPEAKER), (0, 0), waves, TEXT);
+            lit(&pixels)
+        };
+        assert!(drawn(0) > 20, "the speaker alone");
+        assert!(drawn(1) > drawn(0), "then the inner wave");
+        assert!(drawn(2) > drawn(1), "then both");
+    }
+
+    #[test]
+    fn a_leading_count_goes_on_top_and_the_speaker_after_it() {
+        let lit = |px: &[u8]| px.chunks(4).filter(|p| p[0] > BACKGROUND[2] + 40).count();
+        let mut font = Font::load("monospace", FONT_SIZE).expect("a monospace font");
+        let count = 2 * PADDING + font.cell_width as i32;
+        let (w, h) = (36, 300);
+        let pixels = bar_pixels(Some(&mut font), "3", (w, h), Some(WAVES), true);
+        let rows = |from: i32, to: i32| lit(&pixels[(from * w * 4) as usize..(to * w * 4) as usize]);
+        assert!(rows(0, count) > 10, "the count on top");
+        // Not turned: drawn like the same count on a flat bar, centered across the top.
+        let mut flat = draw(None, "", (w, count), (0, 0));
+        let x0 = ((w - font.cell_width as i32) / 2 - PADDING).max(0);
+        text(&mut flat, (w as usize, count as usize), &mut font, "3", (x0, w), TEXT);
+        assert_eq!(&pixels[..(count * w * 4) as usize], &flat[..]);
+        assert!(rows(count, count + SPEAKER) > 40, "the speaker right after it");
+        assert_eq!(rows(count + SPEAKER, h), 0, "nothing below");
+    }
+
+    #[test]
     fn bar_has_text_on_the_background() {
         let size = (200, 24);
-        let blank = draw(None, "zsh", size);
+        let blank = draw(None, "zsh", size, (0, size.0));
         assert_eq!(blank.len(), 200 * 24 * 4);
         assert!(blank.chunks(4).all(|p| p == [BACKGROUND[2], BACKGROUND[1], BACKGROUND[0], 0xff]));
 
         let mut font = Font::load("monospace", FONT_SIZE).expect("a monospace font");
-        let text = draw(Some(&mut font), "zsh", size);
+        let text = draw(Some(&mut font), "zsh", size, (0, size.0));
         let lit = |px: &[u8]| px.chunks(4).filter(|p| p[0] > BACKGROUND[2] + 40).count();
         assert!(lit(&text) > 20, "the title is drawn");
         // Too long for the bar: cut, nothing drawn past the right padding.
-        let long = draw(Some(&mut font), &"x".repeat(100), (100, 24));
+        let long = draw(Some(&mut font), &"x".repeat(100), (100, 24), (0, 100));
         for row in long.chunks(100 * 4) {
             assert!(lit(&row[(100 - PADDING as usize + 1) * 4..]) == 0);
         }

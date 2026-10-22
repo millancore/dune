@@ -15,8 +15,10 @@ mod privacy;
 mod reload;
 mod render;
 mod screencopy;
+mod scratchpad;
 mod screenshot;
 mod shell;
+mod sound;
 mod state;
 mod tab_title;
 mod tiling;
@@ -25,6 +27,7 @@ mod windows;
 mod winit;
 mod wlr_screencopy;
 mod workspaces;
+mod xwayland;
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +40,10 @@ usage:
                                          another session as a window (--tty/--nested to force)
   dune open [--split v|h] [--from TILE] [--cwd DIR] [--] COMMAND...
                                          open COMMAND in a new terminal tile
+  dune scratchpad show|watch             show the next scratchpad window (or hide the focused
+                                         one) / print a waybar JSON line on every change
+  dune recording stop|watch              stop the recording running / print a waybar JSON line
+                                         on every change (with the time recorded)
   dune shell                             run the dune layer around $DUNE_USER_SHELL (what tiles run)";
 
 fn main() {
@@ -56,6 +63,8 @@ fn main() {
         Some("--tty") => run(Some(Mode::Tty)).map_err(|e| e.to_string()),
         Some("--nested") => run(Some(Mode::Nested)).map_err(|e| e.to_string()),
         Some("open") => ipc::open_command(&args[1..]),
+        Some("scratchpad") => ipc::scratchpad_command(&args[1..]),
+        Some("recording") => ipc::recording_command(&args[1..]),
         Some("shell") => shell::run(shell::ARGV0, args[1..].iter().map(Into::into).collect()),
         Some("-h") | Some("--help") => {
             println!("{USAGE}");
@@ -97,6 +106,7 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
     let socket = ipc::socket_path(&name);
     ipc::listen(&mut event_loop, &socket)?;
     reload::watch(&event_loop.handle());
+    sound::watch(&event_loop.handle());
 
     state.user_shell = user_shell();
     state.shell_wrapper = match install_shell_link(&socket.with_extension("shell")) {
@@ -112,6 +122,11 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
         std::env::set_var("DUNE_SOCKET", &socket);
         std::env::remove_var("DISPLAY");
+        // `dune ...` from a bar or a script finds this binary, even when its folder
+        // (e.g. ~/.cargo/bin) is only on the PATH of interactive shells.
+        if let Some(path) = path_with_own_folder() {
+            std::env::set_var("PATH", path);
+        }
         // Clients pick their own cursor size; without these, X11 apps (libXcursor)
         // derive it from the screen size and draw a huge pointer.
         if std::env::var_os("XCURSOR_THEME").is_none() {
@@ -124,13 +139,14 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("listening on {name:?}, control socket {socket:?}, shell {:?}", state.user_shell);
 
     // X11 applications go through xwayland-satellite, like in niri.
-    let mut xwayland = match state.config.xwayland.as_str() {
+    // satellite starts with the first X11 client (and again if it exits).
+    let xwayland = match state.config.xwayland.as_str() {
         "off" => None,
-        _ => start_xwayland_satellite(),
+        _ => xwayland::start(&event_loop.handle()),
     };
-    if let Some((x_display, _)) = &xwayland {
+    if let Some(x_display) = &xwayland {
         unsafe { std::env::set_var("DISPLAY", x_display) };
-        tracing::info!("X11 apps on DISPLAY={x_display} (xwayland-satellite)");
+        tracing::info!("X11 apps on DISPLAY={x_display} (xwayland-satellite, on demand)");
     }
 
     // As the session, tell systemd and D-Bus where the desktop is, so services they
@@ -163,10 +179,6 @@ fn run(mode: Option<Mode>) -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run(None, &mut state, |_| {})?;
 
-    if let Some((_, child)) = xwayland.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
     let _ = std::fs::remove_file(&socket);
     if let Some(link) = &state.shell_wrapper {
         let _ = std::fs::remove_dir_all(link.parent().unwrap());
@@ -193,29 +205,14 @@ pub fn autostart(command: &str) {
     }
 }
 
-/// Start xwayland-satellite on the first free X display (`:0` is often taken by the
-/// host session when nested). Returns the display name and the process.
-fn start_xwayland_satellite() -> Option<(String, std::process::Child)> {
-    let free = (0..64).find(|n| {
-        !Path::new(&format!("/tmp/.X11-unix/X{n}")).exists() && !Path::new(&format!("/tmp/.X{n}-lock")).exists()
-    })?;
-    let display = format!(":{free}");
-    // Its log (and Xwayland's) goes to a file of its own, next to the control socket.
-    let log = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|d| Path::new(&d).join(format!("dune-xwayland{display}.log")))
-        .and_then(|p| std::fs::File::create(p).ok());
-    let mut command = std::process::Command::new("xwayland-satellite");
-    command.arg(&display).stdout(std::process::Stdio::null());
-    if let Some(log) = log {
-        command.stderr(log);
+/// `PATH` with the folder of the running binary first, when it is not on it already.
+fn path_with_own_folder() -> Option<std::ffi::OsString> {
+    let folder = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&path).any(|p| p == folder) {
+        return None;
     }
-    match command.spawn() {
-        Ok(child) => Some((display, child)),
-        Err(err) => {
-            tracing::warn!("X11 apps unavailable: cannot start xwayland-satellite ({err})");
-            None
-        }
-    }
+    std::env::join_paths(std::iter::once(folder).chain(std::env::split_paths(&path))).ok()
 }
 
 /// The shell the user normally gets: `$SHELL`, unless that is already a dune wrapper
@@ -230,12 +227,22 @@ fn user_shell() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
+/// The path of the dune binary. Reinstalled while it runs, Linux names the running one
+/// `<path> (deleted)`: the new one at `<path>` is meant.
+pub fn own_binary() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    Ok(match exe.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    })
+}
+
 /// Create `<dir>/dune-shell` pointing at this binary.
 fn install_shell_link(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let link = dir.join(shell::ARGV0);
     let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(std::env::current_exe()?, &link)?;
+    std::os::unix::fs::symlink(own_binary()?, &link)?;
     Ok(link)
 }
 

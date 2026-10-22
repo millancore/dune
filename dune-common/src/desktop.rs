@@ -60,7 +60,7 @@ impl App {
     }
 
     /// Name of the program the app runs: `firefox` for `/usr/lib/firefox/firefox %u`.
-    fn program(&self) -> &str {
+    pub fn program(&self) -> &str {
         // Skip an `env VAR=value ...` prefix.
         let first = self.exec.split_whitespace().find(|w| *w != "env" && !w.contains('=')).unwrap_or("");
         first.rsplit('/').next().unwrap_or(first).trim_matches('"')

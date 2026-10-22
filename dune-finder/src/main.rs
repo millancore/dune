@@ -3,12 +3,13 @@
 //! that dune starts for Mod+d, Mod+/ (the tile options) and Mod+Enter. It asks dune for the windows and to start or show what was chosen over the
 //! control socket (`dune_common::protocol`, `$DUNE_SOCKET`).
 //!
-//! `dune-finder [--mode apps|windows|files|jump|tile-options] [--output NAME] [--target TILE] [--slot TILE
+//! `dune-finder [--mode apps|windows|files|jump|tile-options|system] [--output NAME] [--target TILE] [--slot TILE
 //! --at X,Y,W,H] [--compact] [--font FAMILY] [--icon-theme THEME] [--file-manager CMD]
-//! [--file-manager-terminal CMD]`: `--target` is
+//! [--file-manager-terminal CMD] [--terminal CMD]`: `--target` is
 //! the tile apps open next to (and the tile options are for); `--slot` the empty container they go into, `--at` where it is
 //! on the output; `--compact` shows no list until something is typed or browsed; `--file-manager` what Mod+Enter (or Ctrl+Enter) opens files in (default `yazi`),
-//! `--file-manager-terminal` the terminal it runs in (default: dune's).
+//! `--file-manager-terminal` the terminal it runs in (default: dune's), `--terminal` dune's
+//! terminal, whose app heads the apps before anything is typed.
 
 mod app;
 mod apps;
@@ -17,6 +18,8 @@ mod finder;
 mod icons;
 mod jump;
 mod panel;
+mod system;
+mod tabs;
 mod tile_options;
 mod windows;
 
@@ -49,6 +52,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
                     "files" => Mode::Files,
                     "jump" => Mode::Jump,
                     "tile-options" => Mode::TileOptions,
+                    "system" => Mode::System,
                     other => return Err(format!("unknown mode `{other}`")),
                 }
             }
@@ -61,6 +65,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--icon-theme" => options.icon_theme = value()?,
             "--file-manager" => options.file_manager = value()?,
             "--file-manager-terminal" => options.file_manager_terminal = Some(value()?),
+            "--terminal" => options.terminal = value()?,
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
