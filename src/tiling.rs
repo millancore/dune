@@ -570,6 +570,17 @@ impl Dune {
         }
 
         self.settle_floats();
+        // Fullscreen ends when focus goes to another tile of the same monitor.
+        let focused_on = self.focused.and_then(|f| self.output_of(f));
+        let ended: Vec<TileId> = self
+            .fullscreen
+            .iter()
+            .copied()
+            .filter(|t| !self.tiles.contains_key(t) || (Some(*t) != self.focused && focused_on.is_some() && self.output_of(*t) == focused_on))
+            .collect();
+        for t in ended {
+            self.fullscreen.remove(&t);
+        }
         // A private tile that closed is forgotten (ids are not reused).
         let tiles = &self.tiles;
         self.privacy.forget_gone(|t| tiles.contains_key(&t));
@@ -609,6 +620,29 @@ impl Dune {
             tab_bars.extend(layout.tab_bars().iter().filter(|b| b.rect.intersection(&area).is_some()).cloned());
             fold_counts.extend(layout.fold_counts().iter().copied());
         }
+        // A fullscreen tile laid out on its monitor covers it: the whole output, and nothing
+        // else of it shown (nor its tab bars and edge marks).
+        let mut covers = HashMap::new();
+        for output in &outputs {
+            let Some(geo) = self.space.output_geometry(output) else { continue };
+            let full = Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+            let name = output.name();
+            let cover = self.fullscreen.iter().copied().find(|t| {
+                self.output_of(*t).as_ref() == Some(&name) && !tabs.contains(t) && geometries.iter().any(|(g, _)| g == t)
+            });
+            let Some(cover) = cover else { continue };
+            for (t, rect) in geometries.iter_mut() {
+                if *t == cover {
+                    *rect = full;
+                }
+            }
+            shown.retain(|(t, rect)| *t != cover && rect.intersection(&full).is_none());
+            shown.insert(0, (cover, full));
+            tab_bars.retain(|b| b.rect.intersection(&full).is_none());
+            edge_counts.remove(&name);
+            covers.insert(name, cover);
+        }
+        self.covers = covers;
         tracing::debug!(?geometries, shown = ?shown.iter().map(|(id, _)| id).collect::<Vec<_>>(), ?tabs, "arranged");
         self.geometries = geometries;
         self.shown = shown;
@@ -643,6 +677,27 @@ impl Dune {
         self.refresh_scratchpad();
     }
 
+    /// Make `id` fullscreen (`on`), the one of its monitor, focused; or stop it.
+    pub fn set_fullscreen(&mut self, id: TileId, on: bool) {
+        if !self.tiles.contains_key(&id) {
+            return;
+        }
+        if on {
+            let output = self.output_of(id);
+            let others: Vec<TileId> = self.fullscreen.iter().copied().filter(|t| self.output_of(*t) == output).collect();
+            for t in others {
+                self.fullscreen.remove(&t);
+            }
+            self.fullscreen.insert(id);
+            // On a desktop not shown it waits there, focus staying where it is.
+            if output.is_some() {
+                self.focus_tile(id);
+            }
+        } else if self.fullscreen.remove(&id) {
+            self.arrange();
+        }
+    }
+
     /// Map the windows of the strip where `geometries` (or a resize sliding into place)
     /// puts them, and send them their sizes.
     fn place_windows(&mut self) {
@@ -654,6 +709,7 @@ impl Dune {
                 continue;
             };
             let floating = self.is_floating(*id);
+            let fullscreen = self.covers.values().any(|c| c == id);
             // Columns scrolled off the output are not drawn (nor shown on a neighbour);
             // a tab shows a bar instead of its window, which keeps its last size.
             if self.tabs.contains(id) {
@@ -675,6 +731,11 @@ impl Dune {
                     } else {
                         state.states.set(edge);
                     }
+                }
+                if fullscreen {
+                    state.states.set(Fullscreen);
+                } else {
+                    state.states.unset(Fullscreen);
                 }
             });
             self.send_size(toplevel);

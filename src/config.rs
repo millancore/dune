@@ -78,6 +78,7 @@
 //! row_narrower = mod+ctrl+minus
 //! cycle_width = mod+r
 //! full_width = mod+f
+//! fullscreen = mod+shift+f            # the tile over its whole monitor, bar too (again: back)
 //! center = mod+space                  # center the column (again: stop)
 //! float = mod+shift+space             # float the tile (again: back into the strip)
 //! send_to_scratchpad = mod+shift+grave  # the tile off every desktop, into the scratchpad
@@ -302,6 +303,7 @@ pub enum Binding {
     RowNarrower,
     CycleWidth,
     FullWidth,
+    Fullscreen,
     Center,
     Float,
     SendToScratchpad,
@@ -360,6 +362,7 @@ fn binding_table() -> Vec<(String, Binding, String)> {
         ("row_narrower", RowNarrower, "mod+ctrl+minus"),
         ("cycle_width", CycleWidth, "mod+r"),
         ("full_width", FullWidth, "mod+f"),
+        ("fullscreen", Fullscreen, "mod+shift+f"),
         ("center", Center, "mod+space"),
         ("float", Float, "mod+shift+space"),
         ("send_to_scratchpad", SendToScratchpad, "mod+shift+grave"),
@@ -801,6 +804,7 @@ mod tests {
             assert_eq!(keys_of(&c, Binding::Focus(Direction::Left)), [spec(&format!("{held}+h")), spec(&format!("{held}+Left"))]);
             assert_eq!(keys_of(&c, Binding::SendToDesk(9)), [spec(&format!("{held}+shift+9"))]);
             assert_eq!(keys_of(&c, Binding::TileOptions), [spec(&format!("{held}+slash"))]);
+            assert_eq!(keys_of(&c, Binding::Fullscreen), [spec(&format!("{held}+shift+f"))]);
         }
         // `DUNE_MOD` wins over the file, for the keys too.
         let env = |k: &str| (k == "DUNE_MOD").then(|| "super".to_string());

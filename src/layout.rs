@@ -994,6 +994,8 @@ impl Layout {
         let column = |t: TileId| self.find(t).map(|(c, _, _)| c);
         let already = self.centered.is_some_and(|c| column(c) == column(id));
         self.centered = if already || !self.contains(id) { None } else { Some(id) };
+        // A slide by hand gives way: the view goes where centering (or focus) says.
+        self.slid = None;
     }
 
     /// Whether focusing `id` would end the centering of `from`'s column: `id` in another
@@ -1384,6 +1386,13 @@ mod tests {
         geo(&mut l, 1);
         l.stop_sliding();
         assert_eq!(x_of(&geo(&mut l, 1), 1), before);
+        // Centering after a slide centers right away.
+        l.slide_view(300, Some(1));
+        geo(&mut l, 1);
+        l.toggle_center(1);
+        let g = geo(&mut l, 1);
+        let r1 = g.iter().find(|(t, _)| *t == 1).unwrap().1;
+        assert_eq!(r1.x + r1.w / 2, AREA.w / 2, "1 centered");
     }
 
     #[test]

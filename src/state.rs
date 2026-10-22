@@ -117,6 +117,11 @@ pub struct Dune {
     pub sound_titles: Vec<String>,
     /// By output: how many tiles of its strip are past its left and its right edge.
     pub edge_counts: HashMap<String, (usize, usize)>,
+    /// Tiles that want to be fullscreen (one per monitor), until focus goes to another
+    /// tile of their monitor or they ask to stop.
+    pub fullscreen: HashSet<TileId>,
+    /// By output: the fullscreen tile covering it now (laid out on its shown desktop).
+    pub covers: HashMap<String, TileId>,
     /// Mod+right button drag resizing a tile.
     pub resize_drag: Option<ResizeDrag>,
     /// Mod+left button drag moving a tile: it is dropped where the button is released.
@@ -351,6 +356,8 @@ impl Dune {
             sounding_shared: HashSet::new(),
             sound_titles: Vec::new(),
             edge_counts: HashMap::new(),
+            fullscreen: HashSet::new(),
+            covers: HashMap::new(),
             resize_drag: None,
             move_drag: None,
             floating: HashMap::new(),
@@ -462,18 +469,23 @@ impl Dune {
                     .map(|(s, p)| (s, (p + geo.loc + output_loc).to_f64()))
             })
         };
+        let window_under = || {
+            self.space.element_under(pos).and_then(|(window, location)| {
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(s, p)| (s, (p + location).to_f64()))
+            })
+        };
+        // A fullscreen tile is under Overlay layers only (see `output_elements`).
+        if self.covers.contains_key(&output.name()) {
+            return layer_surface_under(Layer::Overlay, WindowSurfaceType::ALL).or_else(window_under);
+        }
         // The popups of a bar under the windows are drawn over them (see `output_elements`).
         layer_surface_under(Layer::Overlay, WindowSurfaceType::ALL)
             .or_else(|| layer_surface_under(Layer::Top, WindowSurfaceType::ALL))
             .or_else(|| layer_surface_under(Layer::Bottom, WindowSurfaceType::POPUP))
             .or_else(|| layer_surface_under(Layer::Background, WindowSurfaceType::POPUP))
-            .or_else(|| {
-                self.space.element_under(pos).and_then(|(window, location)| {
-                    window
-                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                        .map(|(s, p)| (s, (p + location).to_f64()))
-                })
-            })
+            .or_else(window_under)
             .or_else(|| layer_surface_under(Layer::Bottom, WindowSurfaceType::ALL))
             .or_else(|| layer_surface_under(Layer::Background, WindowSurfaceType::ALL))
     }

@@ -48,9 +48,24 @@ impl XdgShellHandler for Dune {
     // resized with keybindings instead, so these requests are ignored.
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
 
-    // Not honoured yet; logged since games ask for it (and may behave differently without).
-    fn fullscreen_request(&mut self, _surface: ToplevelSurface, _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>) {
-        tracing::debug!("fullscreen requested (ignored)");
+    // A video, a page or a game going fullscreen covers the monitor of its tile (the output
+    // asked for is not followed). A window not placed yet (none asks that early) just gets
+    // its configure.
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>) {
+        match self.tile_of_surface(surface.wl_surface()) {
+            Some(id) => self.set_fullscreen(id, true),
+            None => {
+                if surface.is_initial_configure_sent() {
+                    surface.send_configure();
+                }
+            }
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(id) = self.tile_of_surface(surface.wl_surface()) {
+            self.set_fullscreen(id, false);
+        }
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {

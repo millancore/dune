@@ -21,7 +21,7 @@ fn fresh(serial: Serial, last_enter: Option<Serial>) -> bool {
 
 impl Dune {
     /// The tile with `surface` among its windows, on any monitor or desktop.
-    fn tile_of_surface(&self, surface: &WlSurface) -> Option<TileId> {
+    pub fn tile_of_surface(&self, surface: &WlSurface) -> Option<TileId> {
         self.tiles
             .iter()
             .find(|(_, tile)| tile.stack.iter().any(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface)))

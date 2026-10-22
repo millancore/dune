@@ -26,6 +26,7 @@ folder jumper, the tile menu and the power menu.
 - [Columns, rows and tiles](#columns-rows-and-tiles)
 - [Tabs](#tabs)
 - [Folding (the accordion)](#folding-the-accordion)
+- [Fullscreen](#fullscreen)
 - [Floating tiles and the scratchpad](#floating-tiles-and-the-scratchpad)
 - [Desktops and monitors](#desktops-and-monitors)
 - [Terminals](#terminals)
@@ -213,6 +214,27 @@ A folded tabbed column shows its tab count at the top. Folded tiles that play so
 a speaker 🔊 (followed through `pactl`; for browsers, matched by the MPRIS title).
 
 Fold with the `fold` key, or with `fold_click` (for example `mod+right`) on the tile under the pointer.
+
+## Fullscreen
+
+A tile goes fullscreen when its app asks (a video's `f`, a page's fullscreen button, a
+game) or with `Mod+Shift+f`. It covers its whole monitor, bar included, with no gaps or
+borders; only Overlay layers (dune-finder, notifications set to `layer=overlay` in mako)
+and the pointer show over it.
+
+```text
+   Mod+Shift+f (or the app's own key)
+  ┌─ waybar ────────────────────┐      ┌─────────────────────────────┐
+  │┌──────┐┌────────┐┌──────┐   │      │                             │
+  ││  A   ││ video  ││  C   │   │ ──►  │           video             │
+  │└──────┘└────────┘└──────┘   │      │                             │
+  └─────────────────────────────┘      └─────────────────────────────┘
+```
+
+It keeps its place in the strip (or as a float): leaving fullscreen puts it back. It
+ends with the same key, the app's own key (Esc in a browser), closing it, or focus
+going to another tile of that monitor (`Mod+h/l`, a new window, a notification). Going
+to another desktop and back keeps it.
 
 ## Floating tiles and the scratchpad
 
@@ -479,7 +501,8 @@ and `none` turns it off. Environment variables win over the file: `XKB_DEFAULT_*
 | `Mod+Shift+t` | empty tab | `Mod+Tab` / `Mod+Shift+Tab` | next / prev tab |
 | `Mod+=` / `Mod+-` | column width | `Mod+Shift+=` / `Mod+Shift+-` | tile height |
 | `Mod+Ctrl+=` / `Mod+Ctrl+-` | width in row | `Mod+r` | cycle width |
-| `Mod+f` | full width | `Mod+Space` | center |
+| `Mod+f` | full width | `Mod+Shift+f` | fullscreen |
+| `Mod+Space` | center | | |
 | `Mod+Shift+Space` | float | `` Mod+Shift+` `` | to scratchpad |
 | `` Mod+` `` | scratchpad | `Mod+q` | close |
 | `Mod+d` | launcher | `Mod+/` | tile options |

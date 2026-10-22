@@ -44,6 +44,8 @@ enum Action {
     RowWidth(f64),
     CycleWidth,
     FullWidth,
+    /// The focused tile over its whole monitor (again: back).
+    Fullscreen,
     /// Center the focused column on its monitor (again: stop centering it).
     Center,
     /// Float the focused tile in the middle of its monitor (again: back into the strip).
@@ -113,6 +115,7 @@ impl From<Binding> for Action {
             Binding::RowNarrower => Action::RowWidth(-RESIZE_STEP),
             Binding::CycleWidth => Action::CycleWidth,
             Binding::FullWidth => Action::FullWidth,
+            Binding::Fullscreen => Action::Fullscreen,
             Binding::Center => Action::Center,
             Binding::Float => Action::ToggleFloat,
             Binding::SendToScratchpad => Action::SendToScratchpad,
@@ -550,6 +553,12 @@ impl Dune {
             Action::RowWidth(delta) => self.resize_focused(delta, 0.0, |l, id| l.resize_row_width(id, delta)),
             Action::CycleWidth => self.change_focused(Layout::cycle_width),
             Action::FullWidth => self.change_focused(Layout::toggle_full_width),
+            Action::Fullscreen => {
+                if let Some(id) = self.focused {
+                    let on = !self.fullscreen.contains(&id);
+                    self.set_fullscreen(id, on);
+                }
+            }
             Action::Center => self.change_focused(Layout::toggle_center),
             Action::ToggleFloat => {
                 if let Some(id) = self.focused {

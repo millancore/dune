@@ -333,6 +333,17 @@ impl Dune {
                 .into_iter()
                 .map(OutputRenderElements::Solid),
         );
+        // A fullscreen tile covers the bars: only Overlay layers (and the pointer) are over it.
+        if let Some(cover) = self.covers.get(&output.name()).copied() {
+            elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay], true));
+            let only = |t: TileId| t == cover;
+            elements.extend(self.private_elements(renderer, output, &only));
+            if !self.privacy.tile(cover) {
+                elements.extend(self.window_elements(renderer, output, &only));
+            }
+            elements.extend(self.backdrop_elements(output, &only).into_iter().map(OutputRenderElements::Solid));
+            return elements;
+        }
         elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay, Layer::Top], true));
         // The tooltips and menus of a bar under the windows still show over them.
         elements.extend(self.layer_popup_elements(renderer, output, &[Layer::Bottom, Layer::Background]));
