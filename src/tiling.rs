@@ -1200,16 +1200,22 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// The `terminal` command run by `start_terminal`, its folder `$1`. Most terminals start
-/// their shell in their own working folder; `wezterm start` in the home folder unless
-/// given `--cwd` (empty `$1`: nothing, it stays home).
+/// their shell in their own working folder, and `$SHELL` (dune's layer); `wezterm start`
+/// starts in the home folder unless given `--cwd` (empty `$1`: nothing, it stays home),
+/// and runs the login shell of the user, not `$SHELL`, unless given a program after `--`.
 fn with_cwd_flag(terminal: &str) -> String {
     let mut words = terminal.split_whitespace();
     let wezterm = words.next().and_then(|p| p.rsplit('/').next()) == Some("wezterm");
-    let start = words.clone().any(|w| w == "start");
-    if !wezterm || !start || words.any(|w| w == "--cwd" || w.starts_with("--cwd=") || w == "--") {
+    let words: Vec<_> = words.collect();
+    if !wezterm || !words.contains(&"start") || words.contains(&"--") {
         return terminal.to_string();
     }
-    format!("{terminal} ${{1:+--cwd \"$1\"}}")
+    let mut command = terminal.to_string();
+    if !words.iter().any(|w| *w == "--cwd" || w.starts_with("--cwd=")) {
+        command.push_str(" ${1:+--cwd \"$1\"}");
+    }
+    // `-l`: still a login shell, as wezterm starts it.
+    command + " -- \"$SHELL\" -l"
 }
 
 /// The child process of `pid` (of any of its threads) started last.
@@ -1246,10 +1252,15 @@ mod tests {
 
     #[test]
     fn wezterm_start_is_given_the_folder() {
-        assert_eq!(with_cwd_flag("wezterm start --always-new-process"), "wezterm start --always-new-process ${1:+--cwd \"$1\"}");
-        assert_eq!(with_cwd_flag("/usr/bin/wezterm start"), "/usr/bin/wezterm start ${1:+--cwd \"$1\"}");
-        // Its own folder already, a program after `--`, or another terminal: as it is.
-        for terminal in ["wezterm start --cwd /tmp", "wezterm start -- htop", "wezterm", "foot", "kitty --single-instance"] {
+        assert_eq!(
+            with_cwd_flag("wezterm start --always-new-process"),
+            "wezterm start --always-new-process ${1:+--cwd \"$1\"} -- \"$SHELL\" -l"
+        );
+        assert_eq!(with_cwd_flag("/usr/bin/wezterm start"), "/usr/bin/wezterm start ${1:+--cwd \"$1\"} -- \"$SHELL\" -l");
+        // Its own folder already: only the shell.
+        assert_eq!(with_cwd_flag("wezterm start --cwd /tmp"), "wezterm start --cwd /tmp -- \"$SHELL\" -l");
+        // A program after `--`, or another terminal: as it is.
+        for terminal in ["wezterm start -- htop", "wezterm", "foot", "kitty --single-instance"] {
             assert_eq!(with_cwd_flag(terminal), terminal);
         }
         let run = |dir: &str| {
@@ -1257,12 +1268,13 @@ mod tests {
                 .arg("-c")
                 .arg(format!("printf '[%s]' {}", with_cwd_flag("wezterm start")))
                 .args(["sh", dir])
+                .env("SHELL", "/run/dune-shell")
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
         };
-        assert_eq!(run("/tmp/a b"), "[wezterm][start][--cwd][/tmp/a b]");
-        assert_eq!(run(""), "[wezterm][start]");
+        assert_eq!(run("/tmp/a b"), "[wezterm][start][--cwd][/tmp/a b][--][/run/dune-shell][-l]");
+        assert_eq!(run(""), "[wezterm][start][--][/run/dune-shell][-l]");
     }
 
     #[test]
