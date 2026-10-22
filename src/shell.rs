@@ -2,8 +2,8 @@
 //!
 //! Terminal tiles are started with `SHELL` pointing at dune (as `dune-shell`), so any
 //! terminal emulator runs this instead of the user's shell. It starts the real shell
-//! (`DUNE_USER_SHELL`) on a new PTY and copies bytes both ways, passing what is typed
-//! through the shared layer (`dune_common::at`).
+//! (`DUNE_USER_SHELL`) on a new PTY and copies bytes both ways; the shared layer
+//! (`dune_common::at`) types a `DUNE_RUN` command once the shell is ready.
 
 use std::{
     ffi::{CString, OsString},
@@ -67,7 +67,7 @@ pub fn run(argv0: &str, args: Vec<OsString>) -> ! {
     termios::cfmakeraw(&mut raw);
     let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &raw);
 
-    let at = AtLayer::from_env(child.as_raw() as u32);
+    let at = AtLayer::from_env();
     let code = Wrapper { child, master, at }.run();
 
     let _ = termios::tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &saved);
@@ -175,11 +175,7 @@ impl Wrapper {
             if input_ready {
                 match read(stdin.as_fd(), &mut buf) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        let at_prompt = self.at_prompt();
-                        let to_shell = self.at.input(&buf[..n], at_prompt);
-                        write_all(self.master.as_fd(), &to_shell);
-                    }
+                    Ok(n) => write_all(self.master.as_fd(), &buf[..n]),
                     Err(_) => {}
                 }
             }

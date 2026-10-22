@@ -1,8 +1,8 @@
-//! Tile management: spawning terminal tiles, placing new windows, swallowing and focus.
+//! Tile management: spawning terminal tiles, placing new windows and focus.
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
 };
@@ -264,8 +264,7 @@ impl Dune {
     }
 
     /// Mod+t: the focused tile, sharing its tab with others, leaves them for a tab of its
-    /// own in its column. Alone, the windows living inside it (swallowed, or stacked in
-    /// it) each get a tile of their own, as tabs of its column after it; with none, see
+    /// own in its column. Alone, the windows stacked inside it each get a tile of their own, as tabs of its column after it; with none, see
     /// `leave_tab`.
     pub fn stack_to_tabs(&mut self) {
         let Some(id) = self.focused else { return };
@@ -405,8 +404,8 @@ impl Dune {
     ///    window nothing claims, the latest launch's) goes where the launcher was told:
     ///    a new tab of the focused tile's container, its empty container, or a new tile
     ///    on some monitor and desktop;
-    /// 3. a program a tile's shell ran in place (`DUNE_RUN`) swallows the tile it was started from: its
-    ///    process descends from a shell that announced a swallow for that tile;
+    /// 3. a program started with `dune-open` in a terminal tile goes on top of that tile:
+    ///    its process descends from the one the `swallow` request named;
     /// 4. anything else gets a new tile next to the focused one.
     pub fn place_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface.clone());
@@ -417,16 +416,11 @@ impl Dune {
             let pid = pid?;
             self.launches.iter().find(|(_, l)| l.pid.is_some_and(|p| is_descendant(pid, p))).map(|(n, _)| *n)
         });
-        let swallow = pid.and_then(|pid| {
-            self.swallows
-                .iter()
-                .find(|(tile, shell)| self.tiles.contains_key(tile) && is_descendant(pid, **shell))
-                .map(|(tile, _)| *tile)
-        });
+        self.swallows.retain(|tile, pid| self.tiles.contains_key(tile) && Path::new(&format!("/proc/{pid}")).exists());
+        let swallow = pid.and_then(|pid| self.swallows.iter().find(|(_, p)| is_descendant(pid, **p)).map(|(tile, _)| *tile));
         // A window nothing claims goes where the latest launch was told to.
         let launch_n = launch_n.or_else(|| {
-            let unclaimed = env_tile.is_none() && swallow.is_none();
-            unclaimed.then(|| crate::launcher::unclaimed_launch(&self.launches, std::time::Instant::now())).flatten()
+            (env_tile.is_none() && swallow.is_none()).then(|| crate::launcher::unclaimed_launch(&self.launches, std::time::Instant::now())).flatten()
         });
         let launch = launch_n.and_then(|n| self.launches.remove(&n));
 
@@ -445,7 +439,7 @@ impl Dune {
             (id, "its empty container")
         } else if let Some(id) = tab_target.and_then(|t| self.tab_tile(t)) {
             (id, "a tab of its tile")
-        } else if let Some(id) = tab_target.or(swallow).filter(|t| self.tiles.contains_key(t)) {
+        } else if let Some(id) = tab_target.or(swallow) {
             if let Some(old) = self.tiles[&id].top().cloned() {
                 self.space.unmap_elem(&old);
             }
@@ -489,7 +483,7 @@ impl Dune {
         self.update_focus();
     }
 
-    /// A toplevel went away: reveal what it swallowed, or drop the tile when it was the last window.
+    /// A toplevel went away: show the window under it, or drop the tile when it was the last window.
     pub fn remove_toplevel(&mut self, surface: &ToplevelSurface) {
         let found = self.tiles.iter().find_map(|(id, tile)| {
             tile.stack
@@ -1042,11 +1036,11 @@ impl Dune {
             Request::Open { side, from, cwd, command } => {
                 self.spawn_terminal(from, side, cwd, Some(command));
             }
-            Request::Swallow { tile, shell_pid } => {
-                self.swallows.insert(tile, shell_pid);
-            }
-            Request::Unswallow { tile } => {
-                self.swallows.remove(&tile);
+            Request::Swallow { tile, pid } => {
+                if self.tiles.contains_key(&tile) {
+                    self.swallows.insert(tile, pid);
+                }
+                return Some("ok".into());
             }
             Request::Windows => return Some(WindowInfo::encode_all(&self.window_list(false))),
             Request::LockedWindows => return Some(WindowInfo::encode_all(&self.window_list(true))),

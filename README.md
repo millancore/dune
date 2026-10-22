@@ -45,7 +45,7 @@ folder jumper, the tile menu and the power menu.
 ## Install
 
 ```sh
-make install          # dune, dune-finder and dune-session into ~/.cargo/bin,
+make install          # dune, dune-open, dune-finder and dune-session into ~/.cargo/bin,
                       # plus the portal settings into ~/.config (no root needed)
 make install-session  # the "Dune" entry of the login screen (asks for sudo)
 ```
@@ -256,19 +256,31 @@ its tab.
 
 ## Terminals
 
-Terminal tiles run a small shell wrapper between the terminal and your shell. It lets dune
-know the folder each terminal is in and which tile a program's windows belong to:
+Terminals open where you work, and console programs get one of their own:
 
 - `Mod+v` / `Mod+s` / `terminal_tab` open a terminal in the focused terminal's folder.
-- **Swallowing**: a graphical program started from a terminal (with `dune open` or from
-  dune-finder) takes the terminal's place and gives it back when it exits.
+- A console program chosen in dune-finder, or `dune open COMMAND`, gets a new terminal
+  with the command typed in once your shell has started (its rc files run first).
 - The folders terminals work in feed dune-finder's jump list.
 
 ```text
-  ┌───────────────┐   $ mpv video.mkv   ┌───────────────┐   mpv exits   ┌───────────────┐
-  │ $ _           │  ───────────────►   │   mpv window  │  ──────────►  │ $ _           │
-  └───────────────┘                     └───────────────┘               └───────────────┘
+  ┌──────────────────────┐            ┌──────────────────────┬──────────────────────┐
+  │ ~/projects/dune $ _  │   Mod+v    │ ~/projects/dune $    │ ~/projects/dune $ _  │
+  │                      │  ───────►  │                      │                      │
+  └──────────────────────┘            └──────────────────────┴──────────────────────┘
 ```
+
+**`dune-open COMMAND`** runs a program in the terminal's own tile: its windows cover the
+terminal, which shows again when they close. Outside a terminal of dune it just runs
+the command.
+
+```text
+  ┌───────────────┐  $ dune-open mpv video.mkv  ┌───────────────┐   mpv exits   ┌───────────────┐
+  │ $ _           │  ─────────────────────────► │   mpv window  │  ──────────►  │ $ _           │
+  └───────────────┘                             └───────────────┘               └───────────────┘
+```
+
+A shell alias makes it a habit: `alias o=dune-open`, then `o mpv video.mkv`.
 
 ## dune-finder
 
@@ -401,6 +413,7 @@ ext/wlr data control, so wl-copy and wl-paste work.
 
 ```sh
 dune open [--split l|r|u|d] [--from TILE] [--cwd DIR] [--] COMMAND...   # a terminal tile
+dune-open COMMAND...                     # in a terminal: the program takes its tile
 dune scratchpad show | watch
 dune recording stop | watch
 ```

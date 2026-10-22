@@ -1,6 +1,6 @@
 # dune: build, check and install.
 #
-#   make install          dune, dune-finder and dune-session into ~/.cargo/bin, plus the
+#   make install          dune, dune-open, dune-finder and dune-session into ~/.cargo/bin, plus the
 #                         portal settings into ~/.config (no root needed)
 #   make install-session  the "Dune" entry of the login screen (asks for sudo)
 #   make check            tests and clippy for the whole workspace

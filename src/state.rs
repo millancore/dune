@@ -28,9 +28,9 @@ use smithay::{
 
 use crate::layout::{Layout, Rect, Side, TileId};
 
-/// One slot of the layout. `stack[0]` is the tile's terminal; programs it runs in
-/// place (`DUNE_RUN`) are pushed on top and "swallow" it until they close. The last window
-/// is the one shown.
+/// One slot of the layout: its windows, the first one put in it at the bottom. A program
+/// started with `dune-open` in its terminal, or an app launched as a tab of a float, is
+/// stacked on top until it closes; the last window is the one shown.
 #[derive(Debug, Default)]
 pub struct Tile {
     pub stack: Vec<Window>,
@@ -141,7 +141,8 @@ pub struct Dune {
     /// `dune scratchpad watch` connections, and the last line they were sent.
     pub scratchpad_watchers: Vec<std::os::unix::net::UnixStream>,
     pub scratchpad_status: String,
-    /// Tiles waiting for the window of a `DUNE_RUN` command, with the pid of the shell that started it.
+    /// Tiles whose next windows are those of a process (`dune-open`, a `swallow` request)
+    /// and its children, with its pid, while it lives.
     pub swallows: HashMap<TileId, u32>,
     /// Apps the launcher started on their own, by their `DUNE_LAUNCH` number: where their
     /// first window goes, and when they started.
@@ -360,9 +361,9 @@ impl Dune {
             hidden: HashMap::new(),
             scratchpad: Vec::new(),
             scratch_shown: HashSet::new(),
+            swallows: HashMap::new(),
             scratchpad_watchers: Vec::new(),
             scratchpad_status: String::new(),
-            swallows: HashMap::new(),
             launches: HashMap::new(),
             next_launch: 1,
             unclaimed_window: None,

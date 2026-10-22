@@ -6,6 +6,7 @@ name = "dune"
 version = "0.1.0"
 edition = "2024"
 description = "A terminal-first tiling Wayland compositor built on Smithay"
+default-run = "dune"
 
 [dependencies]
 dune-common = { path = "dune-common" }

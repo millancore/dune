@@ -5,9 +5,8 @@
 //! - `open\t<l|r|u|d|->\t<from tile or empty>\t<cwd>\t<command>` — open a terminal tile
 //!   on that side of the tile (`v` and `h` are accepted for `r` and `d`); the command is
 //!   last so it may contain anything, tabs and newlines included;
-//! - `swallow\t<tile>\t<shell pid>` — the next windows of processes started by that
-//!   shell take the tile's place (a `DUNE_RUN` command);
-//! - `unswallow\t<tile>` — that command finished;
+//! - `swallow\t<tile>\t<pid>` — the windows of that process and its children go to the tile,
+//!   on top of what it shows, until the process is gone (`dune-open`); answered `ok`;
 //! - `keys\t<code>:<p|r> ...` — testing aid, honoured only with `DUNE_DEBUG=1`;
 //! - `windows` — answered with every window, one per line (`WindowInfo::encode_all`),
 //!   but those on locked desktops;
@@ -407,10 +406,7 @@ pub enum Request {
     },
     Swallow {
         tile: TileId,
-        shell_pid: u32,
-    },
-    Unswallow {
-        tile: TileId,
+        pid: u32,
     },
     /// (xkb keycode, pressed) pairs fed in as if typed on the keyboard.
     Keys(Vec<(u32, bool)>),
@@ -467,8 +463,7 @@ impl Request {
                 let cwd = cwd.as_deref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
                 format!("open\t{split}\t{from}\t{cwd}\t{command}")
             }
-            Request::Swallow { tile, shell_pid } => format!("swallow\t{tile}\t{shell_pid}"),
-            Request::Unswallow { tile } => format!("unswallow\t{tile}"),
+            Request::Swallow { tile, pid } => format!("swallow\t{tile}\t{pid}"),
             Request::Keys(keys) => {
                 let keys: Vec<String> = keys
                     .iter()
@@ -527,12 +522,8 @@ impl Request {
             }
             "swallow" => {
                 let (tile, pid) = rest.split_once('\t')?;
-                Some(Request::Swallow {
-                    tile: tile.parse().ok()?,
-                    shell_pid: pid.parse().ok()?,
-                })
+                Some(Request::Swallow { tile: tile.parse().ok()?, pid: pid.parse().ok()? })
             }
-            "unswallow" => Some(Request::Unswallow { tile: rest.parse().ok()? }),
             "keys" => rest
                 .split_whitespace()
                 .map(|k| {
@@ -651,8 +642,7 @@ mod tests {
                 command: "vim index.php\tweird\nname".into(),
             },
             Request::Open { side: None, from: None, cwd: None, command: String::new() },
-            Request::Swallow { tile: 2, shell_pid: 4242 },
-            Request::Unswallow { tile: 2 },
+            Request::Swallow { tile: 2, pid: 4242 },
             Request::Keys(vec![(38, true), (38, false)]),
             Request::Windows,
             Request::GoTo { tile: 9 },
@@ -800,6 +790,7 @@ mod tests {
     fn rejects_unknown_requests() {
         assert_eq!(Request::decode("close\t-\t\t\t"), None);
         assert_eq!(Request::decode("swallow\tx\t1"), None);
+        assert_eq!(Request::decode("unswallow\t2"), None);
         assert_eq!(Request::decode("launch\tz,0,,\t\t\t0\tx"), None);
         assert_eq!(Request::decode("goto\t"), None);
         assert_eq!(Request::decode("unlock\t"), None);

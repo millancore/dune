@@ -151,8 +151,7 @@ def main():
             time.sleep(1.0)
             s.screen += drain(s.fd, 0.3)
             check(os.path.exists(ran) and "RAN first" in open(ran).read(), f"[{name}] DUNE_RUN runs at start", s)
-            check(any(r.startswith(f"swallow\t{TILE}\t") for r in fake.requests), f"[{name}] DUNE_RUN swallow: {fake.requests}")
-            check(f"unswallow\t{TILE}" not in fake.requests[:1], f"[{name}] startup programs don't end the swallow early: {fake.requests}")
+            check(fake.requests == [], f"[{name}] DUNE_RUN asks nothing of dune: {fake.requests}")
             check(s.text().find("rc-loaded") < s.text().find("dunetestprog first"),
                   f"[{name}] DUNE_RUN is typed after the shell finished starting", s)
             s.close()
