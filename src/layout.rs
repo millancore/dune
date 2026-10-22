@@ -1025,6 +1025,11 @@ impl Layout {
         self.slid = Some(focus);
     }
 
+    /// Let the view follow focus again after a slide by hand.
+    pub fn stop_sliding(&mut self) {
+        self.slid = None;
+    }
+
     /// Lay the strip out in `area`, leaving `gap` pixels around and between columns and
     /// `sep` pixels between the tiles inside a column (room for one shared border), and
     /// slide the view so that `focus` (when it is here) is shown whole. Tiles off the
@@ -1374,6 +1379,11 @@ mod tests {
         assert!(r2.x >= 0 && r2.x + r2.w <= AREA.w, "2 focused: shown whole");
         let back = geo(&mut l, 1);
         assert_eq!(x_of(&back, 1), before, "1 focused again: shown whole");
+        // Or the slide stopping, focus staying.
+        l.slide_view(300, Some(1));
+        geo(&mut l, 1);
+        l.stop_sliding();
+        assert_eq!(x_of(&geo(&mut l, 1), 1), before);
     }
 
     #[test]

@@ -826,6 +826,15 @@ impl Dune {
                             self.open_folded(id);
                         } else if self.focused != Some(id) {
                             self.focus_tile(id);
+                        } else if !self.geometries.iter().any(|(t, r)| *t == id && self.shown.contains(&(*t, *r))) {
+                            // Focused already but partly off its monitor (slid there by hand):
+                            // the view brings it back whole.
+                            for layout in self.layouts.values_mut() {
+                                if layout.contains(id) {
+                                    layout.stop_sliding();
+                                }
+                            }
+                            self.arrange();
                         }
                     }
                 };
