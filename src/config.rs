@@ -1,106 +1,120 @@
-//! Settings from `~/.config/dune/config` (or `$XDG_CONFIG_HOME/dune/config`).
+//! Settings from `~/.config/dune/dune.toml` (or `$XDG_CONFIG_HOME/dune/dune.toml`), in
+//! TOML; dune-finder's are in `finder.toml` next to it (see dune-finder). Every setting is
+//! optional:
 //!
-//! One `key = value` per line, `#` starts a comment:
-//!
-//! ```text
-//! keyboard_layout = us
-//! keyboard_variant = dvorak
-//! repeat_delay = 500      # ms a held key waits before repeating
-//! repeat_rate = 25        # repeats per second while held
-//! terminal = wezterm start --always-new-process  # or foot, alacritty, ...
-//! modifier = alt          # alt, super or ctrl+alt: `mod` in the keys below, and Mod+mouse
-//! lock_command = swaylock -f   # what the `lock` key runs; default swaylock -f
-//! follow = true          # go to the desktop an app is launched on (`firefox :d3`); default false
+//! ```toml
+//! terminal = "wezterm start --always-new-process"  # or foot, alacritty, ...
+//! modifier = "alt"            # alt, super or ctrl+alt: `mod` in the keys below, and Mod+mouse
+//! lock_command = "swaylock -f"  # what the `lock` key runs; default swaylock -f
+//! follow = true               # go to the desktop an app is launched on (`firefox :d3`); default false
 //! focus_follows_mouse = true  # the tile under the pointer takes focus (when all of it is on screen); default false
-//! xwayland = satellite    # X11 apps through xwayland-satellite, or `off`
-//! font_family = JetBrains Mono   # tab titles and dune-finder
-//! tab_min_width = 200     # px a tab shrinks to before its bar scrolls; default 200
-//! tab_max_width = 220     # px a tab grows to while there is room; default 220
-//! icon_theme = Papirus-Dark      # dune-finder icons; default: the desktop's (gsettings / GTK)
-//! file_manager = yazi     # terminal file manager dune-finder's `#` opens with Mod+Enter; default yazi
-//! file_manager_terminal = foot  # terminal it runs in (foot shows yazi's image previews); default `terminal`
-//! border_color = none     # border of tiles without focus: RRGGBB or RRGGBBAA (no `#`), or none; default ffffff
-//! fold_click = mod+right  # fold the tile under the pointer into the accordion (on a folded one: open it); default none
-//! exec = waybar           # run when dune starts; one line per program, as many as needed
-//! screenshot_dir = ~/shots       # where the `screenshot` keys save; default $XDG_PICTURES_DIR/Screenshots, else ~/Pictures/Screenshots
-//! recording_dir = ~/videos       # where `record` saves; default $XDG_VIDEOS_DIR, else ~/Videos
+//! xwayland = "satellite"      # X11 apps through xwayland-satellite, or "off"
+//! font = "JetBrains Mono"     # tab titles; default monospace
+//! border_color = "#ffffff"    # border of tiles without focus: #RRGGBB or #RRGGBBAA, or "none"; default white
+//! exec = ["waybar", "mako"]   # run when dune starts, in order
+//!
+//! [keyboard]
+//! layout = "us"
+//! variant = "dvorak"
+//! options = "caps:escape"     # also `model` and `rules`
+//! repeat_delay = 500          # ms a held key waits before repeating (100-2000)
+//! repeat_rate = 25            # repeats per second while held (1-100)
+//!
+//! [tabs]
+//! min_width = 200             # px a tab shrinks to before its bar scrolls; default 200
+//! max_width = 220             # px a tab grows to while there is room; default 220
+//!
+//! [capture]
+//! screenshot_dir = "~/shots"  # where the `screenshot` keys save; default $XDG_PICTURES_DIR/Screenshots, else ~/Pictures/Screenshots
+//! recording_dir = "~/videos"  # where `record` saves; default $XDG_VIDEOS_DIR, else ~/Videos
+//!
+//! [mouse]
+//! fold_click = "mod+right"    # fold the tile under the pointer into the accordion (on a folded one: open it); default none
 //!
 //! # Mice and touchpads (on the real session, not nested)
-//! input.left_handed = true      # swap the left and right buttons
-//! input.natural_scroll = false  # content follows the fingers
-//! input.tap = true              # tap to click on touchpads
-//! input.accel_speed = 0.0       # pointer acceleration, -1.0 (slow) to 1.0 (fast)
+//! [input]
+//! left_handed = true          # swap the left and right buttons
+//! natural_scroll = false      # content follows the fingers
+//! tap = true                  # tap to click on touchpads
+//! accel_speed = 0.0           # pointer acceleration, -1.0 (slow) to 1.0 (fast)
 //!
 //! # Monitors, by connector name (dune logs them as `monitor HDMI-A-1: ...`)
-//! output.HDMI-A-1.mode = 2560x1080@60   # WIDTHxHEIGHT[@HZ]; default: the monitor's preferred mode
-//! output.HDMI-A-1.position = 0,0        # top-left corner; unset ones go to the right of the rest
-//! output.DP-1.off = true                # leave this monitor dark
+//! [output.HDMI-A-1]
+//! mode = "2560x1080@60"       # WIDTHxHEIGHT[@HZ]; default: the monitor's preferred mode
+//! position = [0, 0]           # top-left corner; unset ones go to the right of the rest
+//! [output.DP-1]
+//! off = true                  # leave this monitor dark
 //! ```
 //!
-//! Keys: every compositor key has a name, set like `close = super+q, super+'`. A value is
-//! one or more keys separated by commas and replaces that key's defaults; `none` turns it
-//! off; one that is not a key (a typo) is warned about and the defaults stay. `mod` stands
-//! for `modifier`, the rest are `super`, `alt`, `ctrl` and `shift`, then a key name as
-//! xkb writes it (`Return`, `slash`, `comma`, `Escape`) or one character (`q`, `'`). Keys
-//! are the unshifted ones, so Mod+Shift+1 is `mod+shift+1`, and `mod+E` is `mod+e`. A key
-//! two names share goes to the one listed first here (a warning tells), so with
-//! `modifier = ctrl+alt` the Ctrl keys (`move_tab_*`, `row_*`) give way. Ctrl+Alt+F1..F12
-//! switch VTs on a real session, always. The defaults:
+//! A setting dune does not know, or a value that is not one (a key that is not a key, a
+//! number out of range), is warned about in the log and the default stays. A file that is
+//! not TOML, or a value of the wrong type (`follow = "yes"`), is reported with its line;
+//! dune then starts with the defaults, or keeps the settings it has when the file is saved.
 //!
-//! ```text
-//! focus_left = mod+h, mod+Left        # focus the tile that way
-//! focus_down = mod+j, mod+Down
-//! focus_up = mod+k, mod+Up
-//! focus_right = mod+l, mod+Right
-//! swap_left = mod+shift+h, mod+shift+Left        # swap the tile with the one that way
-//! swap_down = mod+shift+j, mod+shift+Down
-//! swap_up = mod+shift+k, mod+shift+Up
-//! swap_right = mod+shift+l, mod+shift+Right
-//! move_tab_left = mod+ctrl+h, mod+ctrl+Left      # join the column that way as a tab, or leave a tabbed one
-//! move_tab_down = mod+ctrl+j, mod+ctrl+Down
-//! move_tab_up = mod+ctrl+k, mod+ctrl+Up
-//! move_tab_right = mod+ctrl+l, mod+ctrl+Right
-//! focus_monitor_left = none           # focus the monitor that way (monitors stacked: mod+Up / mod+Down,
-//! focus_monitor_down = none           # with those keys taken out of focus_up / focus_down)
-//! focus_monitor_up = none
-//! focus_monitor_right = none
-//! desk_1 = mod+1                      # show that desktop (desk_1 .. desk_9: mod+1 .. mod+9)
-//! send_to_desk_1 = mod+shift+1        # send the tile there (send_to_desk_1 .. _9: mod+shift+1 .. 9)
-//! empty_container = mod+Return        # an empty container, dune-finder to fill it
-//! empty_tab = mod+shift+t             # one as the next tab of the focused tile's container
-//! next_tab = mod+Tab
-//! prev_tab = mod+shift+Tab, mod+shift+ISO_Left_Tab
-//! wider = mod+equal, mod+plus         # the column's width
-//! narrower = mod+minus
-//! taller = mod+shift+equal, mod+shift+plus       # the tile's height
-//! shorter = mod+shift+minus, mod+shift+underscore
-//! row_wider = mod+ctrl+equal, mod+ctrl+plus      # the tile's width inside its row
-//! row_narrower = mod+ctrl+minus
-//! cycle_width = mod+r
-//! full_width = mod+f
-//! fullscreen = mod+shift+f            # the tile over its whole monitor, bar too (again: back)
-//! center = mod+space                  # center the column (again: stop)
-//! float = mod+shift+space             # float the tile (again: back into the strip)
-//! send_to_scratchpad = mod+shift+grave  # the tile off every desktop, into the scratchpad
-//! scratchpad = mod+grave              # the next scratchpad window floats here (on it again: back)
-//! close = mod+q
-//! launcher = mod+d                    # dune-finder on the apps
-//! tile_options = mod+slash            # dune-finder on the focused tile's options (private, float, ...)
-//! switcher = none                     # dune-finder on the windows (`/` in it gets there too)
-//! private_tile = none                 # block the focused tile on screen and in captures (again: show it)
-//! fold = none                         # fold the focused tile into the accordion (on a folded one: open it)
-//! terminal_vertical = mod+v           # a terminal right of the tile, in its folder
-//! terminal_horizontal = mod+s         # one below it
-//! terminal_tab = none                 # one as a new tab of its container
-//! stack_to_tabs = mod+t
-//! quit = mod+shift+e
-//! lock = mod+Escape                   # runs `lock_command`
-//! screenshot = Print                  # of a region chosen with the mouse (Esc: none)
-//! screenshot_tile = ctrl+Print        # of the focused tile
-//! screenshot_screen = shift+Print     # of the active monitor
-//! record = mod+shift+r                # record a region chosen with the mouse (any record key again: stop)
-//! record_tile = mod+ctrl+r            # record the focused tile
-//! record_screen = mod+ctrl+shift+r    # record the active monitor
+//! Keys, in `[keys]`: every compositor key has a name, set like `close = ["super+q",
+//! "super+'"]` (or one key, `close = "super+q"`). A value replaces that key's defaults;
+//! `"none"` (or `[]`) turns it off. `mod` stands for `modifier`, the rest are `super`, `alt`,
+//! `ctrl` and `shift`, then a key name as xkb writes it (`Return`, `slash`, `comma`,
+//! `Escape`) or one character (`q`, `'`). Keys are the unshifted ones, so Mod+Shift+1 is
+//! `mod+shift+1`, and `mod+E` is `mod+e`. A key two names share goes to the one listed
+//! first here (a warning tells), so with `modifier = "ctrl+alt"` the Ctrl keys (`move_tab_*`,
+//! `row_*`) give way. Ctrl+Alt+F1..F12 switch VTs on a real session, always. The defaults:
+//!
+//! ```toml
+//! [keys]
+//! focus_left = ["mod+h", "mod+Left"]  # focus the tile that way
+//! focus_down = ["mod+j", "mod+Down"]
+//! focus_up = ["mod+k", "mod+Up"]
+//! focus_right = ["mod+l", "mod+Right"]
+//! swap_left = ["mod+shift+h", "mod+shift+Left"]  # swap the tile with the one that way
+//! swap_down = ["mod+shift+j", "mod+shift+Down"]
+//! swap_up = ["mod+shift+k", "mod+shift+Up"]
+//! swap_right = ["mod+shift+l", "mod+shift+Right"]
+//! move_tab_left = ["mod+ctrl+h", "mod+ctrl+Left"]  # join the column that way as a tab, or leave a tabbed one
+//! move_tab_down = ["mod+ctrl+j", "mod+ctrl+Down"]
+//! move_tab_up = ["mod+ctrl+k", "mod+ctrl+Up"]
+//! move_tab_right = ["mod+ctrl+l", "mod+ctrl+Right"]
+//! focus_monitor_left = "none"         # focus the monitor that way (monitors stacked: mod+Up / mod+Down,
+//! focus_monitor_down = "none"         # with those keys taken out of focus_up / focus_down)
+//! focus_monitor_up = "none"
+//! focus_monitor_right = "none"
+//! desk_1 = "mod+1"                    # show that desktop (desk_1 .. desk_9: mod+1 .. mod+9)
+//! send_to_desk_1 = "mod+shift+1"      # send the tile there (send_to_desk_1 .. _9: mod+shift+1 .. 9)
+//! empty_container = "mod+Return"      # an empty container, dune-finder to fill it
+//! empty_tab = "mod+shift+t"           # one as the next tab of the focused tile's container
+//! next_tab = "mod+Tab"
+//! prev_tab = ["mod+shift+Tab", "mod+shift+ISO_Left_Tab"]
+//! wider = ["mod+equal", "mod+plus"]   # the column's width
+//! narrower = "mod+minus"
+//! taller = ["mod+shift+equal", "mod+shift+plus"]  # the tile's height
+//! shorter = ["mod+shift+minus", "mod+shift+underscore"]
+//! row_wider = ["mod+ctrl+equal", "mod+ctrl+plus"]  # the tile's width inside its row
+//! row_narrower = "mod+ctrl+minus"
+//! cycle_width = "mod+r"
+//! full_width = "mod+f"
+//! fullscreen = "mod+shift+f"          # the tile over its whole monitor, bar too (again: back)
+//! center = "mod+space"                # center the column (again: stop)
+//! float = "mod+shift+space"           # float the tile (again: back into the strip)
+//! send_to_scratchpad = "mod+shift+grave"  # the tile off every desktop, into the scratchpad
+//! scratchpad = "mod+grave"            # the next scratchpad window floats here (on it again: back)
+//! close = "mod+q"
+//! launcher = "mod+d"                  # dune-finder on the apps
+//! tile_options = "mod+slash"          # dune-finder on the focused tile's options (private, float, ...)
+//! switcher = "none"                   # dune-finder on the windows (`/` in it gets there too)
+//! private_tile = "none"               # block the focused tile on screen and in captures (again: show it)
+//! fold = "none"                       # fold the focused tile into the accordion (on a folded one: open it)
+//! terminal_vertical = "mod+v"         # a terminal right of the tile, in its folder
+//! terminal_horizontal = "mod+s"       # one below it
+//! terminal_tab = "none"               # one as a new tab of its container
+//! stack_to_tabs = "mod+t"
+//! quit = "mod+shift+e"
+//! lock = "mod+Escape"                 # runs `lock_command`
+//! screenshot = "Print"                # of a region chosen with the mouse (Esc: none)
+//! screenshot_tile = "ctrl+Print"      # of the focused tile
+//! screenshot_screen = "shift+Print"   # of the active monitor
+//! record = "mod+shift+r"              # record a region chosen with the mouse (any record key again: stop)
+//! record_tile = "mod+ctrl+r"          # record the focused tile
+//! record_screen = "mod+ctrl+shift+r"  # record the active monitor
 //! ```
 //!
 //! The pointer pushing on against the left or right edge of the screens slides the strip
@@ -117,7 +131,7 @@
 //! empty container with dune-finder for it: Enter right away puts a terminal (`terminal`)
 //! there, a program chosen or typed goes there instead. `#` typed first shows the files of
 //! the home folder: Enter opens a folder or a file (`xdg-open`), Mod+Enter the
-//! `file_manager` at it. `>` typed first jumps, like zoxide's `z`: the folders terminals
+//! `file_manager` (finder.toml) at it. `>` typed first jumps, like zoxide's `z`: the folders terminals
 //! worked in (and the finder opened), the most used and recent first; Enter opens a
 //! terminal there, Mod+Enter the `file_manager`.
 //!
@@ -126,7 +140,7 @@
 //! list until something is typed). A Mod+click elsewhere floats the tile.
 //!
 //! Tabs belong to columns (each tab with its own splits) and have keys (their only settings
-//! are `tab_min_width` and `tab_max_width`):
+//! are `[tabs]` `min_width` and `max_width`):
 //! Mod+Tab / Mod+Shift+Tab show the next / previous tab, Mod+Ctrl+direction joins the
 //! column that way as a tab (or leaves a tabbed one), Mod+t sends a tile out of its split
 //! into a tab of its own (a lone tile: a bar with it as the one tab), a click on a tab
@@ -158,13 +172,15 @@
 //! `XKB_DEFAULT_OPTIONS`, `XKB_DEFAULT_MODEL`, `XKB_DEFAULT_RULES`, `DUNE_TERMINAL`, `DUNE_MOD`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
 
+use serde::Deserialize;
 use smithay::input::keyboard::{Keysym, ModifiersState, XkbConfig, xkb};
 
 use crate::layout::{Direction, TabWidths};
+
 
 /// A key with its modifiers, written like `super+Right` or `ctrl+alt+h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,15 +277,6 @@ impl ClickSpec {
     }
 }
 
-/// `fold_click`: a click, or `none` (the default); a value that is not one is warned about.
-fn fold_click(file: &HashMap<String, String>, modifier: &str) -> Option<ClickSpec> {
-    let value = file.get("fold_click").filter(|v| !v.eq_ignore_ascii_case("none"))?;
-    let click = ClickSpec::parse(value, modifier);
-    if click.is_none() {
-        tracing::warn!("ignoring `fold_click = {value}`: not modifiers and left, right or middle, nor none");
-    }
-    click
-}
 
 impl std::fmt::Display for KeySpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -390,23 +397,44 @@ fn binding_table() -> Vec<(String, Binding, String)> {
     table
 }
 
+/// The keys of a name in `[keys]`: one, or a list.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
 /// Keys separated by commas, or `none`; `None` if one of them is not a key.
 fn key_list(value: &str, modifier: &str) -> Option<Vec<KeySpec>> {
-    if value.eq_ignore_ascii_case("none") {
+    keys_of_specs(&value.split(',').collect::<Vec<_>>(), modifier)
+}
+
+/// Keys written one by one; `["none"]` or none at all: no key. `None` if one is not a key.
+fn keys_of_specs(specs: &[&str], modifier: &str) -> Option<Vec<KeySpec>> {
+    if specs.is_empty() || matches!(specs, [one] if one.trim().eq_ignore_ascii_case("none")) {
         return Some(Vec::new());
     }
-    value.split(',').map(|spec| KeySpec::parse(spec, modifier)).collect()
+    specs.iter().map(|spec| KeySpec::parse(spec, modifier)).collect()
 }
 
 /// The keys of every binding, in table order: the file's in place of the defaults.
-fn bindings(file: &HashMap<String, String>, modifier: &str) -> Vec<(Binding, KeySpec)> {
+fn bindings(file: &BTreeMap<String, Keys>, modifier: &str) -> Vec<(Binding, KeySpec)> {
+    let table = binding_table();
+    for name in file.keys().filter(|name| !table.iter().any(|(n, ..)| n == *name)) {
+        tracing::warn!("ignoring `keys.{name}`: dune has no key by that name");
+    }
     // With the name and whether the file set it, for the warnings.
     let mut taken: Vec<(String, Binding, KeySpec, bool)> = Vec::new();
-    for (name, binding, defaults) in binding_table() {
+    for (name, binding, defaults) in table {
         let set = file.get(&name).and_then(|value| {
-            let keys = key_list(value, modifier);
+            let specs: Vec<&str> = match value {
+                Keys::One(key) => vec![key],
+                Keys::Many(keys) => keys.iter().map(String::as_str).collect(),
+            };
+            let keys = keys_of_specs(&specs, modifier);
             if keys.is_none() {
-                tracing::warn!("ignoring `{name} = {value}`: not keys like mod+q, super+shift+t or none");
+                tracing::warn!("ignoring `keys.{name} = {specs:?}`: not keys like mod+q, super+shift+t or none");
             }
             keys
         });
@@ -416,7 +444,7 @@ fn bindings(file: &HashMap<String, String>, modifier: &str) -> Vec<(Binding, Key
             if let Some((other, other_binding, _, other_from_file)) = taken.iter().find(|(_, _, k, _)| *k == key) {
                 // Defaults collapsing under `modifier = ctrl+alt` are expected, not news.
                 if *other_binding != binding && (from_file || *other_from_file) {
-                    tracing::warn!("`{name}`: {key} already does `{other}`, it stays there");
+                    tracing::warn!("`keys.{name}`: {key} already does `{other}`, it stays there");
                 }
                 continue;
             }
@@ -424,6 +452,16 @@ fn bindings(file: &HashMap<String, String>, modifier: &str) -> Vec<(Binding, Key
         }
     }
     taken.into_iter().map(|(_, binding, key, _)| (binding, key)).collect()
+}
+
+/// `mouse.fold_click`: a click, or none (the default); a value that is not one is warned about.
+fn fold_click(value: Option<&str>, modifier: &str) -> Option<ClickSpec> {
+    let value = value.filter(|v| !v.eq_ignore_ascii_case("none"))?;
+    let click = ClickSpec::parse(value, modifier);
+    if click.is_none() {
+        tracing::warn!("ignoring `mouse.fold_click = {value}`: not modifiers and left, right or middle, nor none");
+    }
+    click
 }
 
 /// Where the terminal keys (`terminal_vertical`, `_horizontal`, `_tab`) open a terminal,
@@ -455,8 +493,9 @@ impl OutputMode {
     }
 }
 
-/// Mice and touchpads (`input.<field>` in the file); unset ones keep libinput's defaults.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Mice and touchpads (`[input]`); unset ones keep libinput's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct InputConfig {
     pub left_handed: Option<bool>,
     pub natural_scroll: Option<bool>,
@@ -465,7 +504,7 @@ pub struct InputConfig {
     pub accel_speed: Option<f64>,
 }
 
-/// Settings of one monitor (`output.<NAME>.<field>` in the file).
+/// Settings of one monitor (`[output.NAME]`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutputConfig {
     pub mode: Option<OutputMode>,
@@ -506,15 +545,9 @@ pub struct Config {
     pub font_family: String,
     /// How narrow and how wide tabs get in their bars.
     pub tab_widths: TabWidths,
-    /// Icon theme for dune-finder; empty: the one GTK apps use.
-    pub icon_theme: String,
-    /// The terminal file manager dune-finder opens a folder or file in (`yazi PATH`).
-    pub file_manager: String,
-    /// The terminal `file_manager` runs in (`foot yazi PATH`); empty: `terminal`.
-    pub file_manager_terminal: String,
     /// The border of tiles without focus (premultiplied RGBA); `None`: not drawn.
     pub border_color: Option<[f32; 4]>,
-    /// Shell commands run when dune starts (`exec` lines, in order).
+    /// Shell commands run when dune starts (`exec`, in order).
     pub exec: Vec<String>,
     /// Where screenshots go (`~/` for the home folder); empty: `$XDG_PICTURES_DIR/Screenshots`.
     pub screenshot_dir: String,
@@ -563,104 +596,155 @@ impl Config {
     }
 }
 
+/// `dune.toml` as written: what is missing is `None` (or empty), for `resolve` to fill in.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct File {
+    terminal: Option<String>,
+    modifier: Option<String>,
+    lock_command: Option<String>,
+    follow: bool,
+    focus_follows_mouse: bool,
+    xwayland: Option<String>,
+    font: Option<String>,
+    border_color: Option<String>,
+    exec: Vec<String>,
+    keyboard: KeyboardFile,
+    tabs: TabsFile,
+    capture: CaptureFile,
+    mouse: MouseFile,
+    input: InputConfig,
+    output: BTreeMap<String, OutputFile>,
+    keys: BTreeMap<String, Keys>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct KeyboardFile {
+    rules: Option<String>,
+    model: Option<String>,
+    layout: Option<String>,
+    variant: Option<String>,
+    options: Option<String>,
+    repeat_delay: Option<i64>,
+    repeat_rate: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TabsFile {
+    min_width: Option<i64>,
+    max_width: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CaptureFile {
+    screenshot_dir: String,
+    recording_dir: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MouseFile {
+    fold_click: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct OutputFile {
+    mode: Option<String>,
+    position: Option<[i32; 2]>,
+    off: bool,
+}
+
 /// The config a file with `text` gives, without the environment.
 #[cfg(test)]
 pub fn from_text(text: &str) -> Config {
-    resolve(&parse(text), &|_| None)
+    resolve(&parse(text).unwrap(), &|_| None)
 }
 
+/// `~/.config/dune/dune.toml`.
 pub fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("dune").join("config"))
+    Some(dune_common::config_dir()?.join("dune.toml"))
 }
 
-pub fn load() -> Config {
-    let text = path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    Config { exec: execs(&text), ..resolve(&parse(&text), &|key| std::env::var(key).ok()) }
+/// Every setting at its default (the environment still counts): no file, or one that is
+/// not TOML when dune starts.
+pub fn defaults() -> Config {
+    resolve(&File::default(), &|key| std::env::var(key).ok())
 }
 
-/// The `exec` lines: unlike other keys, each one counts.
-fn execs(text: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|line| {
-            let (key, value) = line.split('#').next().unwrap_or("").split_once('=')?;
-            (key.trim() == "exec" && !value.trim().is_empty()).then(|| value.trim().to_string())
-        })
-        .collect()
-}
-
-fn parse(text: &str) -> HashMap<String, String> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.split('#').next().unwrap_or("").trim();
-            let (key, value) = line.split_once('=')?;
-            Some((key.trim().to_string(), value.trim().to_string()))
-        })
-        .collect()
-}
-
-fn resolve(file: &HashMap<String, String>, env: &dyn Fn(&str) -> Option<String>) -> Config {
-    let get = |env_key: &str, file_key: &str, default: &str| {
-        env(env_key)
-            .filter(|v| !v.is_empty())
-            .or_else(|| file.get(file_key).cloned())
-            .unwrap_or_else(|| default.to_string())
-    };
-    // Nested inside another compositor Super is usually taken by the host.
-    let modifier = get("DUNE_MOD", "modifier", "alt");
-    Config {
-        keyboard_rules: get("XKB_DEFAULT_RULES", "keyboard_rules", ""),
-        keyboard_model: get("XKB_DEFAULT_MODEL", "keyboard_model", ""),
-        keyboard_layout: get("XKB_DEFAULT_LAYOUT", "keyboard_layout", ""),
-        keyboard_variant: get("XKB_DEFAULT_VARIANT", "keyboard_variant", ""),
-        keyboard_options: get("XKB_DEFAULT_OPTIONS", "keyboard_options", ""),
-        repeat_delay: number(file, "repeat_delay", 500, 100..=2000),
-        repeat_rate: number(file, "repeat_rate", 25, 1..=100),
-        // A new process per window: wezterm's single instance would open every window
-        // from the first one, whose `DUNE_TILE` and pid no longer find the new tile.
-        terminal: get("DUNE_TERMINAL", "terminal", "wezterm start --always-new-process"),
-        modifier: modifier.clone(),
-        xwayland: get("DUNE_XWAYLAND", "xwayland", "satellite"),
-        bindings: bindings(file, &modifier),
-        lock_command: file
-            .get("lock_command")
-            .cloned()
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(|| "swaylock -f".into()),
-        follow: flag(file, "follow"),
-        focus_follows_mouse: flag(file, "focus_follows_mouse"),
-        fold_click: fold_click(file, &modifier),
-        outputs: outputs(file),
-        input: input(file),
-        font_family: file.get("font_family").cloned().unwrap_or_else(|| "monospace".into()),
-        tab_widths: tab_widths(file),
-        icon_theme: file.get("icon_theme").cloned().unwrap_or_default(),
-        file_manager: file
-            .get("file_manager")
-            .cloned()
-            .filter(|f| !f.is_empty())
-            .unwrap_or_else(|| "yazi".into()),
-        file_manager_terminal: file
-            .get("file_manager_terminal")
-            .cloned()
-            .unwrap_or_default(),
-        border_color: border_color(file),
-        exec: Vec::new(),
-        screenshot_dir: file.get("screenshot_dir").cloned().unwrap_or_default(),
-        recording_dir: file.get("recording_dir").cloned().unwrap_or_default(),
+/// The settings of `dune.toml`; `None` (reported) when it is not TOML or a value has the
+/// wrong type. No file: the defaults.
+pub fn load() -> Option<Config> {
+    let path = path()?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    match parse(&text) {
+        Ok(file) => Some(resolve(&file, &|key| std::env::var(key).ok())),
+        Err(err) => {
+            tracing::error!("{}: {err}", path.display());
+            None
+        }
     }
 }
 
-/// `border_color`: `RRGGBB`, `RRGGBBAA` or `none`; white when missing or not one.
-fn border_color(file: &HashMap<String, String>) -> Option<[f32; 4]> {
+/// The file as TOML; a setting dune does not know is warned about.
+fn parse(text: &str) -> Result<File, toml::de::Error> {
+    let deserializer = toml::Deserializer::parse(text)?;
+    serde_ignored::deserialize(deserializer, |setting| {
+        tracing::warn!("ignoring `{setting}`: dune has no setting by that name");
+    })
+}
+
+fn resolve(file: &File, env: &dyn Fn(&str) -> Option<String>) -> Config {
+    let get = |env_key: &str, value: &Option<String>, default: &str| {
+        env(env_key)
+            .filter(|v| !v.is_empty())
+            .or_else(|| value.clone())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let keyboard = &file.keyboard;
+    // Nested inside another compositor Super is usually taken by the host.
+    let modifier = get("DUNE_MOD", &file.modifier, "alt");
+    Config {
+        keyboard_rules: get("XKB_DEFAULT_RULES", &keyboard.rules, ""),
+        keyboard_model: get("XKB_DEFAULT_MODEL", &keyboard.model, ""),
+        keyboard_layout: get("XKB_DEFAULT_LAYOUT", &keyboard.layout, ""),
+        keyboard_variant: get("XKB_DEFAULT_VARIANT", &keyboard.variant, ""),
+        keyboard_options: get("XKB_DEFAULT_OPTIONS", &keyboard.options, ""),
+        repeat_delay: number("keyboard.repeat_delay", keyboard.repeat_delay, 500, 100..=2000),
+        repeat_rate: number("keyboard.repeat_rate", keyboard.repeat_rate, 25, 1..=100),
+        // A new process per window: wezterm's single instance would open every window
+        // from the first one, whose `DUNE_TILE` and pid no longer find the new tile.
+        terminal: get("DUNE_TERMINAL", &file.terminal, "wezterm start --always-new-process"),
+        modifier: modifier.clone(),
+        xwayland: get("DUNE_XWAYLAND", &file.xwayland, "satellite"),
+        bindings: bindings(&file.keys, &modifier),
+        lock_command: file.lock_command.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "swaylock -f".into()),
+        follow: file.follow,
+        focus_follows_mouse: file.focus_follows_mouse,
+        fold_click: fold_click(file.mouse.fold_click.as_deref(), &modifier),
+        outputs: outputs(&file.output),
+        input: input(&file.input),
+        font_family: file.font.clone().filter(|f| !f.is_empty()).unwrap_or_else(|| "monospace".into()),
+        tab_widths: tab_widths(&file.tabs),
+        border_color: border_color(file.border_color.as_deref()),
+        exec: file.exec.iter().filter(|c| !c.trim().is_empty()).cloned().collect(),
+        screenshot_dir: file.capture.screenshot_dir.clone(),
+        recording_dir: file.capture.recording_dir.clone(),
+    }
+}
+
+/// `border_color`: `#RRGGBB`, `#RRGGBBAA` (the `#` optional) or `none`; white when missing
+/// or not one.
+fn border_color(value: Option<&str>) -> Option<[f32; 4]> {
     const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-    let Some(value) = file.get("border_color") else { return Some(WHITE) };
+    let Some(value) = value else { return Some(WHITE) };
     if value.eq_ignore_ascii_case("none") {
         return None;
     }
-    let hex = value.trim_start_matches("0x");
+    let hex = value.trim_start_matches('#').trim_start_matches("0x");
     let channel = |i: usize| hex.get(i..i + 2).and_then(|c| u8::from_str_radix(c, 16).ok()).map(|c| c as f32 / 255.0);
     let rgba = match hex.len() {
         6 => (0..3).map(|i| channel(i * 2)).chain([Some(1.0)]).collect::<Option<Vec<_>>>(),
@@ -668,109 +752,83 @@ fn border_color(file: &HashMap<String, String>) -> Option<[f32; 4]> {
         _ => None,
     };
     let Some([r, g, b, a]) = rgba.and_then(|v| <[f32; 4]>::try_from(v).ok()) else {
-        tracing::warn!("ignoring `border_color = {value}`: not RRGGBB, RRGGBBAA or none");
+        tracing::warn!("ignoring `border_color = {value}`: not #RRGGBB, #RRGGBBAA or none");
         return Some(WHITE);
     };
     // Solid colour buffers take premultiplied alpha.
     Some([r * a, g * a, b * a, a])
 }
 
-/// `tab_min_width` and `tab_max_width`; a maximum under the minimum is raised to it.
-fn tab_widths(file: &HashMap<String, String>) -> TabWidths {
+/// `tabs.min_width` and `tabs.max_width`; a maximum under the minimum is raised to it.
+fn tab_widths(tabs: &TabsFile) -> TabWidths {
     let default = TabWidths::default();
-    let min = number(file, "tab_min_width", default.min, 40..=2000);
-    let max = number(file, "tab_max_width", default.max, 40..=2000);
+    let min = number("tabs.min_width", tabs.min_width, default.min, 40..=2000);
+    let max = number("tabs.max_width", tabs.max_width, default.max, 40..=2000);
     if max < min {
-        tracing::warn!("`tab_max_width = {max}` is under `tab_min_width = {min}`, using {min} for both");
+        tracing::warn!("`tabs.max_width = {max}` is under `tabs.min_width = {min}`, using {min} for both");
     }
     TabWidths { min, max: max.max(min) }
 }
 
-fn number(file: &HashMap<String, String>, key: &str, default: i32, range: std::ops::RangeInclusive<i32>) -> i32 {
-    let Some(value) = file.get(key) else { return default };
-    value.parse().ok().filter(|v| range.contains(v)).unwrap_or_else(|| {
+fn number(key: &str, value: Option<i64>, default: i32, range: std::ops::RangeInclusive<i32>) -> i32 {
+    let Some(value) = value else { return default };
+    i32::try_from(value).ok().filter(|v| range.contains(v)).unwrap_or_else(|| {
         tracing::warn!("ignoring `{key} = {value}`: not a number from {} to {}", range.start(), range.end());
         default
     })
 }
 
-/// A `true`/`false` setting, false when missing or not one.
-fn flag(file: &HashMap<String, String>, key: &str) -> bool {
-    file.get(key).is_some_and(|value| {
-        let parsed = bool_value(value);
-        if parsed.is_none() {
-            tracing::warn!("ignoring `{key} = {value}`: not true or false");
-        }
-        parsed.unwrap_or(false)
-    })
-}
-
-fn bool_value(value: &str) -> Option<bool> {
-    match value {
-        "true" | "yes" => Some(true),
-        "false" | "no" => Some(false),
-        _ => None,
-    }
-}
-
-fn input(file: &HashMap<String, String>) -> InputConfig {
-    let mut input = InputConfig::default();
-    for (key, value) in file {
-        let Some(field) = key.strip_prefix("input.") else { continue };
-        let ok = match field {
-            "left_handed" => bool_value(value).map(|v| input.left_handed = Some(v)).is_some(),
-            "natural_scroll" => bool_value(value).map(|v| input.natural_scroll = Some(v)).is_some(),
-            "tap" => bool_value(value).map(|v| input.tap = Some(v)).is_some(),
-            "accel_speed" => value
-                .parse::<f64>()
-                .ok()
-                .filter(|v| (-1.0..=1.0).contains(v))
-                .map(|v| input.accel_speed = Some(v))
-                .is_some(),
-            _ => false,
-        };
-        if !ok {
-            tracing::warn!("ignoring `{key} = {value}`");
-        }
+fn input(input: &InputConfig) -> InputConfig {
+    let mut input = input.clone();
+    if let Some(speed) = input.accel_speed.filter(|v| !(-1.0..=1.0).contains(v)) {
+        tracing::warn!("ignoring `input.accel_speed = {speed}`: not from -1.0 to 1.0");
+        input.accel_speed = None;
     }
     input
 }
 
-fn outputs(file: &HashMap<String, String>) -> BTreeMap<String, OutputConfig> {
-    let mut outputs = BTreeMap::<String, OutputConfig>::new();
-    for (key, value) in file {
-        let Some((name, field)) = key.strip_prefix("output.").and_then(|k| k.rsplit_once('.')) else { continue };
-        let output = outputs.entry(name.to_string()).or_default();
-        let ok = match field {
-            "mode" => OutputMode::parse(value).map(|m| output.mode = Some(m)).is_some(),
-            "position" => value
-                .split_once(',')
-                .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
-                .map(|p| output.position = Some(p))
-                .is_some(),
-            "off" => bool_value(value).map(|v| output.off = v).is_some(),
-            _ => false,
-        };
-        if !ok {
-            tracing::warn!("ignoring `{key} = {value}`");
-        }
-    }
-    outputs
+fn outputs(file: &BTreeMap<String, OutputFile>) -> BTreeMap<String, OutputConfig> {
+    file.iter()
+        .map(|(name, output)| {
+            let mode = output.mode.as_deref().and_then(|text| {
+                let mode = OutputMode::parse(text);
+                if mode.is_none() {
+                    tracing::warn!("ignoring `output.{name}.mode = {text}`: not WIDTHxHEIGHT[@HZ]");
+                }
+                mode
+            });
+            let config = OutputConfig { mode, position: output.position.map(|[x, y]| (x, y)), off: output.off };
+            (name.clone(), config)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn config(text: &str) -> Config {
+        from_text(text)
+    }
+
     #[test]
     fn file_values_and_defaults() {
-        let file = parse("# my setup\nkeyboard_layout = us\nkeyboard_variant=dvorak  # comment\n\nnonsense line\n");
-        let c = resolve(&file, &|_| None);
+        let c = config("# my setup\n[keyboard]\nlayout = \"us\"\nvariant = \"dvorak\"  # comment\n");
         assert_eq!(c.keyboard_layout, "us");
         assert_eq!(c.keyboard_variant, "dvorak");
         assert_eq!(c.keyboard_options, "");
         assert_eq!(c.terminal, "wezterm start --always-new-process");
         assert_eq!(c.modifier, "alt");
+    }
+
+    #[test]
+    fn not_toml_or_a_wrong_type_is_an_error_with_its_line() {
+        let err = parse("terminal = foot\n").unwrap_err();
+        assert!(err.to_string().contains("line 1"), "{err}");
+        let err = parse("modifier = \"super\"\nfollow = \"yes\"\n").unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+        // Unknown settings are not errors (they are warned about).
+        assert!(parse("nonsense = 1\n[keyboard]\nlayot = \"us\"\n").is_ok());
     }
 
     #[test]
@@ -799,7 +857,7 @@ mod tests {
     #[test]
     fn default_keys_follow_the_modifier() {
         for (modifier, held) in [("alt", "alt"), ("super", "super"), ("logo", "super"), ("ctrl+alt", "ctrl+alt")] {
-            let c = resolve(&parse(&format!("modifier = {modifier}\n")), &|_| None);
+            let c = config(&format!("modifier = \"{modifier}\"\n"));
             assert_eq!(keys_of(&c, Binding::Close), [spec(&format!("{held}+q"))], "{modifier}");
             assert_eq!(keys_of(&c, Binding::Focus(Direction::Left)), [spec(&format!("{held}+h")), spec(&format!("{held}+Left"))]);
             assert_eq!(keys_of(&c, Binding::SendToDesk(9)), [spec(&format!("{held}+shift+9"))]);
@@ -808,12 +866,12 @@ mod tests {
         }
         // `DUNE_MOD` wins over the file, for the keys too.
         let env = |k: &str| (k == "DUNE_MOD").then(|| "super".to_string());
-        let c = resolve(&parse("modifier = alt\n"), &env);
+        let c = resolve(&parse("modifier = \"alt\"\n").unwrap(), &env);
         assert_eq!(keys_of(&c, Binding::Close), [spec("super+q")]);
         // Every binding has a key by default, but the windows (`/` in dune-finder), the
         // private switches (in the tile options), folding (`fold_click`), a terminal tab (Mod+Shift+t opens
         // an empty one) and the monitors (their keys depend on how they are placed).
-        let c = resolve(&parse(""), &|_| None);
+        let c = config("");
         let unbound = [Binding::Switcher, Binding::PrivateTile, Binding::Fold, Binding::Terminal(TerminalHere::Tab)];
         for (name, binding, defaults) in binding_table() {
             let none = unbound.contains(&binding) || matches!(binding, Binding::FocusMonitor(_));
@@ -824,48 +882,48 @@ mod tests {
 
     #[test]
     fn fold_click_is_a_button_with_modifiers() {
-        let c = resolve(&parse("modifier = super\nfold_click = mod+right\n"), &|_| None);
+        let c = config("modifier = \"super\"\n[mouse]\nfold_click = \"mod+right\"\n");
         let click = c.fold_click.unwrap();
         assert_eq!((click.logo, click.alt, click.ctrl, click.shift, click.button), (true, false, false, false, 0x111));
         assert_eq!(ClickSpec::parse("ctrl+shift+Middle", "alt").map(|c| (c.ctrl, c.shift, c.button)), Some((true, true, 0x112)));
         // None by default; `none`, a key or an unknown modifier: none.
-        for text in ["", "fold_click = none\n", "fold_click = mod+q\n", "fold_click = hyper+left\n"] {
-            assert_eq!(resolve(&parse(text), &|_| None).fold_click, None, "{text}");
+        for value in ["none", "mod+q", "hyper+left"] {
+            assert_eq!(config(&format!("[mouse]\nfold_click = \"{value}\"\n")).fold_click, None, "{value}");
         }
+        assert_eq!(config("").fold_click, None);
     }
 
     #[test]
     fn monitor_focus_takes_keys_given_up_by_tile_focus() {
-        let c = resolve(&parse("focus_up = mod+k
-focus_monitor_up = mod+Up
-"), &|_| None);
+        let c = config("[keys]\nfocus_up = \"mod+k\"\nfocus_monitor_up = \"mod+Up\"\n");
         assert_eq!(keys_of(&c, Binding::Focus(Direction::Up)), [spec("alt+k")]);
         assert_eq!(keys_of(&c, Binding::FocusMonitor(Direction::Up)), [spec("alt+Up")]);
     }
 
     #[test]
     fn a_value_replaces_the_defaults() {
-        let c = resolve(&parse("modifier = super\nclose = super+q, super+'\nlauncher = mod+e\n"), &|_| None);
+        let c = config("modifier = \"super\"\n[keys]\nclose = [\"super+q\", \"super+'\"]\nlauncher = \"mod+e\"\n");
         assert_eq!(keys_of(&c, Binding::Close), [spec("super+q"), spec("super+apostrophe")]);
         assert_eq!(keys_of(&c, Binding::Launcher), [spec("super+e")]);
         // The others keep theirs.
         assert_eq!(keys_of(&c, Binding::TileOptions), [spec("super+slash")]);
-        let c = resolve(&parse("terminal_vertical = super+ctrl+v\n"), &|_| None);
+        let c = config("[keys]\nterminal_vertical = \"super+ctrl+v\"\n");
         assert_eq!(keys_of(&c, Binding::Terminal(TerminalHere::Right)), [spec("super+ctrl+v")]);
         assert_eq!(keys_of(&c, Binding::Terminal(TerminalHere::Below)), [spec("alt+s")]);
     }
 
     #[test]
     fn none_turns_a_key_off() {
-        let c = resolve(&parse("quit = none\nlock = None\n"), &|_| None);
+        let c = config("[keys]\nquit = \"none\"\nlock = \"None\"\nclose = []\n");
         assert!(keys_of(&c, Binding::Quit).is_empty());
         assert!(keys_of(&c, Binding::Lock).is_empty());
+        assert!(keys_of(&c, Binding::Close).is_empty());
         assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+shift+e")));
     }
 
     #[test]
     fn keys_are_unshifted_and_lowercase() {
-        let c = resolve(&parse("lock = mod+E\nquit = super+shift+Q\n"), &|_| None);
+        let c = config("[keys]\nlock = \"mod+E\"\nquit = \"super+shift+Q\"\n");
         assert_eq!(keys_of(&c, Binding::Lock), [spec("alt+e")]);
         assert_eq!(keys_of(&c, Binding::Quit), [spec("super+shift+q")]);
         assert_eq!(spec("alt+e").key, Keysym::e);
@@ -873,15 +931,15 @@ focus_monitor_up = mod+Up
 
     #[test]
     fn a_bad_value_keeps_the_defaults() {
-        for value in ["hyper+q", "mod+q, mod+NotAKey", "", "mod+"] {
-            let c = resolve(&parse(&format!("close = {value}\n")), &|_| None);
+        for value in ["\"hyper+q\"", "[\"mod+q\", \"mod+NotAKey\"]", "\"\"", "\"mod+\""] {
+            let c = config(&format!("[keys]\nclose = {value}\n"));
             assert_eq!(keys_of(&c, Binding::Close), [spec("alt+q")], "{value:?}");
         }
     }
 
     #[test]
     fn ctrl_keys_give_way_under_ctrl_alt() {
-        let c = resolve(&parse("modifier = ctrl+alt\n"), &|_| None);
+        let c = config("modifier = \"ctrl+alt\"\n");
         let ctrl_alt_left = spec("ctrl+alt+Left");
         assert_eq!(c.bindings.iter().find(|(_, k)| *k == ctrl_alt_left).map(|(b, _)| *b), Some(Binding::Focus(Direction::Left)));
         assert!(keys_of(&c, Binding::MoveTab(Direction::Left)).is_empty());
@@ -891,53 +949,52 @@ focus_monitor_up = mod+Up
 
     #[test]
     fn scratchpad_keys() {
-        let c = resolve(&parse(""), &|_| None);
+        let c = config("");
         assert_eq!(keys_of(&c, Binding::Scratchpad), [spec("alt+grave")]);
         assert_eq!(keys_of(&c, Binding::SendToScratchpad), [spec("alt+shift+grave")]);
-        let c = resolve(&parse("scratchpad = none
-"), &|_| None);
+        let c = config("[keys]\nscratchpad = \"none\"\n");
         assert!(keys_of(&c, Binding::Scratchpad).is_empty());
     }
 
     #[test]
     fn tile_options_and_private_keys() {
-        let c = resolve(&parse(""), &|_| None);
+        let c = config("");
         assert_eq!(keys_of(&c, Binding::TileOptions), [spec("alt+slash")]);
         assert!(keys_of(&c, Binding::Switcher).is_empty());
         assert!(keys_of(&c, Binding::PrivateTile).is_empty());
         // Still settable; a `switcher` set to Mod+/ gives way to `tile_options`, listed first.
-        let c = resolve(&parse("switcher = mod+w\nprivate_tile = mod+p\n"), &|_| None);
+        let c = config("[keys]\nswitcher = \"mod+w\"\nprivate_tile = \"mod+p\"\n");
         assert_eq!(keys_of(&c, Binding::Switcher), [spec("alt+w")]);
         assert_eq!(keys_of(&c, Binding::PrivateTile), [spec("alt+p")]);
         // `private_desktop` is gone (desktops lock from the bar): an unknown key, ignored.
         assert!(!binding_table().iter().any(|(name, ..)| name == "private_desktop"));
-        let c = resolve(&parse("private_desktop = mod+shift+p\n"), &|_| None);
+        let c = config("[keys]\nprivate_desktop = \"mod+shift+p\"\n");
         assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+shift+p")));
-        let c = resolve(&parse("switcher = mod+slash\n"), &|_| None);
+        let c = config("[keys]\nswitcher = \"mod+slash\"\n");
         assert_eq!(keys_of(&c, Binding::TileOptions), [spec("alt+slash")]);
         assert!(keys_of(&c, Binding::Switcher).is_empty());
     }
 
     #[test]
     fn key_labels() {
-        let c = resolve(&parse("modifier = super\nclose = mod+q, super+'\n"), &|_| None);
+        let c = config("modifier = \"super\"\n[keys]\nclose = [\"mod+q\", \"super+'\"]\n");
         assert_eq!(c.key_label(Binding::Close), "super+q, super+apostrophe");
         assert_eq!(c.key_label(Binding::PrivateTile), "");
     }
 
     #[test]
     fn lock_key_and_command() {
-        let c = resolve(&parse(""), &|_| None);
+        let c = config("");
         assert_eq!(keys_of(&c, Binding::Lock), [spec("alt+Escape")]);
         assert_eq!(keys_of(&c, Binding::Lock)[0].key, Keysym::Escape);
         assert_eq!(c.lock_command, "swaylock -f");
-        let c = resolve(&parse("lock_command = swaylock -f -c 000000\n"), &|_| None);
+        let c = config("lock_command = \"swaylock -f -c 000000\"\n");
         assert_eq!(c.lock_command, "swaylock -f -c 000000");
     }
 
     #[test]
     fn capture_keys_and_folders() {
-        let c = resolve(&parse(""), &|_| None);
+        let c = config("");
         assert_eq!(keys_of(&c, Binding::Screenshot), [spec("Print")]);
         assert_eq!(keys_of(&c, Binding::ScreenshotScreen), [spec("shift+Print")]);
         assert_eq!(keys_of(&c, Binding::Record), [spec("alt+shift+r")]);
@@ -946,16 +1003,11 @@ focus_monitor_up = mod+Up
         assert_eq!(keys_of(&c, Binding::RecordScreen), [spec("alt+ctrl+shift+r")]);
         assert_eq!(keys_of(&c, Binding::CycleWidth), [spec("alt+r")]);
         assert_eq!((c.screenshot_dir.as_str(), c.recording_dir.as_str()), ("", ""));
-        let c = resolve(&parse("modifier = super
-screenshot = super+p
-record = none
-"), &|_| None);
+        let c = config("modifier = \"super\"\n[keys]\nscreenshot = \"super+p\"\nrecord = \"none\"\n");
         assert_eq!(keys_of(&c, Binding::Screenshot), [spec("super+p")]);
         assert!(keys_of(&c, Binding::Record).is_empty());
         assert_eq!(keys_of(&c, Binding::ScreenshotScreen), [spec("shift+Print")]);
-        let c = resolve(&parse("screenshot_dir = ~/shots
-recording_dir = /data/videos
-"), &|_| None);
+        let c = config("[capture]\nscreenshot_dir = \"~/shots\"\nrecording_dir = \"/data/videos\"\n");
         assert_eq!(c.screenshot_dir, "~/shots");
         assert_eq!(c.recording_dir, "/data/videos");
     }
@@ -963,11 +1015,11 @@ recording_dir = /data/videos
     #[test]
     fn a_shared_key_stays_with_the_first() {
         // `close` comes before `lock`: alt+q stays a close key, lock is left with none.
-        let c = resolve(&parse("lock = mod+q\n"), &|_| None);
+        let c = config("[keys]\nlock = \"mod+q\"\n");
         assert_eq!(keys_of(&c, Binding::Close), [spec("alt+q")]);
         assert!(keys_of(&c, Binding::Lock).is_empty());
         // Set on the earlier one, it takes the key from the later one's defaults.
-        let c = resolve(&parse("focus_left = mod+t\n"), &|_| None);
+        let c = config("[keys]\nfocus_left = \"mod+t\"\n");
         assert_eq!(keys_of(&c, Binding::Focus(Direction::Left)), [spec("alt+t")]);
         assert!(keys_of(&c, Binding::StackToTabs).is_empty());
         // Each key once.
@@ -976,75 +1028,57 @@ recording_dir = /data/videos
     }
 
     #[test]
-    fn every_exec_line_counts() {
-        let text = "exec = waybar -c ~/.config/waybar/dune.jsonc\nterminal = foot\nexec = mako  # notifications\nexec =\n";
-        assert_eq!(execs(text), ["waybar -c ~/.config/waybar/dune.jsonc", "mako"]);
-        assert!(execs("").is_empty());
+    fn exec_is_a_list() {
+        let c = config("exec = [\"waybar -c ~/.config/waybar/dune.jsonc\", \"mako\", \"\"]\n");
+        assert_eq!(c.exec, ["waybar -c ~/.config/waybar/dune.jsonc", "mako"]);
+        assert!(config("").exec.is_empty());
     }
 
     #[test]
     fn key_repeat() {
-        let config = resolve(&parse(""), &|_| None);
-        assert_eq!((config.repeat_delay, config.repeat_rate), (500, 25));
-        let config = resolve(&parse("repeat_delay = 600\nrepeat_rate = 30\n"), &|_| None);
-        assert_eq!((config.repeat_delay, config.repeat_rate), (600, 30));
-        let config = resolve(&parse("repeat_delay = 5\nrepeat_rate = fast\n"), &|_| None);
-        assert_eq!((config.repeat_delay, config.repeat_rate), (500, 25));
+        let c = config("");
+        assert_eq!((c.repeat_delay, c.repeat_rate), (500, 25));
+        let c = config("[keyboard]\nrepeat_delay = 600\nrepeat_rate = 30\n");
+        assert_eq!((c.repeat_delay, c.repeat_rate), (600, 30));
+        let c = config("[keyboard]\nrepeat_delay = 5\nrepeat_rate = 99999999999\n");
+        assert_eq!((c.repeat_delay, c.repeat_rate), (500, 25));
     }
 
     #[test]
     fn follow() {
-        assert!(!resolve(&parse(""), &|_| None).follow);
-        assert!(resolve(&parse("follow = true\n"), &|_| None).follow);
-        assert!(!resolve(&parse("follow = maybe\n"), &|_| None).follow);
-        assert!(!resolve(&parse(""), &|_| None).focus_follows_mouse);
-        assert!(resolve(&parse("focus_follows_mouse = true\n"), &|_| None).focus_follows_mouse);
+        assert!(!config("").follow);
+        assert!(config("follow = true\n").follow);
+        assert!(!config("").focus_follows_mouse);
+        assert!(config("focus_follows_mouse = true\n").focus_follows_mouse);
     }
 
     #[test]
-    fn tab_widths_come_from_the_file() {
-        assert_eq!(resolve(&parse(""), &|_| None).tab_widths, TabWidths::default());
-        let config = resolve(&parse("tab_min_width = 120\ntab_max_width = 300\n"), &|_| None);
-        assert_eq!(config.tab_widths, TabWidths { min: 120, max: 300 });
+    fn font_and_tab_widths() {
+        let c = config("");
+        assert_eq!((c.font_family.as_str(), c.tab_widths), ("monospace", TabWidths::default()));
+        let c = config("font = \"JetBrains Mono\"\n[tabs]\nmin_width = 120\nmax_width = 300\n");
+        assert_eq!((c.font_family.as_str(), c.tab_widths), ("JetBrains Mono", TabWidths { min: 120, max: 300 }));
         // Out of range: the default; a maximum under the minimum: the minimum.
-        let config = resolve(&parse("tab_min_width = 5\ntab_max_width = 100\n"), &|_| None);
-        assert_eq!(config.tab_widths, TabWidths { min: TabWidths::default().min, max: TabWidths::default().min });
+        let c = config("[tabs]\nmin_width = 5\nmax_width = 100\n");
+        assert_eq!(c.tab_widths, TabWidths { min: TabWidths::default().min, max: TabWidths::default().min });
     }
 
     #[test]
     fn border_color() {
-        assert_eq!(resolve(&parse(""), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
-        assert_eq!(resolve(&parse("border_color = none\n"), &|_| None).border_color, None);
-        assert_eq!(resolve(&parse("border_color = ff0000\n"), &|_| None).border_color, Some([1.0, 0.0, 0.0, 1.0]));
-        assert_eq!(resolve(&parse("border_color = ffffff00\n"), &|_| None).border_color, Some([0.0, 0.0, 0.0, 0.0]));
-        // `#` starts a comment, so `#333333` reads as no value: still white.
-        assert_eq!(resolve(&parse("border_color = #333333\n"), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
-        assert_eq!(resolve(&parse("border_color = blue\n"), &|_| None).border_color, Some([1.0, 1.0, 1.0, 1.0]));
-    }
-
-    #[test]
-    fn file_manager() {
-        assert_eq!(resolve(&parse(""), &|_| None).file_manager, "yazi");
-        assert_eq!(
-            resolve(&parse("file_manager = lf\n"), &|_| None).file_manager,
-            "lf"
-        );
-        assert_eq!(resolve(&parse(""), &|_| None).file_manager_terminal, "");
-        assert_eq!(
-            resolve(&parse("file_manager_terminal = foot\n"), &|_| None).file_manager_terminal,
-            "foot"
-        );
+        assert_eq!(config("").border_color, Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(config("border_color = \"none\"\n").border_color, None);
+        assert_eq!(config("border_color = \"#ff0000\"\n").border_color, Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(config("border_color = \"ff0000\"\n").border_color, Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(config("border_color = \"#ffffff00\"\n").border_color, Some([0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(config("border_color = \"blue\"\n").border_color, Some([1.0, 1.0, 1.0, 1.0]));
     }
 
     #[test]
     fn outputs() {
-        let c = resolve(
-            &parse(
-                "output.HDMI-A-1.mode = 2560x1080@59.94\noutput.HDMI-A-1.position = 0, 0\n\
-                 output.HDMI-A-2.mode = 1920x1080\noutput.HDMI-A-2.position = 311,1080\n\
-                 output.DP-1.off = true\noutput.DP-2.mode = big\n",
-            ),
-            &|_| None,
+        let c = config(
+            "[output.HDMI-A-1]\nmode = \"2560x1080@59.94\"\nposition = [0, 0]\n\
+             [output.HDMI-A-2]\nmode = \"1920x1080\"\nposition = [311, 1080]\n\
+             [output.DP-1]\noff = true\n[output.DP-2]\nmode = \"big\"\n",
         );
         let a = &c.outputs["HDMI-A-1"];
         assert_eq!(a.mode, Some(OutputMode { width: 2560, height: 1080, refresh: Some(60) }));
@@ -1058,23 +1092,19 @@ recording_dir = /data/videos
 
     #[test]
     fn input_settings() {
-        let c = resolve(
-            &parse("input.left_handed = true\ninput.natural_scroll = no\ninput.accel_speed = 2\ninput.tap = maybe\n"),
-            &|_| None,
-        );
+        let c = config("[input]\nleft_handed = true\nnatural_scroll = false\naccel_speed = 2.0\n");
         assert_eq!(c.input.left_handed, Some(true));
         assert_eq!(c.input.natural_scroll, Some(false));
         assert_eq!(c.input.accel_speed, None); // out of range: libinput's default
         assert_eq!(c.input.tap, None);
-        assert_eq!(resolve(&parse(""), &|_| None).input, InputConfig::default());
+        assert_eq!(config("").input, InputConfig::default());
     }
 
     #[test]
     fn restart_needed() {
-        let old = resolve(&parse("xwayland = off\noutput.A.mode = 1920x1080\noutput.A.position = 0,0\n"), &|_| None);
-        let new = resolve(
-            &parse("xwayland = off\noutput.A.mode = 2560x1080\noutput.A.position = 10,0\noutput.B.off = true\nmodifier = super\n"),
-            &|_| None,
+        let old = config("xwayland = \"off\"\n[output.A]\nmode = \"1920x1080\"\nposition = [0, 0]\n");
+        let new = config(
+            "xwayland = \"off\"\nmodifier = \"super\"\n[output.A]\nmode = \"2560x1080\"\nposition = [10, 0]\n[output.B]\noff = true\n",
         );
         assert_eq!(new.restart_needed(&old), ["output.A.mode", "output.B.off"]);
         assert!(old.restart_needed(&old).is_empty());
@@ -1082,7 +1112,7 @@ recording_dir = /data/videos
 
     #[test]
     fn environment_wins() {
-        let file = parse("keyboard_variant = dvorak\nterminal = alacritty\n");
+        let file = parse("terminal = \"alacritty\"\n[keyboard]\nvariant = \"dvorak\"\n").unwrap();
         let env = |k: &str| match k {
             "XKB_DEFAULT_VARIANT" => Some("colemak".to_string()),
             "DUNE_TERMINAL" => Some(String::new()), // empty means unset

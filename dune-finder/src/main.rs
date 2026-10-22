@@ -5,7 +5,8 @@
 //!
 //! `dune-finder [--mode apps|windows|files|jump|tile-options|system] [--output NAME] [--target TILE] [--slot TILE
 //! --at X,Y,W,H] [--compact] [--font FAMILY] [--icon-theme THEME] [--file-manager CMD]
-//! [--file-manager-terminal CMD] [--terminal CMD]`: `--target` is
+//! [--file-manager-terminal CMD] [--terminal CMD]` (the font, icon theme and file manager
+//! come from `finder.toml`, see `settings`; the flags win over it): `--target` is
 //! the tile apps open next to (and the tile options are for); `--slot` the empty container they go into, `--at` where it is
 //! on the output; `--compact` shows no list until something is typed or browsed; `--file-manager` what Mod+Enter (or Ctrl+Enter) opens files in (default `yazi`),
 //! `--file-manager-terminal` the terminal it runs in (default: dune's), `--terminal` dune's
@@ -18,6 +19,7 @@ mod finder;
 mod icons;
 mod jump;
 mod panel;
+mod settings;
 mod system;
 mod tabs;
 mod tile_options;
@@ -27,7 +29,7 @@ use app::Options;
 use finder::Mode;
 
 fn main() {
-    let options = match parse(std::env::args().skip(1)) {
+    let options = match parse(settings::load(), std::env::args().skip(1)) {
         Ok(options) => options,
         Err(err) => {
             eprintln!("dune-finder: {err}");
@@ -40,8 +42,8 @@ fn main() {
     }
 }
 
-fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
-    let mut options = Options::default();
+/// The command line over `options` (finder.toml's settings).
+fn parse(mut options: Options, mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -97,7 +99,7 @@ mod tests {
 
     #[test]
     fn arguments() {
-        let o = parse(args("--mode windows --output DP-1 --target 3 --slot 7 --at 10,20,300,400 --font Mono --file-manager lf")).unwrap();
+        let o = parse(Options::default(), args("--mode windows --output DP-1 --target 3 --slot 7 --at 10,20,300,400 --font Mono --file-manager lf")).unwrap();
         assert_eq!(o.mode, Mode::Windows);
         assert_eq!(o.output.as_deref(), Some("DP-1"));
         assert_eq!(
@@ -105,23 +107,23 @@ mod tests {
             (Some(3), Some(7), Some((10, 20, 300, 400)))
         );
         assert_eq!((o.font.as_str(), o.file_manager.as_str()), ("Mono", "lf"));
-        assert_eq!(parse(args("")).unwrap().file_manager, "yazi");
+        assert_eq!(parse(Options::default(), args("")).unwrap().file_manager, "yazi");
         assert_eq!(
-            parse(args("--file-manager-terminal foot"))
+            parse(Options::default(), args("--file-manager-terminal foot"))
                 .unwrap()
                 .file_manager_terminal
                 .as_deref(),
             Some("foot")
         );
-        assert_eq!(parse(args("")).unwrap().file_manager_terminal, None);
-        assert_eq!(parse(args("")).unwrap().mode, Mode::Apps);
-        assert_eq!(parse(args("--mode jump")).unwrap().mode, Mode::Jump);
-        assert_eq!(parse(args("--mode tile-options")).unwrap().mode, Mode::TileOptions);
-        assert!(parse(args("--compact")).unwrap().compact);
-        assert!(!parse(args("")).unwrap().compact);
-        assert!(parse(args("--mode x")).is_err());
-        assert!(parse(args("--slot")).is_err());
-        assert!(parse(args("--bogus")).is_err());
+        assert_eq!(parse(Options::default(), args("")).unwrap().file_manager_terminal, None);
+        assert_eq!(parse(Options::default(), args("")).unwrap().mode, Mode::Apps);
+        assert_eq!(parse(Options::default(), args("--mode jump")).unwrap().mode, Mode::Jump);
+        assert_eq!(parse(Options::default(), args("--mode tile-options")).unwrap().mode, Mode::TileOptions);
+        assert!(parse(Options::default(), args("--compact")).unwrap().compact);
+        assert!(!parse(Options::default(), args("")).unwrap().compact);
+        assert!(parse(Options::default(), args("--mode x")).is_err());
+        assert!(parse(Options::default(), args("--slot")).is_err());
+        assert!(parse(Options::default(), args("--bogus")).is_err());
         assert_eq!(parse_rect("1,2,3"), None);
     }
 }

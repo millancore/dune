@@ -319,7 +319,7 @@ impl Dune {
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "seat0");
         // Keys arrive as raw keycodes (also when nested), so the layout must be ours.
-        let config = crate::config::load();
+        let config = crate::config::load().unwrap_or_else(crate::config::defaults);
         let (delay, rate) = (config.repeat_delay, config.repeat_rate);
         if let Err(err) = seat.add_keyboard(config.xkb(), delay, rate) {
             tracing::error!("invalid keyboard layout in the dune config ({err:?}), falling back to the default");

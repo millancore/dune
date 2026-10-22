@@ -140,15 +140,8 @@ impl Dune {
         };
         let mut cmd = Command::new(sibling_command("dune-finder"));
         cmd.args(["--mode", mode.arg(), "--output", &output]);
-        cmd.args(["--font", &self.config.font_family, "--icon-theme", &self.config.icon_theme]);
-        cmd.args(["--file-manager", &self.config.file_manager]);
+        // Its own settings it reads from finder.toml; the terminal is dune's.
         cmd.args(["--terminal", &self.config.terminal]);
-        if !self.config.file_manager_terminal.is_empty() {
-            cmd.args([
-                "--file-manager-terminal",
-                &self.config.file_manager_terminal,
-            ]);
-        }
         // A focused tile on another output (the pointer moved away from it) is not where
         // dune-finder shows: what it launches goes on its own output. The tile options
         // are the focused tile's wherever it is.

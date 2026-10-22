@@ -10,6 +10,9 @@ default-run = "dune"
 
 [dependencies]
 dune-common = { path = "dune-common" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_ignored = "0.1.14"
+toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 xcursor = "0.3"

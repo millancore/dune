@@ -273,7 +273,7 @@ mod tests {
     }
 
     fn test_config(modifier: &str) -> Config {
-        crate::config::from_text(&format!("modifier = {modifier}\n"))
+        crate::config::from_text(&format!("modifier = \"{modifier}\"\n"))
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
         assert!(matches!(action_for(&config, &logo, Keysym::v), Some(Action::Terminal(TerminalHere::Right))));
         assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
         // A key set for one replaces its Mod key; the others keep theirs.
-        let config = crate::config::from_text("modifier = super\nterminal_vertical = mod+n\n");
+        let config = crate::config::from_text("modifier = \"super\"\n[keys]\nterminal_vertical = \"mod+n\"\n");
         assert!(matches!(action_for(&config, &logo, Keysym::n), Some(Action::Terminal(TerminalHere::Right))));
         assert!(action_for(&config, &logo, Keysym::v).is_none());
         assert!(matches!(action_for(&config, &logo, Keysym::s), Some(Action::Terminal(TerminalHere::Below))));
@@ -353,7 +353,7 @@ mod tests {
         let logo = ModifiersState { logo: true, ..Default::default() };
         assert!(matches!(action_for(&test_config("super"), &logo, Keysym::Escape), Some(Action::Lock)));
         // Set off: Mod+Escape goes to the client.
-        let config = crate::config::from_text("lock = none\n");
+        let config = crate::config::from_text("[keys]\nlock = \"none\"\n");
         assert!(action_for(&config, &alt, Keysym::Escape).is_none());
     }
 

@@ -57,14 +57,14 @@ Optional tools dune works with:
 
 | Tool | For |
 |---|---|
-| `wezterm`, `foot`, `alacritty`, ... | terminal tiles (`terminal`) |
+| `wezterm`, `foot`, `alacritty`, ... | terminal tiles (`terminal` in `dune.toml`) |
 | `grim`, `slurp`, `wf-recorder`, `wl-clipboard`, `libnotify` | screenshots and recordings |
 | `swaylock`, `swayidle` | screen lock and idle timeouts |
 | `xwayland-satellite` | X11 apps |
 | `xdg-desktop-portal-wlr` | screen sharing in browsers and video calls |
 | `waybar`, `mako`, `wlsunset` | bar, notifications, night light |
 | `pactl`, `playerctl` | the speaker mark on tiles that play sound |
-| `yazi` | the terminal file manager dune-finder opens |
+| `yazi` | the terminal file manager dune-finder opens (`file_manager` in `finder.toml`) |
 
 A running dune keeps the old binary until the session is restarted.
 
@@ -168,7 +168,7 @@ that shows no list until you type.
 ## Tabs
 
 Tabs belong to columns, and each tab keeps its own rows and splits. The bar sits at the
-top left of the column; a tab grows up to `tab_max_width` and shrinks to `tab_min_width`,
+top left of the column; a tab grows up to `[tabs] max_width` and shrinks to `min_width`,
 then the bar scrolls.
 
 ```text
@@ -213,7 +213,8 @@ Hovering a folded bar focuses it; clicking it (or Enter while it is focused) ope
 A folded tabbed column shows its tab count at the top. Folded tiles that play sound show
 a speaker 🔊 (followed through `pactl`; for browsers, matched by the MPRIS title).
 
-Fold with the `fold` key, or with `fold_click` (for example `mod+right`) on the tile under the pointer.
+Fold with the `fold` key (unbound by default, set it in `[keys]`), or with `[mouse] fold_click`
+(for example `"mod+right"`) on the tile under the pointer.
 
 ## Fullscreen
 
@@ -262,7 +263,7 @@ Every monitor has nine desktops (1-9) and shows one of them.
 |---|---|
 | `Mod+1` .. `Mod+9` | show that desktop |
 | `Mod+Shift+1` .. `Mod+Shift+9` | send the focused tile there |
-| `focus_monitor_*` | focus the monitor that way (unbound by default) |
+| `[keys] focus_monitor_*` | focus the monitor that way (unbound by default) |
 
 ```text
    HDMI-A-1                      DP-1
@@ -280,9 +281,11 @@ its tab.
 
 Terminals open where you work, and console programs get one of their own:
 
-- `Mod+v` / `Mod+s` / `terminal_tab` open a terminal in the focused terminal's folder.
+- `Mod+v` / `Mod+s` / the `terminal_tab` key open a terminal in the focused terminal's folder.
 - A console program chosen in dune-finder, or `dune open COMMAND`, gets a new terminal
-  with the command typed in once your shell has started (its rc files run first).
+  with the command typed in once your shell has started (its rc files run first). dune's
+  shell layer does the typing; terminals that ignore `$SHELL` (`wezterm start`) are given it
+  as their program.
 - The folders terminals work in feed dune-finder's jump list.
 
 ```text
@@ -340,9 +343,9 @@ goes back; `Mod+Tab` / `Mod+Shift+Tab` cycle through every mode.
 | Mode | Open with | What it does |
 |---|---|---|
 | **apps** | `Mod+d` | fuzzy-search desktop apps. Pick where it opens before Enter: a side of the focused tile, floating, as a tab (`Ctrl+T` / `:t`), another monitor or desktop (`firefox :d2`). Console programs get a terminal. |
-| **windows** | `/` in apps, or `switcher` | every window on every monitor, desktop, tab and folded row, most recent first; Enter right away goes back to the previous window. `:d2` / `:m1` filter by desktop / monitor. `:l` lists the windows of locked desktops. |
+| **windows** | `/` in apps, or the `switcher` key | every window on every monitor, desktop, tab and folded row, most recent first; Enter right away goes back to the previous window. `:d2` / `:m1` filter by desktop / monitor. `:l` lists the windows of locked desktops. |
 | **browser tabs** | in windows | a Chromium browser started with `--remote-debugging-port=9222` lists its tabs; Enter brings the tab forward in its window. |
-| **files** | `#` in apps | browse from home: Enter goes into a folder or opens a file (`xdg-open`); `~`, `/` and `name/` work as in a shell; `Mod+Enter` opens `file_manager` (yazi), `Ctrl+Enter` a terminal there. |
+| **files** | `#` in apps | browse from home: Enter goes into a folder or opens a file (`xdg-open`); `~`, `/` and `name/` work as in a shell; `Mod+Enter` opens `file_manager` (yazi, set in `finder.toml`), `Ctrl+Enter` a terminal there. |
 | **jumps** | `>` in apps | folders by frecency, like zoxide's `z` (parent folders in home included). Enter opens a terminal there, `Mod+Enter` the file manager, `/` goes into the folder in files mode. |
 | **tile options** | `Mod+/` | private, float, center, full width, to tab, send to desktop #, close, each with its key. |
 | **system** | `Mod+Tab` from the last mode | power off, reboot, log out. |
@@ -359,7 +362,7 @@ A click chooses a row, the wheel scrolls, a click outside closes the panel.
 | Mod+left drag | move the tile; drop it on another column, monitor, or a tab bar |
 | Mod+left click | float / unfloat; near an edge: an empty split there |
 | Mod+right drag | resize the tile (or a float) |
-| `fold_click` | fold / open the tile under the pointer |
+| `[mouse] fold_click` | fold / open the tile under the pointer |
 | push a screen edge | slide the strip |
 
 ```text
@@ -403,9 +406,9 @@ Made for screen sharing: what is shared is what you see.
 | `Mod+Ctrl+r` | record the focused tile |
 | `Mod+Ctrl+Shift+r` | record the active monitor |
 
-Screenshots are saved as `dune-YYYY-MM-DD_HH-MM-SS.png` in `screenshot_dir`, copied to the
+Screenshots are saved as `dune-YYYY-MM-DD_HH-MM-SS.png` in `[capture] screenshot_dir`, copied to the
 clipboard and announced by notification. Recordings are `.mp4` (no sound) in
-`recording_dir`. Private tiles never show up in either.
+`[capture] recording_dir`. Private tiles never show up in either.
 
 dune implements `ext-image-copy-capture` and `wlr-screencopy`, so grim, wf-recorder and
 xdg-desktop-portal-wlr (screen sharing in browsers and calls) work. It also implements
@@ -418,7 +421,7 @@ ext/wlr data control, so wl-copy and wl-paste work.
 - **Idle**: `ext-idle-notify` for swayidle's timers; idle-inhibit lets videos and games hold it off.
 - **Night light**: `wlr-gamma-control` for wlsunset (real session only).
 - **X11 apps**: through `xwayland-satellite`, started when the first X11 client connects
-  and restarted if it crashes (`xwayland = off` disables it).
+  and restarted if it crashes (`xwayland = "off"` disables it).
 - **Games**: pointer constraints (locked and confined pointers) and relative motion.
 - **Layers**: wlr-layer-shell for bars, notifications, launchers and wallpapers.
 
@@ -446,73 +449,113 @@ The control socket is `$DUNE_SOCKET`; the protocol lives in `dune-common/src/pro
 
 ## Configuration
 
-`~/.config/dune/config` (or `$XDG_CONFIG_HOME/dune/config`), one `key = value` per line,
-`#` for comments. Saving the file applies it live, except monitor modes, `off`,
-`xwayland` and `exec`.
+Two TOML files in `~/.config/dune/` (or `$XDG_CONFIG_HOME/dune/`): `dune.toml` for the
+window manager and `finder.toml` for dune-finder. Every setting is optional. Saving
+`dune.toml` applies it live, except monitor modes, `off`, `xwayland` and `exec`;
+dune-finder reads `finder.toml` each time it opens.
 
-```ini
-keyboard_layout = us
-keyboard_variant = dvorak
-repeat_delay = 500             # ms before a held key repeats
-repeat_rate = 25               # repeats per second
-terminal = wezterm start --always-new-process
-modifier = alt                 # alt (default), super or ctrl+alt: `mod` below
-lock_command = swaylock -f
+```toml
+# ~/.config/dune/dune.toml
+terminal = "wezterm start --always-new-process"
+modifier = "alt"               # alt (default), super or ctrl+alt: `mod` below
+lock_command = "swaylock -f"
 follow = true                  # go to the desktop an app is launched on
 focus_follows_mouse = true
-xwayland = satellite           # or off
-font_family = JetBrains Mono   # tab titles and dune-finder
-tab_min_width = 200
-tab_max_width = 220
-icon_theme = Papirus-Dark
-file_manager = yazi
-file_manager_terminal = foot
-border_color = none            # RRGGBB, RRGGBBAA or none
-fold_click = mod+right
-exec = waybar                  # one line per program started with dune
-screenshot_dir = ~/shots
-recording_dir = ~/videos
+xwayland = "satellite"         # or "off"
+font = "JetBrains Mono"        # tab titles
+border_color = "none"          # "#RRGGBB", "#RRGGBBAA" or "none"
+exec = ["waybar", "mako"]      # programs started with dune, in order
 
-# Mice and touchpads (real session)
-input.left_handed = true
-input.natural_scroll = false
-input.tap = true
-input.accel_speed = 0.0        # -1.0 .. 1.0
+[keyboard]
+layout = "us"
+variant = "dvorak"
+repeat_delay = 500             # ms before a held key repeats
+repeat_rate = 25               # repeats per second
 
-# Monitors, by connector name
-output.HDMI-A-1.mode = 2560x1080@60
-output.HDMI-A-1.position = 0,0
-output.DP-1.off = true
+[tabs]
+min_width = 200
+max_width = 220
+
+[capture]
+screenshot_dir = "~/shots"
+recording_dir = "~/videos"
+
+[mouse]
+fold_click = "mod+right"
+
+[input]                        # mice and touchpads (real session)
+left_handed = true
+natural_scroll = false
+tap = true
+accel_speed = 0.0              # -1.0 .. 1.0
+
+[output.HDMI-A-1]              # monitors, by connector name
+mode = "2560x1080@60"
+position = [0, 0]
+
+[output.DP-1]
+off = true
+
+[keys]
+close = ["super+q", "super+'"]
+launcher = "super+e"
+switcher = "none"
 ```
 
-Every key can be rebound: `close = super+q, super+'`. A value replaces that key's defaults
-and `none` turns it off. Environment variables win over the file: `XKB_DEFAULT_*`,
-`DUNE_TERMINAL`, `DUNE_MOD`.
+```toml
+# ~/.config/dune/finder.toml
+font = "JetBrains Mono"
+icon_theme = "Papirus-Dark"
+file_manager = "yazi"
+file_manager_terminal = "foot"
+```
+
+Every key can be rebound in `[keys]`, with one key or a list; a value replaces that key's
+defaults and `"none"` (or `[]`) turns it off. The names and defaults are listed at the top
+of `src/config.rs`. A setting dune does not know, or a value it cannot use, is warned about in
+the log; a file that is not TOML is reported with its line, and the settings in use stay.
+Environment variables win over the file: `XKB_DEFAULT_*`, `DUNE_TERMINAL`, `DUNE_MOD`,
+`DUNE_XWAYLAND`.
 
 ## Default keys
 
-`Mod` is `modifier` (Alt by default).
+`Mod` is `modifier` (Alt by default). The first column is the name to rebind it with in
+`[keys]`.
 
-| Key | Action | Key | Action |
-|---|---|---|---|
-| `Mod+h/j/k/l`, arrows | focus | `Mod+Shift+h/j/k/l` | swap |
-| `Mod+Ctrl+h/j/k/l` | join / leave tabs | `Mod+1..9` | show desktop |
-| `Mod+Shift+1..9` | send to desktop | `Mod+Return` | empty container |
-| `Mod+Shift+t` | empty tab | `Mod+Tab` / `Mod+Shift+Tab` | next / prev tab |
-| `Mod+=` / `Mod+-` | column width | `Mod+Shift+=` / `Mod+Shift+-` | tile height |
-| `Mod+Ctrl+=` / `Mod+Ctrl+-` | width in row | `Mod+r` | cycle width |
-| `Mod+f` | full width | `Mod+Shift+f` | fullscreen |
-| `Mod+Space` | center | | |
-| `Mod+Shift+Space` | float | `` Mod+Shift+` `` | to scratchpad |
-| `` Mod+` `` | scratchpad | `Mod+q` | close |
-| `Mod+d` | launcher | `Mod+/` | tile options |
-| `Mod+v` / `Mod+s` | terminal right / below | `Mod+t` | stack to tabs |
-| `Mod+Escape` | lock | `Mod+Shift+e` | quit |
-| `Print` | screenshot region | `Ctrl+Print` | screenshot tile |
-| `Shift+Print` | screenshot monitor | `Mod+Shift+r` | record region |
-| `Mod+Ctrl+r` | record tile | `Mod+Ctrl+Shift+r` | record monitor |
+| Name | Default | Does |
+|---|---|---|
+| `focus_left` / `_down` / `_up` / `_right` | `Mod+h/j/k/l`, arrows | focus |
+| `swap_left` / `_down` / `_up` / `_right` | `Mod+Shift+h/j/k/l`, arrows | swap |
+| `move_tab_left` / `_down` / `_up` / `_right` | `Mod+Ctrl+h/j/k/l`, arrows | join / leave tabs |
+| `focus_monitor_left` / `_down` / `_up` / `_right` | none | focus the monitor that way |
+| `desk_1` .. `desk_9` | `Mod+1..9` | show desktop |
+| `send_to_desk_1` .. `send_to_desk_9` | `Mod+Shift+1..9` | send to desktop |
+| `empty_container` | `Mod+Return` | empty container |
+| `empty_tab` | `Mod+Shift+t` | empty tab |
+| `next_tab` / `prev_tab` | `Mod+Tab` / `Mod+Shift+Tab` | next / previous tab |
+| `wider` / `narrower` | `Mod+=` / `Mod+-` | column width |
+| `taller` / `shorter` | `Mod+Shift+=` / `Mod+Shift+-` | tile height |
+| `row_wider` / `row_narrower` | `Mod+Ctrl+=` / `Mod+Ctrl+-` | width in row |
+| `cycle_width` | `Mod+r` | cycle width |
+| `full_width` | `Mod+f` | full width |
+| `fullscreen` | `Mod+Shift+f` | fullscreen |
+| `center` | `Mod+Space` | center |
+| `float` | `Mod+Shift+Space` | float |
+| `send_to_scratchpad` / `scratchpad` | `` Mod+Shift+` `` / `` Mod+` `` | to / from the scratchpad |
+| `close` | `Mod+q` | close |
+| `launcher` | `Mod+d` | dune-finder: apps |
+| `tile_options` | `Mod+/` | dune-finder: tile options |
+| `switcher` | none | dune-finder: windows |
+| `private_tile` | none | private tile |
+| `fold` | none | fold / open the tile |
+| `terminal_vertical` / `terminal_horizontal` | `Mod+v` / `Mod+s` | terminal right / below |
+| `terminal_tab` | none | terminal as a tab |
+| `stack_to_tabs` | `Mod+t` | stack to tabs |
+| `lock` | `Mod+Escape` | lock |
+| `quit` | `Mod+Shift+e` | quit |
+| `screenshot` / `_tile` / `_screen` | `Print` / `Ctrl+Print` / `Shift+Print` | screenshot region / tile / monitor |
+| `record` / `_tile` / `_screen` | `Mod+Shift+r` / `Mod+Ctrl+r` / `Mod+Ctrl+Shift+r` | record region / tile / monitor |
 
-Unbound by default: `switcher`, `private_tile`, `fold`, `terminal_tab`, `focus_monitor_*`.
 `Ctrl+Alt+F1..F12` always switch VTs on a real session.
 
 ---

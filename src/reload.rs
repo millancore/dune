@@ -1,4 +1,4 @@
-//! Applies `~/.config/dune/config` again when it is saved, like niri: its modification
+//! Applies `~/.config/dune/dune.toml` again when it is saved, like niri: its modification
 //! time is polled, so editors that replace the file instead of writing it also work.
 
 use std::{path::Path, time::{Duration, SystemTime}};
@@ -34,7 +34,8 @@ pub fn watch(loop_handle: &LoopHandle<'static, Dune>) {
 
 impl Dune {
     pub fn reload_config(&mut self) {
-        let new = crate::config::load();
+        // Not TOML (reported): the settings stay as they are until it is fixed.
+        let Some(new) = crate::config::load() else { return };
         if new == self.config {
             return;
         }
