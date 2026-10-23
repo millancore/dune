@@ -16,12 +16,12 @@ use smithay::{
     backend::{
         input::InputTime,
         renderer::{
-            ImportAll, ImportMem, Renderer,
             element::{
                 Kind,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             },
+            gles::GlesRenderer,
         },
     },
     desktop::{WindowSurfaceType, utils::under_from_surface_tree},
@@ -214,11 +214,7 @@ impl Dune {
     }
 
     /// What a locked `output` shows, front first: the pointer, its lock surface, black.
-    pub fn lock_elements<R>(&mut self, renderer: &mut R, output: &Output, with_pointer: bool) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    pub fn lock_elements(&mut self, renderer: &mut GlesRenderer, output: &Output, with_pointer: bool) -> Vec<OutputRenderElements> {
         let mut elements = if with_pointer { self.pointer_elements(renderer, output) } else { Vec::new() };
         let Some(geo) = self.space.output_geometry(output) else { return elements };
         let name = output.name();
@@ -226,7 +222,7 @@ impl Dune {
             // A monitor that changed size: the lock surface follows (nothing is sent otherwise).
             surface.with_pending_state(|state| state.size = Some((geo.size.w as u32, geo.size.h as u32).into()));
             surface.send_configure();
-            let surfaces: Vec<WaylandSurfaceRenderElement<R>> =
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(renderer, surface.wl_surface(), (0, 0), 1.0, 1.0, Kind::Unspecified);
             elements.extend(surfaces.into_iter().map(OutputRenderElements::Surface));
         }

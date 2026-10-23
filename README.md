@@ -464,6 +464,7 @@ focus_follows_mouse = true
 xwayland = "satellite"         # or "off"
 font = "JetBrains Mono"        # tab titles
 border_color = "none"          # "#RRGGBB", "#RRGGBBAA" or "none"
+corner_radius = 8              # px the corners of tiles round by, 0-64 (default 0: square)
 exec = ["waybar", "mako"]      # programs started with dune, in order
 
 [keyboard]

@@ -5,21 +5,22 @@ use std::{collections::HashMap, time::Duration};
 
 use smithay::{
     backend::renderer::{
-        ImportAll, ImportMem, Renderer,
+        Texture,
         element::{
-            AsRenderElements, Kind,
+            AsRenderElements, Element, Kind,
             memory::MemoryRenderBufferRenderElement,
             render_elements,
             utils::CropRenderElement,
             solid::{SolidColorBuffer, SolidColorRenderElement},
-            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            surface::{WaylandSurfaceRenderElement, WaylandSurfaceTexture, render_elements_from_surface_tree},
         },
+        gles::{GlesPixelProgram, GlesRenderer, element::PixelShaderElement},
     },
     desktop::{PopupManager, layer_map_for_output},
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     output::Output,
     reexports::wayland_server::Resource,
-    utils::{Physical, Point, Rectangle, Scale},
+    utils::{Logical, Physical, Point, Rectangle, Scale},
     wayland::shell::wlr_layer::Layer,
     wayland::compositor::with_states,
 };
@@ -27,6 +28,7 @@ use smithay::{
 use crate::{
     Dune,
     layout::{Rect, Side, TileId},
+    rounded::{Radii, Rounded, RoundedRect, Shaders},
     tab_title::WAVES,
     tiling::{BORDER, GAP},
 };
@@ -70,15 +72,21 @@ const WAVE_STEP_MS: u128 = 300;
 
 render_elements! {
     /// Everything on an output, front first: pointer, decorations, then clients.
-    pub OutputRenderElements<R> where R: ImportAll + ImportMem;
+    pub OutputRenderElements<=GlesRenderer>;
     Solid=SolidColorRenderElement,
     /// Clients: windows, layers and pointer surfaces.
-    Surface=WaylandSurfaceRenderElement<R>,
+    Surface=WaylandSurfaceRenderElement<GlesRenderer>,
     /// Tiled windows, cut to their tile (a buffer bigger than it, until the client draws
     /// the smaller size, stays off its neighbours).
-    Cropped=CropRenderElement<WaylandSurfaceRenderElement<R>>,
+    Cropped=CropRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     /// Pointer images and tab bars.
-    Image=MemoryRenderBufferRenderElement<R>,
+    Image=MemoryRenderBufferRenderElement<GlesRenderer>,
+    /// With `corner_radius`: borders and blocks, rounded.
+    Rect=PixelShaderElement,
+    /// With `corner_radius`: tiled windows and floats cut to their rounded tile.
+    RoundedSurface=Rounded<CropRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    /// With `corner_radius`: tab bars, rounded as the tile they top.
+    RoundedImage=Rounded<MemoryRenderBufferRenderElement<GlesRenderer>>,
 }
 
 /// Buffers behind the decorations, kept between frames so unchanged ones cause no damage.
@@ -99,6 +107,38 @@ pub struct Decorations {
     private: HashMap<TileId, SolidColorBuffer>,
     /// Top, bottom, left, right edges of the frame around what is being recorded.
     recording: [SolidColorBuffer; 4],
+    /// With `corner_radius`, in place of the solid ones above: borders, backdrops (and
+    /// glass), private covers, and the drop spot and dragged tile.
+    rings: HashMap<TileId, RoundedRect>,
+    rounded_backdrops: HashMap<TileId, RoundedRect>,
+    rounded_private: HashMap<TileId, RoundedRect>,
+    rounded_drop: RoundedRect,
+    rounded_dragged: RoundedRect,
+}
+
+/// A block of `color` over `rect` (global), placed from the output's `origin`: the solid
+/// `buffer`, or with a radius and the shader, `rounded` with the corners of `outer` (the
+/// tile box it is part of).
+#[allow(clippy::too_many_arguments)]
+fn block(
+    buffer: &mut SolidColorBuffer,
+    rounded: &mut RoundedRect,
+    program: Option<&GlesPixelProgram>,
+    origin: Point<i32, Logical>,
+    rect: Rect,
+    outer: Rect,
+    radii: Radii,
+    color: [f32; 4],
+) -> OutputRenderElements {
+    let local = |r: Rect| Rect::new(r.x - origin.x, r.y - origin.y, r.w, r.h);
+    match program.filter(|_| radii.iter().any(|r| *r > 0)) {
+        Some(program) => OutputRenderElements::Rect(rounded.update(program, local(rect), local(outer), radii, 0, color)),
+        None => {
+            buffer.update((rect.w, rect.h), color);
+            let at = Point::<i32, Physical>::from((rect.x - origin.x, rect.y - origin.y));
+            OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(buffer, at, 1.0, 1.0, Kind::Unspecified))
+        }
+    }
 }
 
 impl Dune {
@@ -112,16 +152,52 @@ impl Dune {
     /// A tile's `rect` grown to take in its column's bar, when it fills the shown tab's width
     /// right under it.
     fn with_tab_bar(&self, rect: Rect) -> Rect {
-        match self.tab_bars.iter().find(|b| b.rect.x == rect.x && b.rect.w == rect.w && b.rect.y + b.rect.h == rect.y) {
-            Some(bar) => Rect::new(rect.x, bar.rect.y, rect.w, rect.y + rect.h - bar.rect.y),
+        match self.tab_bars.iter().map(|b| self.drawn_bar(b)).find(|b| b.x == rect.x && b.w == rect.w && b.y + b.h == rect.y) {
+            Some(bar) => Rect::new(rect.x, bar.y, rect.w, rect.y + rect.h - bar.y),
             None => rect,
         }
+    }
+
+    /// Where `bar` is drawn: on top of its shown tab as drawn, so a sliding resize takes
+    /// it along instead of it jumping there first.
+    fn drawn_bar(&self, bar: &crate::layout::TabBar) -> Rect {
+        let Some((_, target)) = self.geometries.iter().find(|(t, _)| *t == bar.active) else { return bar.rect };
+        let drawn = self.drawn_rect(bar.active, *target);
+        Rect::new(drawn.x, drawn.y - (target.y - bar.rect.y), drawn.w, bar.rect.h)
+    }
+
+    /// The corners of `tile`'s box `outer` (with its tab bar): `corner_radius`, but square
+    /// where it meets a neighbour of its column (the tile above or below, beside it in its
+    /// row), so only the column's own corners round.
+    fn radii(&self, tile: TileId, outer: Rect) -> Radii {
+        let radius = self.config.corner_radius;
+        if self.is_floating(tile) {
+            return [radius; 4];
+        }
+        // Tiles of a column are `BORDER` apart, columns `GAP`: just past an edge, a point
+        // falls in a neighbour of the column only.
+        let reach = BORDER + 2;
+        let neighbours: Vec<Rect> = self
+            .shown
+            .iter()
+            .filter(|(t, _)| *t != tile && !self.is_floating(*t))
+            .filter_map(|(t, _)| self.geometries.iter().find(|(g, _)| g == t).map(|(_, r)| self.with_tab_bar(self.drawn_rect(*t, *r))))
+            .collect();
+        let taken = |x: i32, y: i32| neighbours.iter().any(|n| n.contains(x as f64, y as f64));
+        let (x0, y0, x1, y1) = (outer.x, outer.y, outer.x + outer.w - 1, outer.y + outer.h - 1);
+        [
+            taken(x0, y0 - reach) || taken(x0 - reach, y0),
+            taken(x1, y0 - reach) || taken(x1 + reach, y0),
+            taken(x1, y1 + reach) || taken(x1 + reach, y1),
+            taken(x0, y1 + reach) || taken(x0 - reach, y1),
+        ]
+        .map(|square| if square { 0 } else { radius })
     }
 
     /// While a tile of the strip is dragged: where it will land, then the tile darkened.
     /// (A dragged float just follows the pointer.) With Mod held near an edge of a tile
     /// instead: the band along that edge, its outer edge lit (`split_hint`).
-    fn drag_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
+    fn drag_elements(&mut self, output: &Output, shaders: &Shaders) -> Vec<OutputRenderElements> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
         if let Some((_, side, zone)) = self.split_hint() {
             let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
@@ -135,26 +211,27 @@ impl Dune {
             let decorations = &mut self.decorations;
             decorations.split_edge.update((edge.w, edge.h), FOCUS_COLOR);
             decorations.drop.update((zone.w, zone.h), DROP_COLOR);
-            return vec![
+            return [
                 SolidColorRenderElement::from_buffer(&decorations.split_edge, place(edge.x, edge.y), 1.0, 1.0, Kind::Unspecified),
                 SolidColorRenderElement::from_buffer(&decorations.drop, place(zone.x, zone.y), 1.0, 1.0, Kind::Unspecified),
-            ];
+            ]
+            .into_iter()
+            .map(OutputRenderElements::Solid)
+            .collect();
         }
         let Some(id) = self.move_drag.map(|d| d.tile).filter(|id| !self.is_floating(*id)) else { return Vec::new() };
-        let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
         let pos = self.seat.get_pointer().unwrap().current_location();
         let area = self.drop_spot(id, pos).map(|spot| spot.area);
-        let rect = self.shown_rect(id, output);
+        let rect = self.shown_rect(id, output).map(|r| (r, self.with_tab_bar(r))).map(|(r, o)| (r, o, self.radii(id, o)));
 
+        let (radius, program) = (self.config.corner_radius, shaders.rect.as_ref());
         let mut elements = Vec::new();
-        let decorations = &mut self.decorations;
+        let d = &mut self.decorations;
         if let Some(a) = area {
-            decorations.drop.update((a.w, a.h), DROP_COLOR);
-            elements.push(SolidColorRenderElement::from_buffer(&decorations.drop, place(a.x, a.y), 1.0, 1.0, Kind::Unspecified));
+            elements.push(block(&mut d.drop, &mut d.rounded_drop, program, origin, a, a, [radius; 4], DROP_COLOR));
         }
-        if let Some(r) = rect {
-            decorations.dragged.update((r.w, r.h), DRAGGED_COLOR);
-            elements.push(SolidColorRenderElement::from_buffer(&decorations.dragged, place(r.x, r.y), 1.0, 1.0, Kind::Unspecified));
+        if let Some((r, outer, radii)) = rect {
+            elements.push(block(&mut d.dragged, &mut d.rounded_dragged, program, origin, r, outer, radii, DRAGGED_COLOR));
         }
         elements
     }
@@ -182,16 +259,17 @@ impl Dune {
 
     /// Borders of the tiles picked by `only` that fall on `output`,
     /// front first, in the output's coordinates.
-    pub fn decoration_elements(&mut self, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<SolidColorRenderElement> {
+    pub fn decoration_elements(&mut self, output: &Output, shaders: &Shaders, only: &dyn Fn(TileId) -> bool) -> Vec<OutputRenderElements> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else {
             return Vec::new();
         };
         // Only tiles that are on screen get decorations.
-        let rects: HashMap<TileId, Rect> = self
+        let rects: HashMap<TileId, (Rect, Radii)> = self
             .tiles
             .keys()
             .filter(|t| only(**t))
             .filter_map(|t| Some((*t, self.with_tab_bar(self.shown_rect(*t, output)?))))
+            .map(|(t, r)| (t, (r, self.radii(t, r))))
             .collect();
         let tile_rect = |tile: &TileId| rects.get(tile).copied();
         let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - origin.x, y - origin.y));
@@ -199,32 +277,40 @@ impl Dune {
         let mut elements = Vec::new();
         let decorations = &mut self.decorations;
         decorations.borders.retain(|tile, _| self.tiles.contains_key(tile));
+        decorations.rings.retain(|tile, _| self.tiles.contains_key(tile));
+        let radius = self.config.corner_radius;
         // Neighbours inside a column share their border line: the focused tile goes first
         // so its colour wins there.
         let focused = self.focused;
         let order = self.shown.iter().filter(|(t, _)| Some(*t) == focused).chain(self.shown.iter().filter(|(t, _)| Some(*t) != focused));
         for (tile, _) in order {
-            let Some(rect) = tile_rect(tile) else { continue };
+            let Some((rect, radii)) = tile_rect(tile) else { continue };
             // Tiles without focus take `border_color`, and have no border when it is `none`.
             let Some(color) = (if self.focused == Some(*tile) { Some(FOCUS_COLOR) } else { self.config.border_color }) else {
                 continue;
             };
+            let b = BORDER.min(GAP);
+            // Rounded: one ring round the tile, its inside following the window's corners.
+            if let Some(program) = shaders.rect.as_ref().filter(|_| radius > 0) {
+                let ring = Rect::new(rect.x - b - origin.x, rect.y - b - origin.y, rect.w + 2 * b, rect.h + 2 * b);
+                let radii = radii.map(|r| if r > 0 { r + b } else { 0 });
+                let element = decorations.rings.entry(*tile).or_default().update(program, ring, ring, radii, b, color);
+                elements.push(OutputRenderElements::Rect(element));
+                continue;
+            }
             let buffers = decorations.borders.entry(*tile).or_default();
-            for (buffer, (x, y, w, h)) in buffers.iter_mut().zip(border_edges(rect, BORDER.min(GAP))) {
+            for (buffer, (x, y, w, h)) in buffers.iter_mut().zip(border_edges(rect, b)) {
                 buffer.update((w, h), color);
-                elements.push(SolidColorRenderElement::from_buffer(buffer, place(x, y), 1.0, 1.0, Kind::Unspecified));
+                elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(buffer, place(x, y), 1.0, 1.0, Kind::Unspecified)));
             }
         }
         elements
     }
 
     /// The bars of the tabs on `output`, with their window titles.
-    fn tab_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn tab_elements(&mut self, renderer: &mut GlesRenderer, output: &Output, shaders: &Shaders) -> Vec<OutputRenderElements> {
         let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
+        let local = |r: Rect| Rect::new(r.x - geo.loc.x, r.y - geo.loc.y, r.w, r.h);
         self.tab_titles.retain(&self.tabs);
         let mut elements = Vec::new();
         for tile in self.tabs.clone() {
@@ -236,10 +322,11 @@ impl Dune {
             // While its sound plays, the speaker's waves come one after another.
             let waves = (self.start_time.elapsed().as_millis() / WAVE_STEP_MS % (WAVES as u128 + 1)) as u8;
             let sound = self.plays_sound(tile).then_some(waves);
+            let radii = self.radii(tile, rect);
             let buffer = self.tab_titles.bar(tile, &title, (rect.w, rect.h), sound, leading);
             let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
             if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
-                elements.push(OutputRenderElements::Image(e));
+                elements.push(rounded_image(e, shaders, radii, local(rect)));
             }
         }
 
@@ -252,21 +339,21 @@ impl Dune {
             }
             let titles = bar.tabs.iter().map(|t| self.shown_title(*t)).collect();
             let shown = bar.tabs.iter().position(|t| *t == bar.active).unwrap_or(0);
-            let buffer = self.tab_titles.strip(bar.active, titles, shown, (bar.rect.w, bar.rect.h));
-            let at = Point::<f64, Physical>::from(((bar.rect.x - geo.loc.x) as f64, (bar.rect.y - geo.loc.y) as f64));
+            // The strip takes the top corners of the tile under it.
+            let rect = self.drawn_bar(&bar);
+            let outer = self.shown_rect(bar.active, output).map(|r| self.with_tab_bar(r)).unwrap_or(rect);
+            let radii = self.radii(bar.active, outer);
+            let buffer = self.tab_titles.strip(bar.active, titles, shown, (rect.w, rect.h));
+            let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
             if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
-                elements.push(OutputRenderElements::Image(e));
+                elements.push(rounded_image(e, shaders, radii, local(outer)));
             }
         }
         elements
     }
 
     /// The pointer on `output` (a real session draws it; nested, the host does).
-    pub fn pointer_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    pub fn pointer_elements(&mut self, renderer: &mut GlesRenderer, output: &Output) -> Vec<OutputRenderElements> {
         let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
         let location = self.seat.get_pointer().unwrap().current_location();
         if !geo.to_f64().contains(location) {
@@ -306,42 +393,38 @@ impl Dune {
     }
 
     /// Everything to draw on `output`, front first.
-    pub fn output_elements<R>(
+    pub fn output_elements(
         &mut self,
-        renderer: &mut R,
+        renderer: &mut GlesRenderer,
         output: &Output,
         with_pointer: bool,
-    ) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    ) -> Vec<OutputRenderElements> {
         // Called for every frame: a resize sliding into place moves on.
         self.step_resize_animation();
         // Locked: the lock surface over black, nothing of the session.
         if self.session_lock.is_locked() {
             return self.lock_elements(renderer, output, with_pointer);
         }
+        // The shaders are only built once a radius asks for them.
+        let shaders = if self.config.corner_radius > 0 { Shaders::get(renderer) } else { Shaders::default() };
         let mut elements = if with_pointer {
             self.pointer_elements(renderer, output)
         } else {
             Vec::new()
         };
         elements.extend(self.recording_elements(output).into_iter().map(OutputRenderElements::Solid));
-        elements.extend(
-            self.drag_elements(output)
-                .into_iter()
-                .map(OutputRenderElements::Solid),
-        );
+        elements.extend(self.drag_elements(output, &shaders));
         // A fullscreen tile covers the bars: only Overlay layers (and the pointer) are over it.
         if let Some(cover) = self.covers.get(&output.name()).copied() {
             elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay], true));
             let only = |t: TileId| t == cover;
-            elements.extend(self.private_elements(renderer, output, &only));
+            // Fullscreen is square: it fills the monitor.
+            let square = Shaders::default();
+            elements.extend(self.private_elements(renderer, output, &square, &only));
             if !self.privacy.tile(cover) {
-                elements.extend(self.window_elements(renderer, output, &only));
+                elements.extend(self.window_elements(renderer, output, &square, &only));
             }
-            elements.extend(self.backdrop_elements(output, &only).into_iter().map(OutputRenderElements::Solid));
+            elements.extend(self.backdrop_elements(output, &square, &only));
             return elements;
         }
         elements.extend(self.layer_elements(renderer, output, &[Layer::Overlay, Layer::Top], true));
@@ -354,55 +437,56 @@ impl Dune {
         // Floats, front to back, each with its border over its window, above the strip.
         let floats: Vec<TileId> = self.floating.get(&output.name()).into_iter().flatten().rev().map(|(t, _)| *t).collect();
         for float in &floats {
-            elements.extend(self.decoration_elements(output, &|t| t == *float).into_iter().map(OutputRenderElements::Solid));
-            elements.extend(self.private_elements(renderer, output, &|t| t == *float));
-            elements.extend(self.window_elements(renderer, output, &|t| t == *float && public(t)));
+            elements.extend(self.decoration_elements(output, &shaders, &|t| t == *float));
+            elements.extend(self.private_elements(renderer, output, &shaders, &|t| t == *float));
+            elements.extend(self.window_elements(renderer, output, &shaders, &|t| t == *float && public(t)));
         }
         let tiled = |t: TileId| !floats.contains(&t);
-        elements.extend(self.decoration_elements(output, &tiled).into_iter().map(OutputRenderElements::Solid));
-        let tabs = self.tab_elements(renderer, output);
+        elements.extend(self.decoration_elements(output, &shaders, &tiled));
+        let tabs = self.tab_elements(renderer, output, &shaders);
         elements.extend(tabs);
-        elements.extend(self.private_elements(renderer, output, &tiled));
-        elements.extend(self.window_elements(renderer, output, &|t| tiled(t) && public(t)));
-        elements.extend(self.backdrop_elements(output, &tiled).into_iter().map(OutputRenderElements::Solid));
+        elements.extend(self.private_elements(renderer, output, &shaders, &tiled));
+        elements.extend(self.window_elements(renderer, output, &shaders, &|t| tiled(t) && public(t)));
+        elements.extend(self.backdrop_elements(output, &shaders, &tiled));
         elements.extend(self.layer_elements(renderer, output, &[Layer::Bottom, Layer::Background], false));
         elements
     }
 
     /// An opaque block with the lock mark over each private tile of `output` picked by
     /// `only` (folded tabs keep their bar), where its window would be.
-    fn private_elements<R>(&mut self, renderer: &mut R, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn private_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        shaders: &Shaders,
+        only: &dyn Fn(TileId) -> bool,
+    ) -> Vec<OutputRenderElements> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
-        let rects: Vec<(TileId, Rect)> = self
+        let rects: Vec<(TileId, Rect, Rect, Radii)> = self
             .tiles
             .iter()
             .filter(|(t, tile)| only(**t) && self.privacy.tile(**t) && tile.top().is_some() && !self.tabs.contains(t))
             .filter_map(|(t, _)| Some((*t, self.shown_rect(*t, output)?)))
+            .map(|(t, r)| (t, r, self.with_tab_bar(r)))
+            .map(|(t, r, o)| (t, r, o, self.radii(t, o)))
             .collect();
         let privacy = &self.privacy;
         self.decorations.private.retain(|t, _| privacy.tile(*t));
+        self.decorations.rounded_private.retain(|t, _| privacy.tile(*t));
+        let program = shaders.rect.as_ref();
         let mut elements = Vec::new();
-        for (t, rect) in rects {
+        for (t, rect, outer, radii) in rects {
             elements.extend(self.lock_mark(renderer, (origin.x, origin.y), rect));
-            let buffer = self.decorations.private.entry(t).or_default();
-            buffer.update((rect.w, rect.h), PRIVATE_COLOR);
-            let at = Point::<i32, Physical>::from((rect.x - origin.x, rect.y - origin.y));
-            elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(buffer, at, 1.0, 1.0, Kind::Unspecified)));
+            let d = &mut self.decorations;
+            let (buffer, rounded) = (d.private.entry(t).or_default(), d.rounded_private.entry(t).or_default());
+            elements.push(block(buffer, rounded, program, origin, rect, outer, radii, PRIVATE_COLOR));
         }
         elements
     }
 
     /// The lock mark (`PRIVATE_LABEL`) in the middle of `rect`, placed from the output's
     /// `origin`; none when it does not fit.
-    fn lock_mark<R>(&mut self, renderer: &mut R, origin: (i32, i32), rect: Rect) -> Option<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn lock_mark(&mut self, renderer: &mut GlesRenderer, origin: (i32, i32), rect: Rect) -> Option<OutputRenderElements> {
         let (buffer, (w, h)) = self.tab_titles.mark(PRIVATE_LABEL);
         if w > rect.w || h > rect.h {
             return None;
@@ -416,11 +500,7 @@ impl Dune {
 
     /// The marks floating at the left and right edges of `output` when tiles of its strip
     /// are past them, telling how many: `‹3`, `2›`.
-    fn edge_mark_elements<R>(&mut self, renderer: &mut R, output: &Output) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn edge_mark_elements(&mut self, renderer: &mut GlesRenderer, output: &Output) -> Vec<OutputRenderElements> {
         let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
         let (left, right) = self.edge_counts.get(&output.name()).copied().unwrap_or_default();
         let mut elements = Vec::new();
@@ -446,12 +526,15 @@ impl Dune {
 
     /// The windows of the tiles of `output` picked by `only`. A column partly scrolled off
     /// its output reaches into the neighbouring one; it is only drawn on its own.
-    fn window_elements<R>(&self, renderer: &mut R, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn window_elements(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        shaders: &Shaders,
+        only: &dyn Fn(TileId) -> bool,
+    ) -> Vec<OutputRenderElements> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
+        let clip = shaders.clip.as_ref().filter(|_| self.config.corner_radius > 0);
         let mut elements = Vec::new();
         for (id, tile) in &self.tiles {
             let Some(window) = tile.top() else { continue };
@@ -460,9 +543,14 @@ impl Dune {
             }
             let Some(loc) = self.space.element_location(window) else { continue };
             let at = (loc - window.geometry().loc - origin).to_physical(1);
-            let tile_rect = (!self.is_floating(*id)).then(|| self.shown_rect(*id, output)).flatten();
+            // Floats are cut to their window too once corners round, past which CSD
+            // shadows would show square.
+            let tile_rect = match self.is_floating(*id) {
+                false => self.shown_rect(*id, output),
+                true => clip.map(|_| Rect::new(loc.x, loc.y, window.geometry().size.w, window.geometry().size.h)),
+            };
             let (Some(rect), Some(toplevel)) = (tile_rect, window.toplevel()) else {
-                let surfaces: Vec<WaylandSurfaceRenderElement<R>> = window.render_elements(renderer, at, Scale::from(1.0), 1.0);
+                let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = window.render_elements(renderer, at, Scale::from(1.0), 1.0);
                 elements.extend(surfaces.into_iter().map(OutputRenderElements::Surface));
                 continue;
             };
@@ -470,65 +558,79 @@ impl Dune {
             let surface = toplevel.wl_surface();
             for (popup, offset) in PopupManager::popups_for_surface(surface) {
                 let popup_at = at + (window.geometry().loc + offset - popup.geometry().loc).to_physical(1);
-                let popups: Vec<WaylandSurfaceRenderElement<R>> =
+                let popups: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                     render_elements_from_surface_tree(renderer, popup.wl_surface(), popup_at, 1.0, 1.0, Kind::Unspecified);
                 elements.extend(popups.into_iter().map(OutputRenderElements::Surface));
             }
             let crop = Rectangle::new((rect.x - origin.x, rect.y - origin.y).into(), (rect.w, rect.h).into());
-            let surfaces: Vec<WaylandSurfaceRenderElement<R>> =
+            // Rounded as the tile, a column's tab strip taking its top corners.
+            let outer = self.with_tab_bar(rect);
+            let radii = self.radii(*id, outer);
+            let outer = Rect::new(outer.x - origin.x, outer.y - origin.y, outer.w, outer.h);
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(renderer, surface, at, 1.0, 1.0, Kind::Unspecified);
-            elements.extend(
-                surfaces
-                    .into_iter()
-                    .filter_map(|e| CropRenderElement::from_element(e, Scale::from(1.0), crop))
-                    .map(OutputRenderElements::Cropped),
-            );
+            for e in surfaces {
+                let texture = match e.texture() {
+                    WaylandSurfaceTexture::Texture(texture) => Some(texture.size()),
+                    WaylandSurfaceTexture::SolidColor(_) => None,
+                };
+                let Some(cropped) = CropRenderElement::from_element(e, Scale::from(1.0), crop) else { continue };
+                elements.push(match (clip, texture) {
+                    (Some(clip), Some(texture)) => {
+                        OutputRenderElements::RoundedSurface(Rounded::new(cropped, clip, texture, outer, radii))
+                    }
+                    _ => OutputRenderElements::Cropped(cropped),
+                });
+            }
         }
         elements
     }
 
     /// A solid tile under each window picked by `only` on `output`, at its tile's place;
     /// glass, with a sheen along its top, filling each empty container.
-    fn backdrop_elements(&mut self, output: &Output, only: &dyn Fn(TileId) -> bool) -> Vec<SolidColorRenderElement> {
+    fn backdrop_elements(&mut self, output: &Output, shaders: &Shaders, only: &dyn Fn(TileId) -> bool) -> Vec<OutputRenderElements> {
         let Some(origin) = self.space.output_geometry(output).map(|g| g.loc) else { return Vec::new() };
-        let rects: Vec<(TileId, Rect, bool)> = self
+        let rects: Vec<(TileId, Rect, Rect, bool, Radii)> = self
             .tiles
             .iter()
             .filter(|(t, tile)| only(**t) && (tile.top().is_some() || tile.reserved) && !self.tabs.contains(t))
             .filter_map(|(t, tile)| Some((*t, self.shown_rect(*t, output)?, tile.top().is_none())))
+            .map(|(t, r, empty)| (t, r, self.with_tab_bar(r), empty))
+            .map(|(t, r, o, empty)| (t, r, o, empty, self.radii(t, o)))
             .collect();
         let decorations = &mut self.decorations;
-        decorations.backdrops.retain(|t, _| rects.iter().any(|(r, _, _)| r == t));
-        decorations.sheens.retain(|t, _| rects.iter().any(|(r, _, empty)| r == t && *empty));
+        decorations.backdrops.retain(|t, _| rects.iter().any(|(r, ..)| r == t));
+        decorations.rounded_backdrops.retain(|t, _| rects.iter().any(|(r, ..)| r == t));
+        decorations.sheens.retain(|t, _| rects.iter().any(|(r, _, _, empty, _)| r == t && *empty));
+        let program = shaders.rect.as_ref();
         let mut elements = Vec::new();
-        for (t, rect, empty) in rects {
-            let at = Point::<i32, Physical>::from((rect.x - origin.x, rect.y - origin.y));
+        for (t, rect, outer, empty, radii) in rects {
             if empty {
+                // Off the rounded corners, when the glass tops its tile.
+                let top = radii[0].max(radii[1]);
+                let inset = if program.is_some() && top > 0 && outer.y == rect.y { top.min(rect.w / 2) } else { 0 };
+                let at = Point::<i32, Physical>::from((rect.x + inset - origin.x, rect.y - origin.y));
                 let sheen = decorations.sheens.entry(t).or_default();
-                sheen.update((rect.w, GLASS_SHEEN_HEIGHT), GLASS_SHEEN);
-                elements.push(SolidColorRenderElement::from_buffer(sheen, at, 1.0, 1.0, Kind::Unspecified));
+                sheen.update((rect.w - 2 * inset, GLASS_SHEEN_HEIGHT), GLASS_SHEEN);
+                elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(sheen, at, 1.0, 1.0, Kind::Unspecified)));
             }
-            let buffer = decorations.backdrops.entry(t).or_default();
-            buffer.update((rect.w, rect.h), if empty { GLASS_COLOR } else { BACKDROP_COLOR });
-            elements.push(SolidColorRenderElement::from_buffer(buffer, at, 1.0, 1.0, Kind::Unspecified));
+            let color = if empty { GLASS_COLOR } else { BACKDROP_COLOR };
+            let (buffer, rounded) = (decorations.backdrops.entry(t).or_default(), decorations.rounded_backdrops.entry(t).or_default());
+            elements.push(block(buffer, rounded, program, origin, rect, outer, radii, color));
         }
         elements
     }
 
     /// Layer surfaces (bars, launchers, wallpapers) of `output` on `layers`, front first;
     /// with their popups, or without them when those are drawn apart (`layer_popup_elements`).
-    fn layer_elements<R>(&self, renderer: &mut R, output: &Output, layers: &[Layer], popups: bool) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn layer_elements(&self, renderer: &mut GlesRenderer, output: &Output, layers: &[Layer], popups: bool) -> Vec<OutputRenderElements> {
         let map = layer_map_for_output(output);
         let mut elements = Vec::new();
         for layer in layers {
             for surface in map.layers_on(*layer).rev() {
                 let Some(geo) = map.layer_geometry(surface) else { continue };
                 let at = geo.loc.to_physical(1);
-                let surfaces: Vec<WaylandSurfaceRenderElement<R>> = if popups {
+                let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if popups {
                     surface.render_elements(renderer, at, Scale::from(1.0), 1.0)
                 } else {
                     render_elements_from_surface_tree(renderer, surface.wl_surface(), at, 1.0, 1.0, Kind::Unspecified)
@@ -540,11 +642,7 @@ impl Dune {
     }
 
     /// The popups (tooltips, menus) of the layer surfaces of `output` on `layers`, front first.
-    fn layer_popup_elements<R>(&self, renderer: &mut R, output: &Output, layers: &[Layer]) -> Vec<OutputRenderElements<R>>
-    where
-        R: Renderer + ImportAll + ImportMem,
-        R::TextureId: Clone + Send + 'static,
-    {
+    fn layer_popup_elements(&self, renderer: &mut GlesRenderer, output: &Output, layers: &[Layer]) -> Vec<OutputRenderElements> {
         let map = layer_map_for_output(output);
         let mut elements = Vec::new();
         for layer in layers {
@@ -552,7 +650,7 @@ impl Dune {
                 let Some(geo) = map.layer_geometry(surface) else { continue };
                 for (popup, offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
                     let at = (geo.loc + offset - popup.geometry().loc).to_physical(1);
-                    let surfaces: Vec<WaylandSurfaceRenderElement<R>> =
+                    let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                         render_elements_from_surface_tree(renderer, popup.wl_surface(), at, 1.0, 1.0, Kind::Unspecified);
                     elements.extend(surfaces.into_iter().map(OutputRenderElements::Surface));
                 }
@@ -581,6 +679,17 @@ impl Dune {
         self.refresh_idle_inhibit();
         self.popups.cleanup();
         let _ = self.display_handle.flush_clients();
+    }
+}
+
+/// A tab bar's image, rounded as the corners of `outer` (output-local) with `radii`.
+fn rounded_image(e: MemoryRenderBufferRenderElement<GlesRenderer>, shaders: &Shaders, radii: Radii, outer: Rect) -> OutputRenderElements {
+    match shaders.clip.as_ref().filter(|_| radii.iter().any(|r| *r > 0)) {
+        Some(clip) => {
+            let texture = e.src().size.to_i32_round();
+            OutputRenderElements::RoundedImage(Rounded::new(e, clip, texture, outer, radii))
+        }
+        None => OutputRenderElements::Image(e),
     }
 }
 

@@ -11,6 +11,7 @@
 //! xwayland = "satellite"      # X11 apps through xwayland-satellite, or "off"
 //! font = "JetBrains Mono"     # tab titles; default monospace
 //! border_color = "#ffffff"    # border of tiles without focus: #RRGGBB or #RRGGBBAA, or "none"; default white
+//! corner_radius = 8           # px the corners of tiles are rounded by (0-64); default 0, square
 //! exec = ["waybar", "mako"]   # run when dune starts, in order
 //!
 //! [keyboard]
@@ -547,6 +548,8 @@ pub struct Config {
     pub tab_widths: TabWidths,
     /// The border of tiles without focus (premultiplied RGBA); `None`: not drawn.
     pub border_color: Option<[f32; 4]>,
+    /// How many pixels the corners of tiles are rounded by; 0: square.
+    pub corner_radius: i32,
     /// Shell commands run when dune starts (`exec`, in order).
     pub exec: Vec<String>,
     /// Where screenshots go (`~/` for the home folder); empty: `$XDG_PICTURES_DIR/Screenshots`.
@@ -608,6 +611,7 @@ struct File {
     xwayland: Option<String>,
     font: Option<String>,
     border_color: Option<String>,
+    corner_radius: Option<i64>,
     exec: Vec<String>,
     keyboard: KeyboardFile,
     tabs: TabsFile,
@@ -730,6 +734,7 @@ fn resolve(file: &File, env: &dyn Fn(&str) -> Option<String>) -> Config {
         font_family: file.font.clone().filter(|f| !f.is_empty()).unwrap_or_else(|| "monospace".into()),
         tab_widths: tab_widths(&file.tabs),
         border_color: border_color(file.border_color.as_deref()),
+        corner_radius: number("corner_radius", file.corner_radius, 0, 0..=64),
         exec: file.exec.iter().filter(|c| !c.trim().is_empty()).cloned().collect(),
         screenshot_dir: file.capture.screenshot_dir.clone(),
         recording_dir: file.capture.recording_dir.clone(),
@@ -1061,6 +1066,14 @@ mod tests {
         // Out of range: the default; a maximum under the minimum: the minimum.
         let c = config("[tabs]\nmin_width = 5\nmax_width = 100\n");
         assert_eq!(c.tab_widths, TabWidths { min: TabWidths::default().min, max: TabWidths::default().min });
+    }
+
+    #[test]
+    fn corner_radius() {
+        assert_eq!(config("").corner_radius, 0);
+        assert_eq!(config("corner_radius = 8\n").corner_radius, 8);
+        assert_eq!(config("corner_radius = 100\n").corner_radius, 0);
+        assert_eq!(config("corner_radius = -1\n").corner_radius, 0);
     }
 
     #[test]

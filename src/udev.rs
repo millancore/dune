@@ -57,7 +57,7 @@ use crate::{
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
-type Elements = OutputRenderElements<GlesRenderer>;
+type Elements = OutputRenderElements;
 
 /// How often outputs are checked for something new to show (frames with no damage
 /// cost nothing).

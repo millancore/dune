@@ -393,6 +393,7 @@ name = "dune"
 version = "0.1.0"
 dependencies = [
  "dune-common",
+ "glam",
  "libc",
  "nix",
  "serde",
