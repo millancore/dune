@@ -100,7 +100,7 @@ pub struct Finder {
     help: bool,
 }
 
-/// The footer under every mode; its keys are listed by `?`.
+/// The keys of every mode, the hint while `?` lists a mode's own.
 const HELP_HINT: &str = "?: keys · Mod+Tab: mode · Esc: close";
 
 impl Finder {
@@ -457,6 +457,8 @@ impl Finder {
         if self.help {
             view.prompt = "?▏".into();
             view.rows = help_rows(view.hint);
+        } else if self.nothing_typed() {
+            view.placeholder = "?";
         }
         view.hint = HELP_HINT;
         view
@@ -474,7 +476,7 @@ impl Finder {
         }
         match (self.mode, &self.windows, &self.files) {
             (Mode::Windows, Some(windows), _) => windows.view(icons, icon_size),
-            (Mode::Files, _, Some(files)) => files.view(icons, icon_size, self.apps.status()),
+            (Mode::Files, _, Some(files)) => files.view(icons, icon_size, self.apps.note(), self.apps.side()),
             _ => self.apps.view(icons, icon_size),
         }
     }

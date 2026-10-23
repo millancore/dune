@@ -274,11 +274,12 @@ impl Windows {
                 selected: *i == self.selected,
             })
             .collect();
-        let kind = if locked { "locked windows" } else { "windows" };
         View {
             prompt: format!("/ {}▏", self.query),
             rows,
-            status: format!("{} / {} {kind}", self.matches.len(), entries.len()),
+            placeholder: "",
+            note: if locked { "locked windows".into() } else { String::new() },
+            side: None,
             hint: HINT,
         }
     }

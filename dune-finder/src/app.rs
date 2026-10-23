@@ -103,6 +103,8 @@ struct App {
     output_size: (i32, i32),
     /// No list shown yet (`--compact`, nothing typed or browsed).
     compact: bool,
+    /// Height of the list the panel is sized for: that of the rows shown.
+    list: i32,
     configured: bool,
     exit: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -155,7 +157,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         }
         finder.show_tile_options(rows);
     }
-    let (w, h) = panel::panel_size(font.as_ref(), i32::MAX, panel::ROWS);
+    let (w, h) = panel::panel_size(font.as_ref(), i32::MAX, panel::ROWS as i32 * panel::line_height(font.as_ref()));
     let compact = options.compact && finder.untouched();
 
     let mut app = App {
@@ -169,6 +171,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         size: (w, h),
         output_size: (1920, 1080),
         compact,
+        list: panel::ROWS as i32 * panel::line_height(font.as_ref()),
         configured: false,
         exit: false,
         keyboard: None,
@@ -232,22 +235,22 @@ fn tile_options(tile: Option<TileId>) -> Vec<TileOption> {
     }
 }
 
-/// Where the panel with `rows` rows goes on an output of `output` size: centered across it
+/// Where the panel with a list `list` pixels tall goes on an output of `output` size: centered across it
 /// a quarter of the way down, or in the middle of the empty container `at`. Its size, then
 /// its top-left corner as the top and left margins.
 fn placement(
     font: Option<&Font>,
     output: (i32, i32),
     at: Option<(i32, i32, i32, i32)>,
-    rows: usize,
+    list: i32,
 ) -> ((i32, i32), (i32, i32)) {
     match at {
         Some((x, y, w, h)) => {
-            let size = panel::panel_size(font, w - 2 * GAP, rows);
+            let size = panel::panel_size(font, w - 2 * GAP, list);
             (size, (y + ((h - size.1) / 2).max(0), x + (w - size.0) / 2))
         }
         None => {
-            let size = panel::panel_size(font, output.0 - 2 * GAP, rows);
+            let size = panel::panel_size(font, output.0 - 2 * GAP, list);
             (
                 size,
                 (((output.1 - size.1) / 4).max(0), (output.0 - size.0) / 2),
@@ -279,8 +282,7 @@ impl App {
             })
             .unwrap_or((1920, 1080));
         self.output_size = output_size;
-        let (size, (top, left)) = placement(self.font.as_ref(), output_size, self.options.at, self.rows());
-        self.size = size;
+        let (size, (top, left)) = self.place();
 
         let surface = compositor.create_surface(qh);
         let layer = layer_shell.create_layer_surface(
@@ -305,29 +307,61 @@ impl App {
         if self.compact { 0 } else { panel::ROWS }
     }
 
+    /// Height of the list the rows shown take: less than `rows()` lines when fewer match.
+    fn shown_list(&mut self) -> i32 {
+        let rows = self.rows();
+        let icon_size = panel::icon_size(self.font.as_ref());
+        let view = self.finder.view(&mut self.icons, icon_size);
+        panel::list_height(self.font.as_ref(), &view.rows, rows)
+    }
+
+    /// The panel's size for the list its rows take, and its top-left corner: where the
+    /// panel with all `rows()` lines goes, so it does not move as matches come and go.
+    fn place(&mut self) -> ((i32, i32), (i32, i32)) {
+        self.list = self.shown_list();
+        let font = self.font.as_ref();
+        // The tile options' rows are all there from the start: centered as they are.
+        let full = match self.options.mode {
+            Mode::TileOptions => self.list,
+            _ => self.rows() as i32 * panel::line_height(font),
+        };
+        let (_, corner) = placement(font, self.output_size, self.options.at, full);
+        let (size, _) = placement(font, self.output_size, self.options.at, self.list);
+        self.size = size;
+        (size, corner)
+    }
+
+    /// Fit the panel to the list its rows take; drawn again once configured.
+    fn resize(&mut self) {
+        let (size, (top, left)) = self.place();
+        let Some(layer) = &self.layer else { return };
+        layer.set_size(size.0 as u32, size.1 as u32);
+        layer.set_margin(top, 0, 0, left);
+        layer.commit();
+    }
+
     /// A compact panel something was typed or browsed in grows to the whole panel.
     fn grow(&mut self) {
         if !self.compact || self.finder.untouched() {
             return;
         }
         self.compact = false;
-        let Some(layer) = &self.layer else { return };
-        let (size, (top, left)) = placement(self.font.as_ref(), self.output_size, self.options.at, self.rows());
-        self.size = size;
-        layer.set_size(size.0 as u32, size.1 as u32);
-        layer.set_margin(top, 0, 0, left);
+        self.resize();
     }
 
     fn draw(&mut self) {
-        let Some(layer) = &self.layer else { return };
-        if !self.configured {
+        if self.layer.is_none() || !self.configured {
             return;
         }
+        if self.shown_list() != self.list {
+            return self.resize();
+        }
+        let Some(layer) = &self.layer else { return };
         let (w, h) = self.size;
-        let rows = self.rows();
+        let list = self.list;
         let icon_size = panel::icon_size(self.font.as_ref());
         let view = self.finder.view(&mut self.icons, icon_size);
-        let pixels = panel::draw(self.font.as_mut(), self.small_font.as_mut(), &view, (w, h), rows);
+        let pixels = panel::draw(self.font.as_mut(), self.small_font.as_mut(), &view, (w, h), list);
         let Ok((buffer, canvas)) = self
             .pool
             .create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)
@@ -434,7 +468,9 @@ impl App {
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
             } => {
-                let row = panel::row_at(self.font.as_ref(), event.position.1, self.rows());
+                let icon_size = panel::icon_size(self.font.as_ref());
+                let view = self.finder.view(&mut self.icons, icon_size);
+                let row = panel::row_at(self.font.as_ref(), event.position.1, &view.rows, self.list);
                 let action = self.finder.click(row);
                 self.act(action);
             }
@@ -649,11 +685,12 @@ mod tests {
 
     #[test]
     fn the_panel_is_placed_on_the_output_or_in_the_container() {
-        let ((w, h), (top, left)) = placement(None, (4000, 2000), None, panel::ROWS);
+        let list = panel::ROWS as i32 * panel::line_height(None);
+        let ((w, h), (top, left)) = placement(None, (4000, 2000), None, list);
         assert_eq!(left, (4000 - w) / 2);
         assert_eq!(top, (2000 - h) / 4);
         // In a container narrower than the panel: it shrinks to fit inside.
-        let ((w, h), (top, left)) = placement(None, (4000, 2000), Some((100, 50, 400, 2000)), panel::ROWS);
+        let ((w, h), (top, left)) = placement(None, (4000, 2000), Some((100, 50, 400, 2000)), list);
         assert_eq!(w, 400 - 2 * GAP);
         assert_eq!(left, 100 + GAP);
         assert_eq!(top, 50 + (2000 - h) / 2);

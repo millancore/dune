@@ -169,6 +169,8 @@ impl Picker {
 
     pub fn feed(&mut self, key: Key) -> Outcome {
         match key {
+            // No program before it: a space would complete paths for nothing.
+            Key::Char(c) if c.is_whitespace() && self.input.is_empty() => {}
             Key::Char(c) => self.edit(|input| input.push(c)),
             Key::Backspace if self.input.is_empty() && !self.browse => return Outcome::Cancel,
             Key::Backspace => self.edit(|input| {
@@ -414,6 +416,17 @@ mod tests {
         // Typing filters as usual.
         typed(&mut p, "neo");
         assert_eq!(labels(&p), ["Neovim"]);
+    }
+
+    #[test]
+    fn a_space_before_anything_is_typed_is_ignored() {
+        let mut p = Picker::browser(picker().apps, std::env::temp_dir(), HashMap::new());
+        typed(&mut p, "  ");
+        assert_eq!(p.input(), "");
+        assert_eq!(labels(&p), ["Files", "Firefox", "Neovim", "Visual Studio Code"]);
+        // After the program, a space starts its arguments.
+        typed(&mut p, "nvim ");
+        assert_eq!(p.input(), "nvim ");
     }
 
     #[test]

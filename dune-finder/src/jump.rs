@@ -15,7 +15,7 @@ use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
 
 use crate::{
     icons::Icons,
-    panel::{ROWS, Row, View},
+    panel::{ROWS, Row, View, tall_icon_size},
 };
 
 const FOLDER_ICON: &str = "folder";
@@ -116,7 +116,7 @@ impl Jump {
 
     /// Row `row` of the list was clicked: a terminal in its folder.
     pub fn click(&mut self, row: usize) -> Step {
-        let i = first_shown(self.selected) + row / 2;
+        let i = first_shown(self.selected) + row;
         match self.matches.get(i) {
             Some(f) => Step::Go(self.folders[*f].clone()),
             None => Step::Continue,
@@ -145,12 +145,13 @@ impl Jump {
         self.matches = named.into_iter().chain(inside).collect();
     }
 
-    /// What the panel shows; icons of `icon_size` pixels. Each folder on two lines: its
-    /// name, then (dim) its path.
+    /// What the panel shows; icons of `icon_size` pixels. Each folder on two lines by a
+    /// taller icon: its name, then (dim) its path.
     pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32) -> View<'a> {
-        icons.get(FOLDER_ICON, icon_size);
+        let size = tall_icon_size(icon_size);
+        icons.get(FOLDER_ICON, size);
         let icons: &Icons = icons;
-        let icon = icons.cached(FOLDER_ICON, icon_size);
+        let icon = icons.cached(FOLDER_ICON, size);
         let first = first_shown(self.selected);
         let rows = self
             .matches
@@ -169,7 +170,9 @@ impl Jump {
         View {
             prompt: format!("> {}▏", self.query),
             rows,
-            status: format!("{} / {} folders", self.matches.len(), self.folders.len()),
+            placeholder: "",
+            note: String::new(),
+            side: None,
             hint: &self.hint,
         }
     }
@@ -184,8 +187,8 @@ fn tilde(path: &Path, home: &Path) -> String {
     }
 }
 
-/// Folders shown at once, two lines each.
-const SHOWN: usize = ROWS / 2;
+/// Folders shown at once: a folder's row (`Row::height`) is about a line and a half.
+const SHOWN: usize = ROWS * 2 / 3;
 
 /// First of the `SHOWN` matches, so the selected one is among them.
 fn first_shown(selected: usize) -> usize {
@@ -241,10 +244,9 @@ mod tests {
         assert_eq!(j.feed(&none(), Keysym::Return, None), Step::Go("/srv/app".into()));
         let logo = Modifiers { logo: true, ..Default::default() };
         assert_eq!(j.feed(&logo, Keysym::Return, None), Step::Manage("/srv/app".into()));
-        // Two lines a folder: either one is it.
-        assert_eq!(j.click(6), Step::Go("/home/me".into()));
-        assert_eq!(j.click(7), Step::Go("/home/me".into()));
-        assert_eq!(j.click(8), Step::Continue);
+        // A click gives the row of the folder, not a line.
+        assert_eq!(j.click(3), Step::Go("/home/me".into()));
+        assert_eq!(j.click(4), Step::Continue);
     }
 
     #[test]

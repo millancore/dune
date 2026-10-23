@@ -129,14 +129,30 @@ impl Apps {
         self.dest().unwrap_or(self.keys_dest())
     }
 
-    /// The line under the list: where what is chosen opens.
-    pub fn status(&self) -> String {
-        match self.slot {
-            true if self.enter_is_terminal() => "opens a terminal here".into(),
-            true => "opens here".into(),
-            false => self
-                .dest()
-                .map_or_else(|| DEST_HELP.to_string(), |d| d.label()),
+    /// Where what is chosen opens, besides a side of this tile (`side`), at the prompt
+    /// line's right: empty for a new column, or in the empty container it was opened for.
+    pub fn note(&self) -> String {
+        if self.slot {
+            return String::new();
+        }
+        let Some(dest) = self.dest() else { return DEST_HELP.into() };
+        if dest.tab {
+            return "as a tab".into();
+        }
+        let mut parts = Vec::new();
+        if dest.place == Place::Float {
+            parts.push("floating".to_string());
+        }
+        parts.extend(dest.monitor.map(|m| format!("monitor {m}")));
+        parts.extend(dest.desk.map(|d| format!("desktop {d}")));
+        parts.join(" · ")
+    }
+
+    /// The side of the focused tile what is chosen opens on, if one.
+    pub fn side(&self) -> Option<Side> {
+        match self.dest()? {
+            Dest { tab: false, place: Place::Side(side), .. } if !self.slot => Some(side),
+            _ => None,
         }
     }
 
@@ -259,7 +275,9 @@ impl Apps {
         View {
             prompt: format!("{}▏", self.picker.input()),
             rows,
-            status: self.status(),
+            placeholder: "",
+            note: self.note(),
+            side: self.side(),
             hint,
         }
     }
@@ -348,6 +366,21 @@ mod tests {
     fn enter_alone_in_an_empty_container_is_a_terminal() {
         let mut a = in_slot();
         assert_eq!(press(&mut a, Keysym::Return, false), launch("", true, None));
+    }
+
+    #[test]
+    fn a_side_of_this_tile_shows_as_a_mini_tile() {
+        let mut a = launcher();
+        assert_eq!((a.side(), a.note()), (None, String::new()));
+        press(&mut a, Keysym::Right, true);
+        assert_eq!((a.side(), a.note()), (Some(Side::Right), String::new()));
+        // As a tab it opens on no side.
+        press(&mut a, Keysym::t, true);
+        assert_eq!((a.side(), a.note()), (None, "as a tab".to_string()));
+        // In the empty container it was opened for: nothing to say.
+        let mut a = in_slot();
+        press(&mut a, Keysym::Left, true);
+        assert_eq!((a.side(), a.note()), (None, String::new()));
     }
 
     #[test]
@@ -519,9 +552,10 @@ mod tests {
         // A wrong or unfinished `:` word: the help says what fits.
         let mut a = launcher();
         typed(&mut a, "fire :d");
-        assert_eq!(a.status(), DEST_HELP);
+        assert_eq!(a.note(), DEST_HELP);
         typed(&mut a, "3");
-        assert_eq!(a.status(), "opens in a new column · desktop 3");
+        assert_eq!(a.note(), "desktop 3");
+        assert_eq!(a.side(), None);
         // Ctrl+t opens as a tab; `:n` undoes it.
         let mut a = launcher();
         press(&mut a, Keysym::t, true);

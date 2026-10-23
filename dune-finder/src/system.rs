@@ -138,7 +138,9 @@ impl System {
         View {
             prompt: format!("system {}▏", self.query),
             rows,
-            status: format!("{} / {} actions", self.matches.len(), Power::ALL.len()),
+            placeholder: "",
+            note: String::new(),
+            side: None,
             hint: HINT,
         }
     }

@@ -131,8 +131,10 @@ impl Dune {
     /// Start dune-finder in `mode`; with `slot`, for that empty container; `compact`: with no
     /// list until something is typed.
     fn start_finder(&mut self, mode: FinderMode, slot: Option<(TileId, Option<TileId>)>, compact: bool) {
+        // The tile options show over the focused tile, wherever it is.
         let output = match slot {
             Some((id, _)) => self.output_of(id),
+            None if mode == FinderMode::TileOptions => self.focused.and_then(|t| self.output_of(t)),
             None => self.active_output().map(|o| o.name()),
         };
         let Some(output) = output else {
@@ -158,7 +160,11 @@ impl Dune {
         }
         if let Some((id, _)) = slot {
             cmd.args(["--slot", &id.to_string()]);
-            // Where the container is on its output, to show dune-finder in its middle.
+        }
+        // Where the empty container (or the tile whose options these are) is on its
+        // output, to show dune-finder in its middle.
+        let over = slot.map(|(id, _)| id).or(target.filter(|_| mode == FinderMode::TileOptions));
+        if let Some(id) = over {
             let origin = self.space.outputs().find(|o| o.name() == output).and_then(|o| self.space.output_geometry(o));
             if let (Some(origin), Some((_, r))) = (origin, self.shown.iter().find(|(t, _)| *t == id)) {
                 let at = format!("{},{},{},{}", r.x - origin.loc.x, r.y - origin.loc.y, r.w, r.h);

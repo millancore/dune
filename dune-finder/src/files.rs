@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use dune_common::protocol::Side;
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
@@ -286,8 +287,9 @@ impl Files {
         }
     }
 
-    /// What the panel shows; icons of `icon_size` pixels. `status`: where things open.
-    pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32, status: String) -> View<'a> {
+    /// What the panel shows; icons of `icon_size` pixels. `note` and `side`: where things
+    /// open (`View`).
+    pub fn view<'a>(&'a self, icons: &'a mut Icons, icon_size: u32, note: String, side: Option<Side>) -> View<'a> {
         for name in [FOLDER_ICON, FILE_ICON, UP_ICON] {
             icons.get(name, icon_size);
         }
@@ -321,7 +323,9 @@ impl Files {
         View {
             prompt: format!("# {dir}{slash}{}▏", self.query),
             rows,
-            status,
+            placeholder: "",
+            note,
+            side,
             hint: &self.hint,
         }
     }

@@ -248,14 +248,16 @@ impl TileOptions {
                 }
             })
             .collect();
-        let (prompt, what, hint) = match self.menu {
-            Some(_) => ("send to desktop", "desktops", DESK_HINT),
-            None => ("tile", "options", HINT),
+        let (prompt, hint) = match self.menu {
+            Some(_) => ("send to desktop", DESK_HINT),
+            None => ("tile", HINT),
         };
         View {
             prompt: format!("{prompt} {}▏", self.query),
             rows,
-            status: format!("{} / {} {what}", self.matches.len(), self.entries.len()),
+            placeholder: "",
+            note: String::new(),
+            side: None,
             hint,
         }
     }
@@ -348,7 +350,7 @@ mod tests {
         // Enter shows the desktops, a digit sends there.
         assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Continue);
         assert_eq!(o.view().rows[1].text, "Desktop 2");
-        assert_eq!(o.view().status, "3 / 3 desktops");
+        assert_eq!(o.view().rows.len(), 3);
         assert_eq!(o.feed(&none(), Keysym::_2, Some('2')), Step::Do(TileAction::SendToDesk(2)));
         // One that is not there does nothing; Esc goes back to the options, on the row.
         assert_eq!(o.feed(&none(), Keysym::_7, Some('7')), Step::Continue);
@@ -379,7 +381,7 @@ mod tests {
         o.feed(&none(), Keysym::BackSpace, None);
         assert_eq!(o.view().rows[0].text, "Send to desktop #");
         assert_eq!(o.feed(&none(), Keysym::Return, None), Step::Continue);
-        assert_eq!(o.view().status, "3 / 3 desktops");
+        assert_eq!(o.view().rows.len(), 3);
     }
 
     #[test]
