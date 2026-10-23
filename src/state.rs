@@ -147,6 +147,8 @@ pub struct Dune {
     /// `dune scratchpad watch` connections, and the last line they were sent.
     pub scratchpad_watchers: Vec<std::os::unix::net::UnixStream>,
     pub scratchpad_status: String,
+    /// `WatchDesktops` connections (`dune bar watch`): the monitor, and the last line sent.
+    pub desktops_watchers: Vec<(String, std::os::unix::net::UnixStream, String)>,
     /// Tiles whose next windows are those of a process (`dune-open`, a `swallow` request)
     /// and its children, with its pid, while it lives.
     pub swallows: HashMap<TileId, u32>,
@@ -375,6 +377,7 @@ impl Dune {
             swallows: HashMap::new(),
             scratchpad_watchers: Vec::new(),
             scratchpad_status: String::new(),
+            desktops_watchers: Vec::new(),
             launches: HashMap::new(),
             next_launch: 1,
             unclaimed_window: None,

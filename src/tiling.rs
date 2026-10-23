@@ -675,6 +675,7 @@ impl Dune {
         self.place_windows();
         self.refresh_workspaces();
         self.refresh_scratchpad();
+        self.refresh_desktops();
     }
 
     /// Make `id` fullscreen (`on`), the one of its monitor, focused; or stop it.
@@ -1143,8 +1144,20 @@ impl Dune {
                 self.stop_recording();
                 return Some("ok".into());
             }
+            Request::DeskShow { output, desk } => {
+                if let Some(output) = output.or_else(|| self.active_output().map(|o| o.name())) {
+                    self.show_desk_on(&output, desk);
+                }
+                return Some("ok".into());
+            }
+            Request::DeskLock { output, desk } => {
+                if let Some(output) = output.or_else(|| self.active_output().map(|o| o.name())) {
+                    self.toggle_desk_lock(&output, desk);
+                }
+                return Some("ok".into());
+            }
             // The listener keeps the connection (`ipc::listen`).
-            Request::WatchScratchpad | Request::WatchRecording => {}
+            Request::WatchScratchpad | Request::WatchRecording | Request::WatchDesktops { .. } => {}
             Request::Keys(keys) => {
                 if std::env::var("DUNE_DEBUG").as_deref() != Ok("1") {
                     tracing::warn!("ignoring key injection: DUNE_DEBUG=1 is not set");

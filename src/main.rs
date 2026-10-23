@@ -45,6 +45,10 @@ usage:
                                          one) / print a waybar JSON line on every change
   dune recording stop|watch              stop the recording running / print a waybar JSON line
                                          on every change (with the time recorded)
+  dune desktops show|lock N [OUTPUT]     show desktop N on OUTPUT (none: the active monitor) /
+                                         lock it, or unlock it
+  dune bar watch OUTPUT                  keep Ironbar's dune variables up to date: the desktops
+                                         of OUTPUT, the scratchpad and the recording
   dune shell                             run the dune layer around $DUNE_USER_SHELL (what tiles run)";
 
 fn main() {
@@ -66,6 +70,8 @@ fn main() {
         Some("open") => ipc::open_command(&args[1..]),
         Some("scratchpad") => ipc::scratchpad_command(&args[1..]),
         Some("recording") => ipc::recording_command(&args[1..]),
+        Some("desktops") => ipc::desktops_command(&args[1..]),
+        Some("bar") => ipc::bar_command(&args[1..]),
         Some("shell") => shell::run(shell::ARGV0, args[1..].iter().map(Into::into).collect()),
         Some("-h") | Some("--help") => {
             println!("{USAGE}");
