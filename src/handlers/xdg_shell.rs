@@ -1,5 +1,9 @@
 use smithay::{
-    desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface, get_popup_toplevel_coords},
+    desktop::{
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Space, Window,
+        find_popup_root_surface, get_popup_toplevel_coords,
+    },
+    input::{Seat, pointer::Focus},
     reexports::{
         wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_server::protocol::{wl_seat, wl_surface::WlSurface},
@@ -32,6 +36,12 @@ impl XdgShellHandler for Dune {
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         self.unconstrain_popup(&surface);
         let _ = self.popups.track_popup(PopupKind::Xdg(surface));
+    }
+
+    // A dismissed menu hands the keyboard back to the tile (or the launcher) it belongs to,
+    // not to the bar it opened from.
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        self.update_focus();
     }
 
     fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
@@ -68,8 +78,33 @@ impl XdgShellHandler for Dune {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO popup grabs
+    // A menu or a bar's popover takes the keyboard and the pointer while open: a click
+    // outside it (on its window, the bar or anything else) dismisses it.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Dune>::from_resource(&seat) else { return };
+        let kind = PopupKind::Xdg(surface);
+        // The root: a window or a layer surface (a bar).
+        let Ok(root) = find_popup_root_surface(&kind) else { return };
+        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else { return };
+        if let Some(keyboard) = seat.get_keyboard() {
+            if keyboard.is_grabbed()
+                && !(keyboard.has_grab(serial) || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            if pointer.is_grabbed()
+                && !(pointer.has_grab(serial) || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
     }
 }
 
