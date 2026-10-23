@@ -195,9 +195,14 @@ impl Row {
         self.tiles.remove(index);
         self.widths.remove(index);
         self.folded.remove(index);
-        // A lone tile, or only folded ones left: they all open again.
-        if self.tiles.len() < 2 || self.folded.iter().all(|f| *f) {
+        // A lone tile opens again; with only folded ones left, the neighbour that took its
+        // place (the one before it at the end) opens, the rest stay folded.
+        if self.tiles.len() < 2 {
             self.unfold();
+        } else if self.folded.iter().all(|f| *f) {
+            let open = index.min(self.tiles.len() - 1);
+            self.folded[open] = false;
+            self.widths[open] = 1.0;
         }
         self.normalize_open();
     }
@@ -766,9 +771,13 @@ impl Layout {
         if col.rows.is_empty() {
             if col.panes.len() < 2 {
                 self.columns.remove(c);
-                // Only folded columns left: they all open again.
-                if self.columns.iter().all(|c| c.folded) {
-                    self.columns.iter_mut().for_each(|c| c.folded = false);
+                // Only folded columns left: the neighbour that took its place (the one
+                // before it at the end) opens, as wide as a new column at least.
+                if !self.columns.is_empty() && self.columns.iter().all(|c| c.folded) {
+                    let open = c.min(self.columns.len() - 1);
+                    let col = &mut self.columns[open];
+                    col.folded = false;
+                    col.width = col.width.max(DEFAULT_WIDTH);
                 }
                 return true;
             }
@@ -1627,10 +1636,37 @@ mod tests {
         assert!(l.is_tab(1) && l.is_tab(2) && !l.is_tab(3));
         let g = geo(&mut l, 3);
         assert_eq!(g[2], (3, Rect::new(2 * FOLD_WIDTH, 0, 1000 - 2 * FOLD_WIDTH, 600)));
-        // Taking out the one open tile opens the rest.
+        // Taking out the one open tile (floated, closed) opens its neighbour, not the rest.
         l.remove(3);
-        assert!(!l.is_tab(1) && !l.is_tab(2));
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 500, 600)), (2, Rect::new(500, 0, 500, 600))]);
+        assert!(l.is_tab(1) && !l.is_tab(2));
+        assert_eq!(geo(&mut l, 2), vec![(1, Rect::new(0, 0, FOLD_WIDTH, 600)), (2, Rect::new(FOLD_WIDTH, 0, 1000 - FOLD_WIDTH, 600))]);
+        // The last two: a lone tile opens.
+        l.remove(2);
+        assert!(!l.is_tab(1));
+        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 600))]);
+    }
+
+    #[test]
+    fn taking_out_the_one_open_column_opens_its_neighbour() {
+        let mut l = Layout::default();
+        l.insert(1, None, Split::Vertical);
+        l.insert_column(2, Some(1), Side::Right);
+        l.insert_column(3, Some(2), Side::Right);
+        l.toggle_fold(1);
+        l.toggle_fold(3);
+        assert!(l.is_tab(1) && !l.is_tab(2) && l.is_tab(3));
+        // 2 floats away: 3, which takes its place, opens; 1 stays folded.
+        l.remove(2);
+        assert!(l.is_tab(1) && !l.is_tab(3));
+        // The last column leaving: the one before it opens.
+        let mut l = Layout::default();
+        l.insert(1, None, Split::Vertical);
+        l.insert_column(2, Some(1), Side::Right);
+        l.insert_column(3, Some(2), Side::Right);
+        l.toggle_fold(1);
+        l.toggle_fold(2);
+        l.remove(3);
+        assert!(l.is_tab(1) && !l.is_tab(2));
     }
 
     #[test]
