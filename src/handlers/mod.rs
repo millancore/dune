@@ -11,6 +11,7 @@ use crate::Dune;
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
 use smithay::input::pointer::Focus;
+use smithay::input::tablet::TabletSeatHandler;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -227,6 +228,11 @@ impl Dune {
                 .outputs()
                 .any(|o| layer_map_for_output(o).layer_for_surface(&root, WindowSurfaceType::TOPLEVEL).is_some())
     }
+}
+
+// For cursor-shape (tablet tools are not offered).
+impl TabletSeatHandler for Dune {
+    type ToolFocus = WlSurface;
 }
 
 smithay::delegate_dispatch2!(Dune);

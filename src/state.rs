@@ -17,6 +17,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         dmabuf::DmabufState,
         viewporter::ViewporterState,
+        cursor_shape::CursorShapeManagerState,
         shell::wlr_layer::{Layer, WlrLayerShellState},
         output::OutputManagerState,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
@@ -180,6 +181,7 @@ pub struct Dune {
 
     pub layer_shell_state: WlrLayerShellState,
     pub viewporter_state: ViewporterState,
+    pub cursor_shape_state: CursorShapeManagerState,
     /// A layer (dune-finder, a launcher) that asked for the keyboard; it has it until it closes.
     pub layer_focus: Option<WlSurface>,
 
@@ -283,6 +285,8 @@ impl Dune {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         // Clients scaling their buffers (xwayland-satellite requires it).
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        // Named cursors (GTK4 otherwise draws its own, sized by its own guess).
+        let cursor_shape_state = CursorShapeManagerState::new::<Self>(&dh);
         let workspaces = crate::workspaces::WorkspaceState::new(&dh);
         let gamma = crate::gamma::GammaState::new(&dh);
         let popups = PopupManager::default();
@@ -402,6 +406,7 @@ impl Dune {
             config,
             layer_shell_state,
             viewporter_state,
+            cursor_shape_state,
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
             output_capture_source_state,
