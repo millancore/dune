@@ -26,7 +26,7 @@ pub fn status_line(titles: &[String]) -> String {
     format!(r#"{{"text":"{}","tooltip":"{}","class":"filled"}}"#, titles.len(), json_escape(&tooltip))
 }
 
-pub(crate) fn json_escape(s: &str) -> String {
+fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

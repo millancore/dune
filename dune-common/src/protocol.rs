@@ -27,13 +27,7 @@
 //! - `recording\tstarted|ended` — the recording's shell: wf-recorder started / ended;
 //! - `recording_stop\t` — stop the recording running (`dune recording stop`); answered `ok`;
 //! - `watch_recording\t` — the connection stays open: dune writes `on SECONDS` (when the
-//!   recording started, since the epoch) or `off` now and on every change;
-//! - `desk_show\t<output or empty>\t<n>` — show desktop n on that monitor (none: the active
-//!   one), what a bar's click on it does (`dune desktops show`); answered `ok`;
-//! - `desk_lock\t<output or empty>\t<n>` — lock that desktop, or unlock it
-//!   (`dune desktops lock`); answered `ok`;
-//! - `watch_desktops\t<output>` — the connection stays open: dune writes the desktops of that
-//!   monitor, one line, now and on every change (`dune desktops watch`).
+//!   recording started, since the epoch) or `off` now and on every change.
 
 use std::{
     io::{Read, Write},
@@ -458,12 +452,6 @@ pub enum Request {
     RecordingStop,
     /// Keep the connection, writing whether a recording runs on every change.
     WatchRecording,
-    /// Show desktop `desk` on `output` (none: the active monitor).
-    DeskShow { output: Option<String>, desk: u8 },
-    /// Lock desktop `desk` of `output` (none: the active monitor), or unlock it.
-    DeskLock { output: Option<String>, desk: u8 },
-    /// Keep the connection, writing the desktops of `output` on every change.
-    WatchDesktops { output: String },
 }
 
 impl Request {
@@ -518,9 +506,6 @@ impl Request {
             }
             Request::RecordingStop => "recording_stop\t".into(),
             Request::WatchRecording => "watch_recording\t".into(),
-            Request::DeskShow { output, desk } => format!("desk_show\t{}\t{desk}", output.as_deref().unwrap_or_default()),
-            Request::DeskLock { output, desk } => format!("desk_lock\t{}\t{desk}", output.as_deref().unwrap_or_default()),
-            Request::WatchDesktops { output } => format!("watch_desktops\t{output}"),
         }
     }
 
@@ -589,13 +574,6 @@ impl Request {
             }
             "recording_stop" => Some(Request::RecordingStop),
             "watch_recording" => Some(Request::WatchRecording),
-            "desk_show" | "desk_lock" => {
-                let (output, desk) = rest.rsplit_once('\t')?;
-                let output = Some(output.to_string()).filter(|o| !o.is_empty());
-                let desk = desk.parse().ok()?;
-                Some(if kind == "desk_show" { Request::DeskShow { output, desk } } else { Request::DeskLock { output, desk } })
-            }
-            "watch_desktops" => Some(Request::WatchDesktops { output: rest.to_string() }),
             _ => None,
         }
     }
@@ -716,11 +694,6 @@ mod tests {
             Request::Recording { started: false, area: None },
             Request::RecordingStop,
             Request::WatchRecording,
-            Request::DeskShow { output: Some("HDMI-A-1".into()), desk: 3 },
-            Request::DeskShow { output: None, desk: 9 },
-            Request::DeskLock { output: Some("DP-2".into()), desk: 1 },
-            Request::DeskLock { output: None, desk: 4 },
-            Request::WatchDesktops { output: "HDMI-A-2".into() },
         ];
         for req in reqs {
             assert_eq!(Request::decode(&req.encode()), Some(req));

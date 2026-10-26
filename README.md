@@ -35,7 +35,7 @@ folder jumper, the tile menu and the power menu.
 - [Privacy: private tiles and locked desktops](#privacy-private-tiles-and-locked-desktops)
 - [Screenshots and recordings](#screenshots-and-recordings)
 - [Session: lock, idle, night light, X11](#session-lock-idle-night-light-x11)
-- [Bars (waybar, Ironbar)](#bars-waybar-ironbar)
+- [Waybar](#waybar)
 - [Command line](#command-line)
 - [Configuration](#configuration)
 - [Default keys](#default-keys)
@@ -425,9 +425,7 @@ ext/wlr data control, so wl-copy and wl-paste work.
 - **Games**: pointer constraints (locked and confined pointers) and relative motion.
 - **Layers**: wlr-layer-shell for bars, notifications, launchers and wallpapers.
 
-## Bars (waybar, Ironbar)
-
-Waybar:
+## Waybar
 
 | Module | Setup |
 |---|---|
@@ -436,29 +434,6 @@ Waybar:
 | recording | `custom`, `exec: dune recording watch`, `return-type: json`, `on-click: dune recording stop` |
 | night light | waybar's own module, which runs wlsunset |
 
-Ironbar has no `ext/workspaces`; dune gives it its state as ironvars instead.
-`dune bar watch OUTPUT` stays connected and sets them through Ironbar's socket whenever
-they change:
-
-| Variable | Value |
-|---|---|
-| `dune_<OUTPUT>_<n>` | desktop n (1-9) of OUTPUT as Pango markup: empty for one the bar leaves out (not shown, empty, not locked), else its name (`🔒 n` when locked), the one shown bold and underlined. What is not a letter, digit, `-` or `_` in the monitor's name becomes `_` |
-| `dune_scratchpad` | the number of scratchpad windows, empty with none |
-| `dune_scratchpad_tooltip` | their titles |
-| `dune_recording` | the time recorded (`● mm:ss`), empty with none |
-
-Each bar runs its own watcher in a hidden label, `{{watch:dune bar watch <OUTPUT>}}`,
-so it lives and restarts with the bar.
-
-| Module | Setup |
-|---|---|
-| desktops | `custom`: per desktop a button labelled and shown by `#dune_<OUTPUT>_<n>`, a click running `dune desktops show <n> <OUTPUT>`, a right click `dune desktops lock <n> <OUTPUT>` |
-| scratchpad | a label `#dune_scratchpad`, `show_if = "#dune_scratchpad"`, `tooltip = "#dune_scratchpad_tooltip"`, a click running `dune scratchpad show` |
-| recording | a label `#dune_recording`, `show_if = "#dune_recording"`, a click running `dune recording stop` |
-
-`dune desktops show N [OUTPUT]` and `dune desktops lock N [OUTPUT]` (lock, or unlock) do
-what waybar's click and right click do; without OUTPUT, on the active monitor.
-
 ## Command line
 
 ```sh
@@ -466,8 +441,6 @@ dune open [--split l|r|u|d] [--from TILE] [--cwd DIR] [--] COMMAND...   # a term
 dune-open COMMAND...                     # in a terminal: the program takes its tile
 dune scratchpad show | watch
 dune recording stop | watch
-dune desktops show N [OUTPUT] | lock N [OUTPUT]   # lock toggles: locks or unlocks
-dune bar watch OUTPUT                    # keeps Ironbar's dune_* ironvars up to date
 ```
 
 The control socket is `$DUNE_SOCKET`; the protocol lives in `dune-common/src/protocol.rs`.

@@ -5,12 +5,8 @@
 //! that activates a desktop and commits makes its monitor show it; one that deactivates
 //! it (waybar's `"on-click-right": "deactivate"`) and commits locks it, or unlocks it
 //! (`privacy`). A locked desktop is named "🔒 <n>" (`privacy::workspace_name`).
-//!
-//! Bars without it (Ironbar) use the control socket: `dune bar watch` keeps a
-//! connection (`watch_desktops`) to which dune writes the desktops of one monitor, a line
-//! now and on every change (`desktops_line`); `dune desktops show|lock` are its clicks.
 
-use std::{collections::HashMap, io::Write, os::unix::net::UnixStream, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex};
 
 use smithay::{
     output::Output,
@@ -77,61 +73,6 @@ pub struct DeskData {
 
 const ACTIVE: u32 = 1;
 const HIDDEN: u32 = 4;
-
-/// How a bar shows a desktop of a monitor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeskState {
-    /// The one the monitor shows.
-    Active,
-    /// Not shown, but locked or holding tiles.
-    Shown,
-    /// Not shown and empty: bars leave it out.
-    Hidden,
-}
-
-impl DeskState {
-    pub fn code(self) -> &'static str {
-        match self {
-            DeskState::Active => "active",
-            DeskState::Shown => "shown",
-            DeskState::Hidden => "hidden",
-        }
-    }
-
-    pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "active" => Some(DeskState::Active),
-            "shown" => Some(DeskState::Shown),
-            "hidden" => Some(DeskState::Hidden),
-            _ => None,
-        }
-    }
-
-    /// Its `ext_workspace_handle_v1` state bits.
-    fn bits(self) -> u32 {
-        match self {
-            DeskState::Active => ACTIVE,
-            DeskState::Shown => 0,
-            DeskState::Hidden => HIDDEN,
-        }
-    }
-}
-
-/// The line `watch_desktops` connections get: desktops 1-9 in order, tab separated, each
-/// `<state>:<name>` (`DeskState::code`).
-pub fn desktops_line(desks: &[(DeskState, String)]) -> String {
-    desks.iter().map(|(state, name)| format!("{}:{name}", state.code())).collect::<Vec<_>>().join("\t")
-}
-
-/// A `desktops_line` read back: the state and name of each desktop, in order.
-pub fn parse_desktops_line(line: &str) -> Vec<(DeskState, String)> {
-    line.split('\t')
-        .filter_map(|field| {
-            let (state, name) = field.split_once(':')?;
-            Some((DeskState::parse(state)?, name.to_string()))
-        })
-        .collect()
-}
 
 impl WorkspaceState {
     pub fn new(dh: &DisplayHandle) -> Self {
@@ -226,25 +167,6 @@ impl Instance {
 }
 
 impl Dune {
-    /// Desktops 1-9 of the monitor named `output`: how bars show each, and its name.
-    fn desk_states(&self, output: &str) -> Vec<(u8, DeskState, String)> {
-        let shown = self.desk_of(output);
-        (1..=DESKS)
-            .map(|n| {
-                // A locked desktop stays in the bar even empty: its right click unlocks it.
-                let locked = self.privacy.locked(output, n);
-                let state = if n == shown {
-                    DeskState::Active
-                } else if locked || self.hidden.contains_key(&(output.to_string(), n)) {
-                    DeskState::Shown
-                } else {
-                    DeskState::Hidden
-                };
-                (n, state, crate::privacy::workspace_name(n, locked))
-            })
-            .collect()
-    }
-
     /// Send bars the desktops as they are now. Called after every `arrange`.
     pub fn refresh_workspaces(&mut self) {
         if self.workspaces.instances.is_empty() {
@@ -254,48 +176,25 @@ impl Dune {
         let mut desks = Vec::new();
         for output in &outputs {
             let name = output.name();
-            for (n, state, label) in self.desk_states(&name) {
-                desks.push(((name.clone(), n), state.bits(), label));
+            let shown = self.desk_of(&name);
+            for n in 1..=DESKS {
+                // A locked desktop stays in the bar even empty: its right click unlocks it.
+                let locked = self.privacy.locked(&name, n);
+                let state = if n == shown {
+                    ACTIVE
+                } else if locked || self.hidden.contains_key(&(name.clone(), n)) {
+                    0
+                } else {
+                    HIDDEN
+                };
+                let label = crate::privacy::workspace_name(n, locked);
+                desks.push(((name.clone(), n), state, label));
             }
         }
         let dh = self.display_handle.clone();
         for instance in &mut self.workspaces.instances {
             instance.sync(&dh, &outputs, &desks);
         }
-    }
-
-    /// The `desktops_line` of the monitor named `output`; all hidden when there is none.
-    fn output_desktops_line(&self, output: &str) -> String {
-        let exists = self.space.outputs().any(|o| o.name() == output);
-        let desks: Vec<(DeskState, String)> = self
-            .desk_states(output)
-            .into_iter()
-            .map(|(_, state, name)| (if exists { state } else { DeskState::Hidden }, name))
-            .collect();
-        desktops_line(&desks)
-    }
-
-    /// A `watch_desktops` connection for `output`: told its desktops now, and on every change.
-    pub fn watch_desktops(&mut self, output: String, mut stream: UnixStream) {
-        let line = self.output_desktops_line(&output);
-        if writeln!(stream, "{line}").is_ok() && stream.set_nonblocking(true).is_ok() {
-            self.desktops_watchers.push((output, stream, line));
-        }
-    }
-
-    /// After every `arrange`: the watchers get their monitor's desktops when they changed;
-    /// those gone (or not reading) are dropped.
-    pub fn refresh_desktops(&mut self) {
-        let mut watchers = std::mem::take(&mut self.desktops_watchers);
-        watchers.retain_mut(|(output, stream, last)| {
-            let line = self.output_desktops_line(output);
-            if line == *last {
-                return true;
-            }
-            *last = line;
-            writeln!(stream, "{last}").is_ok()
-        });
-        self.desktops_watchers = watchers;
     }
 }
 
@@ -389,14 +288,5 @@ mod tests {
         assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Activate, &key), Some(Pending::Show(key.clone())));
         assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Deactivate, &key), Some(Pending::ToggleLock(key.clone())));
         assert_eq!(pending_of(&ext_workspace_handle_v1::Request::Remove, &key), None);
-    }
-
-    #[test]
-    fn the_desktops_line_reads_back() {
-        let desks = vec![(DeskState::Active, "1".to_string()), (DeskState::Shown, "🔒 2".into()), (DeskState::Hidden, "3".into())];
-        let line = desktops_line(&desks);
-        assert_eq!(line, "active:1\tshown:🔒 2\thidden:3");
-        assert_eq!(parse_desktops_line(&line), desks);
-        assert_eq!(parse_desktops_line(""), vec![]);
     }
 }
