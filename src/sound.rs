@@ -1,4 +1,4 @@
-//! Which tiles play sound, so a folded one can show it (a speaker on its bar). A thread
+//! Which tiles play sound, so a docked one can show it (a speaker on its bar). A thread
 //! follows `pactl subscribe` and, on every change of the playback streams, lists them
 //! (`pactl list sink-inputs`): the processes of the streams playing (not paused, not
 //! muted) are sent to the event loop, which marks the tiles they belong to. A browser
@@ -37,12 +37,12 @@ pub fn watch(loop_handle: &LoopHandle<'static, Dune>) {
         channel::Event::Closed => {}
     });
     if let Err(err) = watched {
-        return tracing::warn!("folded tiles will not show sound: {err}");
+        return tracing::warn!("docked tiles will not show sound: {err}");
     }
     let players = tx.clone();
     let spawned = std::thread::Builder::new().name("dune-sound".into()).spawn(move || follow(&tx));
     if let Err(err) = spawned {
-        tracing::warn!("folded tiles will not show sound: {err}");
+        tracing::warn!("docked tiles will not show sound: {err}");
     }
     let spawned = std::thread::Builder::new().name("dune-players".into()).spawn(move || follow_players(&players));
     if let Err(err) = spawned {
@@ -56,7 +56,7 @@ fn follow(tx: &channel::Sender<Change>) {
         let child = Command::new("pactl").arg("subscribe").env("LC_ALL", "C").stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
         let mut child = match child {
             Ok(child) => child,
-            Err(err) => return tracing::warn!("folded tiles will not show sound: no pactl ({err})"),
+            Err(err) => return tracing::warn!("docked tiles will not show sound: no pactl ({err})"),
         };
         if tx.send(Change::Pids(playing())).is_err() {
             let _ = child.kill();

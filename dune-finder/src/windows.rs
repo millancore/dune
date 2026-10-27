@@ -1,5 +1,5 @@
 //! The windows mode (Mod+/, or `/` typed first in the apps): every window dune has, on
-//! every monitor and desktop, in every tab and folded row, the most recently focused first
+//! every monitor and desktop, in every tab and in the docks, the most recently focused first
 //! (the focused one last: Enter right away goes back to the window before). Typing narrows
 //! it, fuzzy, by title, app and desktop; `:d2` keeps desktop 2 only and `:m1` monitor 1
 //! (`:d2 :m1 slack`). Enter shows the window's desktop and focuses it.
@@ -13,7 +13,7 @@
 //! the front and goes to its window.
 
 use dune_common::{
-    desktop::App,
+    desktop::{App, app_icon},
     protocol::{TileId, WindowInfo},
 };
 use nucleo_matcher::{
@@ -300,22 +300,6 @@ fn first_shown(selected: usize) -> usize {
     selected.saturating_sub(ROWS - 1)
 }
 
-/// The icon of the desktop app whose id is `app_id` (or ends in it: `org.gnome.Nautilus`
-/// for `nautilus`), else the app id itself as an icon name.
-fn app_icon(apps: &[App], app_id: &str) -> Option<String> {
-    if app_id.is_empty() {
-        return None;
-    }
-    let named = |a: &&App| {
-        a.id.eq_ignore_ascii_case(app_id)
-            || a.id
-                .rsplit('.')
-                .next()
-                .is_some_and(|last| last.eq_ignore_ascii_case(app_id))
-    };
-    apps.iter().find(named).and_then(|a| a.icon.clone()).or_else(|| Some(app_id.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,20 +475,5 @@ mod tests {
         assert_eq!(first_shown(0), 0);
         assert_eq!(first_shown(ROWS - 1), 0);
         assert_eq!(first_shown(ROWS + 2), 3);
-    }
-
-    #[test]
-    fn icons_come_from_the_desktop_app() {
-        let app = |id: &str, icon: &str| App {
-            id: id.into(),
-            name: id.into(),
-            icon: Some(icon.into()),
-            ..Default::default()
-        };
-        let apps = vec![app("org.gnome.Nautilus", "folder"), app("firefox", "firefox-icon")];
-        assert_eq!(app_icon(&apps, "firefox").as_deref(), Some("firefox-icon"));
-        assert_eq!(app_icon(&apps, "nautilus").as_deref(), Some("folder"));
-        assert_eq!(app_icon(&apps, "foot").as_deref(), Some("foot"));
-        assert_eq!(app_icon(&apps, ""), None);
     }
 }

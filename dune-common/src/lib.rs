@@ -3,6 +3,7 @@
 pub mod at;
 pub mod desktop;
 pub mod font;
+pub mod icons;
 pub mod jumps;
 pub mod picker;
 pub mod protocol;

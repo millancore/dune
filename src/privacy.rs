@@ -101,6 +101,7 @@ pub fn binding_of(action: TileAction) -> Binding {
         TileAction::FullWidth => Binding::FullWidth,
         TileAction::ToTab => Binding::StackToTabs,
         TileAction::SendToDesk(n) => Binding::SendToDesk(n),
+        TileAction::Dock => Binding::Dock,
         TileAction::Scratchpad => Binding::SendToScratchpad,
         TileAction::Close => Binding::Close,
     }

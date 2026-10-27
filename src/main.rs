@@ -3,6 +3,7 @@
 mod config;
 mod cursor;
 mod desktops;
+mod dock;
 mod floating;
 mod gamma;
 mod handlers;
@@ -43,6 +44,8 @@ usage:
                                          open COMMAND in a new terminal tile
   dune scratchpad show|watch             show the next scratchpad window (or hide the focused
                                          one) / print a waybar JSON line on every change
+  dune dock show|watch                   show the dock of the bar's monitor ($WAYBAR_OUTPUT_NAME)
+                                         / print a waybar JSON line on every change
   dune recording stop|watch              stop the recording running / print a waybar JSON line
                                          on every change (with the time recorded)
   dune shell                             run the dune layer around $DUNE_USER_SHELL (what tiles run)";
@@ -65,6 +68,7 @@ fn main() {
         Some("--nested") => run(Some(Mode::Nested)).map_err(|e| e.to_string()),
         Some("open") => ipc::open_command(&args[1..]),
         Some("scratchpad") => ipc::scratchpad_command(&args[1..]),
+        Some("dock") => ipc::dock_command(&args[1..]),
         Some("recording") => ipc::recording_command(&args[1..]),
         Some("shell") => shell::run(shell::ARGV0, args[1..].iter().map(Into::into).collect()),
         Some("-h") | Some("--help") => {

@@ -59,8 +59,8 @@ pub struct MoveDrag {
     pub from: Option<Rect>,
     /// Pressed near this edge of the tile (`split_edge`): a click there opens a split.
     pub split: Option<Side>,
-    /// It is the `fold_click`: a click folds the tile instead of floating it.
-    pub fold: bool,
+    /// It is the `dock_click`: a click puts the tile in the dock instead of floating it.
+    pub dock: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -70,8 +70,8 @@ pub struct ResizeDrag {
     pub start: Point<f64, Logical>,
     /// The pointer when last seen.
     pub last: Point<f64, Logical>,
-    /// It is the `fold_click`: a click (no drag) folds the tile.
-    pub fold: bool,
+    /// It is the `dock_click`: a click (no drag) puts the tile in the dock.
+    pub dock: bool,
 }
 
 pub struct Dune {
@@ -103,12 +103,8 @@ pub struct Dune {
     >,
     /// The part of each tile that is on its output; tiles scrolled away are missing.
     pub shown: Vec<(TileId, Rect)>,
-    /// Tiles folded into a tab: their bar is drawn, their window is not.
-    pub tabs: Vec<TileId>,
     /// Bars of the tabbed containers on the outputs (shown ones only), from the last `arrange`.
     pub tab_bars: Vec<crate::layout::TabBar>,
-    /// Tiles of folded tabbed columns' bars on the outputs, with the column's tab count.
-    pub fold_counts: Vec<(TileId, usize)>,
     /// Processes playing sound now, and the tiles they belong to (`crate::sound`): alone
     /// in their process, or sharing it (they play if their title says so), with the titles
     /// the media players play.
@@ -147,6 +143,21 @@ pub struct Dune {
     /// `dune scratchpad watch` connections, and the last line they were sent.
     pub scratchpad_watchers: Vec<std::os::unix::net::UnixStream>,
     pub scratchpad_status: String,
+    /// Tiles put away in the docks of the desktops, oldest first (`crate::dock`).
+    pub dock: Vec<crate::dock::Docked>,
+    /// Tiles and tabbed columns out of the dock that were pinned there: back in the dock,
+    /// they are pinned again.
+    pub dock_pins: HashSet<crate::dock::Pin>,
+    /// The monitor whose dock is shown, the pointer over it.
+    pub dock_open: Option<String>,
+    /// The dock shown is driven by keys (`dock_show`, a bar's click), and which of its
+    /// entries is chosen.
+    pub dock_keys: bool,
+    pub dock_selected: usize,
+    /// The tab chosen in the fan of the chosen entry, a tabbed column (none: the entry).
+    pub dock_tab: Option<usize>,
+    /// `dune dock watch` connections, with the monitor they follow and the last line sent.
+    pub dock_watchers: Vec<(std::os::unix::net::UnixStream, Option<String>, String)>,
     /// Tiles whose next windows are those of a process (`dune-open`, a `swallow` request)
     /// and its children, with its pid, while it lives.
     pub swallows: HashMap<TileId, u32>,
@@ -202,6 +213,8 @@ pub struct Dune {
     pub backend: Backend,
     pub decorations: crate::render::Decorations,
     pub tab_titles: crate::tab_title::TabTitles,
+    /// The app icons the dock shows.
+    pub dock_icons: crate::dock::AppIcons,
     /// Bars told about the desktops (ext-workspace-v1).
     pub workspaces: crate::workspaces::WorkspaceState,
     /// Night light: gamma ramps clients set per monitor (wlr-gamma-control).
@@ -227,6 +240,8 @@ pub struct Dune {
     pub idle_notifier_state: smithay::wayland::idle_notify::IdleNotifierState<Dune>,
     /// Surfaces asking to hold off idle (idle-inhibit: videos, games), while they are alive.
     pub idle_inhibitors: Vec<WlSurface>,
+    /// Idle held off from dune-finder's Stay awake, until turned off again.
+    pub stay_awake: bool,
     /// Screen lock (swaylock, ext-session-lock-v1), see `crate::lock`.
     pub session_lock: crate::lock::SessionLock,
     /// Tiles and desktops blocked on screen and in captures, see `crate::privacy`.
@@ -352,9 +367,7 @@ impl Dune {
             resize_animation: None,
             configure_waits: HashMap::new(),
             shown: Vec::new(),
-            tabs: Vec::new(),
             tab_bars: Vec::new(),
-            fold_counts: Vec::new(),
             sound_pids: HashSet::new(),
             sounding: HashSet::new(),
             sounding_shared: HashSet::new(),
@@ -375,6 +388,13 @@ impl Dune {
             swallows: HashMap::new(),
             scratchpad_watchers: Vec::new(),
             scratchpad_status: String::new(),
+            dock: Vec::new(),
+            dock_pins: HashSet::new(),
+            dock_open: None,
+            dock_keys: false,
+            dock_selected: 0,
+            dock_tab: None,
+            dock_watchers: Vec::new(),
             launches: HashMap::new(),
             next_launch: 1,
             unclaimed_window: None,
@@ -394,6 +414,7 @@ impl Dune {
             popups,
             seat,
             tab_titles: crate::tab_title::TabTitles::new(&config.font_family, config.tab_widths),
+            dock_icons: Default::default(),
             finder: None,
             recording: None,
             recording_since: None,
@@ -421,6 +442,7 @@ impl Dune {
             cursor: crate::cursor::Cursor::load(),
             idle_notifier_state,
             idle_inhibitors: Vec::new(),
+            stay_awake: false,
             session_lock,
             privacy: Default::default(),
         }
@@ -462,6 +484,10 @@ impl Dune {
         // Locked: only the lock surfaces take the pointer.
         if self.session_lock.is_locked() {
             return self.lock_surface_under(pos);
+        }
+        // The dock shown is over everything.
+        if self.dock_at((pos.x, pos.y)).1 {
+            return None;
         }
         let output = self.space.outputs().find(|o| self.space.output_geometry(o).is_some_and(|g| g.to_f64().contains(pos)))?;
         let output_loc = self.space.output_geometry(output)?.loc;

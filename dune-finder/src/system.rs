@@ -1,5 +1,6 @@
-//! The system mode (Mod+Tab from the last of the other modes): power off, reboot or log
-//! out (end the dune session). Typing narrows them, fuzzy; Enter or a click does one.
+//! The system mode (Mod+Tab from the last of the other modes): power off, reboot, log out
+//! (end the dune session) or stay awake (dune holds off idle, so no lock nor suspend, until
+//! chosen again). Typing narrows them, fuzzy; Enter or a click does one.
 
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
@@ -17,16 +18,19 @@ pub enum Power {
     Shutdown,
     Reboot,
     LogOut,
+    /// Turn dune's Stay awake on or off.
+    StayAwake,
 }
 
 impl Power {
-    const ALL: [Power; 3] = [Power::Shutdown, Power::Reboot, Power::LogOut];
+    const ALL: [Power; 4] = [Power::Shutdown, Power::Reboot, Power::LogOut, Power::StayAwake];
 
     fn label(self) -> &'static str {
         match self {
             Power::Shutdown => "Power off",
             Power::Reboot => "Reboot",
             Power::LogOut => "Log out",
+            Power::StayAwake => "Stay awake",
         }
     }
 
@@ -36,15 +40,16 @@ impl Power {
             Power::Shutdown => "shutdown apagar",
             Power::Reboot => "restart reiniciar",
             Power::LogOut => "exit quit session salir",
+            Power::StayAwake => "wake up awake caffeine inhibit sleep suspend despierto",
         }
     }
 
-    /// The command that does it; log out is asked of dune instead (`None`).
+    /// The command that does it; log out and stay awake are asked of dune instead (`None`).
     pub fn command(self) -> Option<&'static str> {
         match self {
             Power::Shutdown => Some("systemctl poweroff"),
             Power::Reboot => Some("systemctl reboot"),
-            Power::LogOut => None,
+            Power::LogOut | Power::StayAwake => None,
         }
     }
 }
@@ -55,6 +60,8 @@ pub enum Step {
     Continue,
     Close,
     Do(Power),
+    /// Backspace with nothing typed: back to the apps.
+    Apps,
 }
 
 pub struct System {
@@ -63,11 +70,19 @@ pub struct System {
     matches: Vec<Power>,
     selected: usize,
     matcher: Matcher,
+    /// Stay awake is on: its row says so.
+    awake: bool,
 }
 
 impl System {
-    pub fn new() -> Self {
-        System { query: String::new(), matches: Power::ALL.to_vec(), selected: 0, matcher: Matcher::new(Config::DEFAULT) }
+    pub fn new(awake: bool) -> Self {
+        System {
+            query: String::new(),
+            matches: Power::ALL.to_vec(),
+            selected: 0,
+            matcher: Matcher::new(Config::DEFAULT),
+            awake,
+        }
     }
 
     /// Nothing typed: `?` there lists the keys.
@@ -87,6 +102,7 @@ impl System {
             Keysym::n if mods.ctrl => self.selected = (self.selected + 1) % n,
             Keysym::Up | Keysym::ISO_Left_Tab => self.selected = (self.selected + n - 1) % n,
             Keysym::p if mods.ctrl => self.selected = (self.selected + n - 1) % n,
+            Keysym::BackSpace if self.query.is_empty() => return Step::Apps,
             Keysym::BackSpace => {
                 self.query.pop();
                 self.refilter();
@@ -133,7 +149,10 @@ impl System {
             .matches
             .iter()
             .enumerate()
-            .map(|(i, p)| Row { icon: None, text: p.label(), detail: None, sub: None, selected: i == self.selected })
+            .map(|(i, p)| {
+                let detail = (*p == Power::StayAwake && self.awake).then(|| "on".to_string());
+                Row { icon: None, text: p.label(), detail, sub: None, selected: i == self.selected }
+            })
             .collect();
         View {
             prompt: format!("system {}▏", self.query),
@@ -156,7 +175,7 @@ mod tests {
 
     #[test]
     fn enter_does_the_row_chosen() {
-        let mut s = System::new();
+        let mut s = System::new(false);
         assert_eq!(s.feed(&none(), Keysym::Down, None), Step::Continue);
         assert_eq!(s.feed(&none(), Keysym::Return, None), Step::Do(Power::Reboot));
         assert_eq!(s.click(2), Step::Do(Power::LogOut));
@@ -166,17 +185,31 @@ mod tests {
 
     #[test]
     fn typing_narrows_them_in_either_language() {
-        let mut s = System::new();
+        let mut s = System::new(false);
         for c in "salir".chars() {
             s.feed(&none(), Keysym::NoSymbol, Some(c));
         }
         assert_eq!(s.feed(&none(), Keysym::Return, None), Step::Do(Power::LogOut));
-        let mut s = System::new();
+        let mut s = System::new(false);
         for c in "zzz".chars() {
             s.feed(&none(), Keysym::NoSymbol, Some(c));
         }
         assert_eq!(s.feed(&none(), Keysym::Return, None), Step::Continue);
         assert_eq!(Power::LogOut.command(), None);
         assert_eq!(Power::Shutdown.command(), Some("systemctl poweroff"));
+    }
+
+    #[test]
+    fn stay_awake_is_found_by_wake_and_says_when_on() {
+        let mut s = System::new(false);
+        for c in "wake".chars() {
+            s.feed(&none(), Keysym::NoSymbol, Some(c));
+        }
+        assert_eq!(s.view().rows[0].text, "Stay awake");
+        assert_eq!(s.view().rows[0].detail, None);
+        assert_eq!(s.feed(&none(), Keysym::Return, None), Step::Do(Power::StayAwake));
+        assert_eq!(Power::StayAwake.command(), None);
+        let s = System::new(true);
+        assert_eq!(s.view().rows[3].detail.as_deref(), Some("on"));
     }
 }

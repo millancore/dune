@@ -13,10 +13,10 @@
 //! terminal, whose app heads the apps before anything is typed.
 
 mod app;
+use dune_common::icons;
 mod apps;
 mod files;
 mod finder;
-mod icons;
 mod jump;
 mod panel;
 mod settings;

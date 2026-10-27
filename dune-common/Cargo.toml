@@ -5,5 +5,6 @@ edition = "2024"
 description = "Code shared by the dune compositor and dune-finder: the shell layer, the control protocol and fonts"
 
 [dependencies]
+resvg = { version = "0.48.1", default-features = false }
 swash = "0.2"
 fontdb = "0.24"

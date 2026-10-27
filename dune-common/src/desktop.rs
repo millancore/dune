@@ -280,6 +280,22 @@ fn parse(id: &str, text: &str, lang: &str, desktops: &[String]) -> Option<App> {
     })
 }
 
+/// The icon of the desktop app whose id is `app_id` (or ends in it: `org.gnome.Nautilus`
+/// for `nautilus`), else the app id itself as an icon name.
+pub fn app_icon(apps: &[App], app_id: &str) -> Option<String> {
+    if app_id.is_empty() {
+        return None;
+    }
+    let named = |a: &&App| {
+        a.id.eq_ignore_ascii_case(app_id)
+            || a.id
+                .rsplit('.')
+                .next()
+                .is_some_and(|last| last.eq_ignore_ascii_case(app_id))
+    };
+    apps.iter().find(named).and_then(|a| a.icon.clone()).or_else(|| Some(app_id.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +394,19 @@ mod tests {
         assert_eq!(desktop_id(base, &base.join("firefox.desktop")).unwrap(), "firefox");
         assert_eq!(desktop_id(base, &base.join("kde/org.kde.foo.desktop")).unwrap(), "kde-org.kde.foo");
     }
-}
 
+    #[test]
+    fn icons_come_from_the_desktop_app() {
+        let app = |id: &str, icon: &str| App {
+            id: id.into(),
+            name: id.into(),
+            icon: Some(icon.into()),
+            ..Default::default()
+        };
+        let apps = vec![app("org.gnome.Nautilus", "folder"), app("firefox", "firefox-icon")];
+        assert_eq!(app_icon(&apps, "firefox").as_deref(), Some("firefox-icon"));
+        assert_eq!(app_icon(&apps, "nautilus").as_deref(), Some("folder"));
+        assert_eq!(app_icon(&apps, "foot").as_deref(), Some("foot"));
+        assert_eq!(app_icon(&apps, ""), None);
+    }
+}

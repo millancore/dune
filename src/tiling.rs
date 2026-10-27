@@ -349,6 +349,7 @@ impl Dune {
         self.remove_from_hidden(id);
         self.scratchpad.retain(|(t, _)| *t != id);
         self.scratch_shown.remove(&id);
+        self.remove_from_dock(id);
     }
 
     /// The tile focus goes to when `id` leaves its spot: a neighbour, else the first of its output.
@@ -561,8 +562,7 @@ impl Dune {
         }
         self.adopt_desks(&outputs, &first.name());
 
-        // The tab of a tabbed column a focused tile is in shows. A folded (accordion) tile
-        // stays folded when focused: a click or Enter opens it (`open_folded`).
+        // The tab of a tabbed column a focused tile is in shows.
         if let Some(id) = self.focused {
             for layout in self.layouts.values_mut() {
                 layout.activate_tab(id);
@@ -589,9 +589,7 @@ impl Dune {
         let visible = |id| tiles.get(&id).is_some_and(|t: &Tile| !t.stack.is_empty() || t.reserved);
         let mut geometries = Vec::new();
         let mut shown = Vec::new();
-        let mut tabs = Vec::new();
         let mut tab_bars = Vec::new();
-        let mut fold_counts = Vec::new();
         let mut edge_counts = HashMap::new();
         // Floats first, front to back: what is first is hit (and drawn) first.
         for output in &outputs {
@@ -609,16 +607,12 @@ impl Dune {
             let laid_out = layout.geometries(area, GAP, BORDER, &visible, self.focused);
             edge_counts.insert(output.name(), past_edges(area, &laid_out));
             for (id, rect) in laid_out {
-                if layout.is_tab(id) {
-                    tabs.push(id);
-                }
                 if let Some(part) = rect.intersection(&area) {
                     shown.push((id, part));
                 }
                 geometries.push((id, rect));
             }
             tab_bars.extend(layout.tab_bars().iter().filter(|b| b.rect.intersection(&area).is_some()).cloned());
-            fold_counts.extend(layout.fold_counts().iter().copied());
         }
         // A fullscreen tile laid out on its monitor covers it: the whole output, and nothing
         // else of it shown (nor its tab bars and edge marks).
@@ -628,7 +622,7 @@ impl Dune {
             let full = Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
             let name = output.name();
             let cover = self.fullscreen.iter().copied().find(|t| {
-                self.output_of(*t).as_ref() == Some(&name) && !tabs.contains(t) && geometries.iter().any(|(g, _)| g == t)
+                self.output_of(*t).as_ref() == Some(&name) && geometries.iter().any(|(g, _)| g == t)
             });
             let Some(cover) = cover else { continue };
             for (t, rect) in geometries.iter_mut() {
@@ -643,10 +637,9 @@ impl Dune {
             covers.insert(name, cover);
         }
         self.covers = covers;
-        tracing::debug!(?geometries, shown = ?shown.iter().map(|(id, _)| id).collect::<Vec<_>>(), ?tabs, "arranged");
+        tracing::debug!(?geometries, shown = ?shown.iter().map(|(id, _)| id).collect::<Vec<_>>(), "arranged");
         self.geometries = geometries;
         self.shown = shown;
-        self.tabs = tabs;
         self.edge_counts = edge_counts;
 
         // Tabs not shown in their container keep their window unmapped, at the size of
@@ -670,11 +663,11 @@ impl Dune {
             }
         }
         self.tab_bars = tab_bars;
-        self.fold_counts = fold_counts;
 
         self.place_windows();
         self.refresh_workspaces();
         self.refresh_scratchpad();
+        self.refresh_dock();
     }
 
     /// Make `id` fullscreen (`on`), the one of its monitor, focused; or stop it.
@@ -710,12 +703,8 @@ impl Dune {
             };
             let floating = self.is_floating(*id);
             let fullscreen = self.covers.values().any(|c| c == id);
-            // Columns scrolled off the output are not drawn (nor shown on a neighbour);
-            // a tab shows a bar instead of its window, which keeps its last size.
-            if self.tabs.contains(id) {
-                self.space.unmap_elem(&window);
-                continue;
-            } else if !self.shown.iter().any(|(t, _)| t == id) {
+            // Columns scrolled off the output are not drawn (nor shown on a neighbour).
+            if !self.shown.iter().any(|(t, _)| t == id) {
                 self.space.unmap_elem(&window);
             } else {
                 self.space.map_element(window.clone(), (rect.x, rect.y), false);
@@ -829,19 +818,6 @@ impl Dune {
         keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
     }
 
-    /// Whether `id` is folded into an accordion bar.
-    pub fn is_folded(&self, id: TileId) -> bool {
-        self.layouts.values().any(|l| l.is_tab(id))
-    }
-
-    /// Open the folded tile `id` (a click or Enter on its bar), focused.
-    pub fn open_folded(&mut self, id: TileId) {
-        for layout in self.layouts.values_mut() {
-            layout.open_tab(id);
-        }
-        self.focus_tile(id);
-    }
-
     pub fn focus_tile(&mut self, id: TileId) {
         if self.tiles.contains_key(&id) {
             self.focused = Some(id);
@@ -862,11 +838,9 @@ impl Dune {
     pub fn swap_direction(&mut self, dir: Direction) {
         let Some(from) = self.focused.filter(|f| !self.is_floating(*f)) else { return };
         if let Some(other) = neighbor(&self.geometries, from, dir) {
-            // Tiles on different monitors trade places between their layouts too. A
-            // folded tile stays folded where it goes, an open one open.
-            let (from_folded, other_folded) = (self.is_folded(from), self.is_folded(other));
+            // Tiles on different monitors trade places between their layouts too.
             for layout in self.layouts.values_mut() {
-                layout.swap_keeping_folds(from, other, from_folded, other_folded);
+                layout.swap(from, other);
             }
             self.arrange();
         } else if let Some(output) = self.output_toward(from, dir) {
@@ -1028,14 +1002,6 @@ impl Dune {
         }
     }
 
-    /// Fold `id` into the accordion, or open it when folded (`Layout::toggle_fold`).
-    pub fn toggle_fold(&mut self, id: TileId) {
-        if self.is_folded(id) {
-            return self.open_folded(id);
-        }
-        self.change_tile(id, Layout::toggle_fold);
-    }
-
     pub fn change_tile(&mut self, id: TileId, change: impl Fn(&mut Layout, TileId)) {
         if let Some(layout) = self.layouts.values_mut().find(|l| l.contains(id)) {
             change(layout, id);
@@ -1134,8 +1100,24 @@ impl Dune {
                 self.loop_signal.stop();
                 return Some("ok".into());
             }
+            Request::Awake { toggle } => {
+                if toggle {
+                    self.stay_awake = !self.stay_awake;
+                    self.refresh_idle_inhibit();
+                    crate::autostart(if self.stay_awake {
+                        "notify-send -a dune 'Staying awake' 'No lock nor sleep until Stay awake is turned off'"
+                    } else {
+                        "notify-send -a dune 'Stay awake off' 'Idle locks and sleeps again'"
+                    });
+                }
+                return Some(if self.stay_awake { "on" } else { "off" }.into());
+            }
             Request::ScratchpadShow => {
                 self.toggle_scratchpad();
+                return Some("ok".into());
+            }
+            Request::DockShow { output } => {
+                self.toggle_dock_keys(output);
                 return Some("ok".into());
             }
             Request::Recording { started, area } => self.recording_state(started, area.map(|(x, y, w, h)| Rect::new(x, y, w, h))),
@@ -1144,7 +1126,7 @@ impl Dune {
                 return Some("ok".into());
             }
             // The listener keeps the connection (`ipc::listen`).
-            Request::WatchScratchpad | Request::WatchRecording => {}
+            Request::WatchScratchpad | Request::WatchRecording | Request::WatchDock { .. } => {}
             Request::Keys(keys) => {
                 if std::env::var("DUNE_DEBUG").as_deref() != Ok("1") {
                     tracing::warn!("ignoring key injection: DUNE_DEBUG=1 is not set");

@@ -20,6 +20,7 @@ use dune_common::protocol::TileAction;
 
 use crate::{
     config::{Binding, Config, TerminalHere},
+    dock::DockHit,
     launcher::FinderMode,
     layout::{Direction, Layout, Rect, Side, TileId, split_band, split_edge},
     screenshot::Capture,
@@ -50,8 +51,6 @@ enum Action {
     Center,
     /// Float the focused tile in the middle of its monitor (again: back into the strip).
     ToggleFloat,
-    /// Enter on a focused folded tile: it opens (the window does not get the key).
-    OpenFolded(TileId),
     /// Mod+Shift+`: the focused tile into the scratchpad.
     SendToScratchpad,
     /// Mod+`: the shown scratchpad window focused back into it, else the next one out.
@@ -66,8 +65,12 @@ enum Action {
     TileOptions,
     /// Block the focused tile on screen and in captures (again: show it).
     PrivateTile,
-    /// Fold the focused tile into the accordion (folded: open it).
-    Fold,
+    /// The focused tile (with its tabs) into the dock of its desktop.
+    Dock,
+    /// Mod+Shift+e: the dock of the focused tile's monitor, driven by keys (again: hide it).
+    DockShow,
+    /// A key on the dock shown for the keys.
+    DockKey(crate::dock::DockKey),
     /// Mod+v / Mod+s / Mod+Shift+t: a terminal to the right of the focused tile, below it
     /// or as a tab of its container, in its folder.
     Terminal(TerminalHere),
@@ -125,7 +128,8 @@ impl From<Binding> for Action {
             Binding::Switcher => Action::Switcher,
             Binding::TileOptions => Action::TileOptions,
             Binding::PrivateTile => Action::PrivateTile,
-            Binding::Fold => Action::Fold,
+            Binding::Dock => Action::Dock,
+            Binding::DockShow => Action::DockShow,
             Binding::Terminal(here) => Action::Terminal(here),
             Binding::StackToTabs => Action::StackToTabs,
             Binding::Quit => Action::Quit,
@@ -295,9 +299,9 @@ mod tests {
         for sym in [Keysym::Return, Keysym::d, Keysym::slash, Keysym::q, Keysym::_1, Keysym::Left, Keysym::E, Keysym::Escape] {
             assert!(action_for(&config, &alt, sym).is_none_or(|a| !allowed_while_locked(&a)), "{sym:?}");
         }
-        // Mod+Shift+e (quit) stays off too.
+        // Mod+Shift+e (the dock) stays off too.
         let alt_shift = ModifiersState { alt: true, shift: true, ..Default::default() };
-        assert!(matches!(action_for(&config, &alt_shift, Keysym::e), Some(Action::Quit)));
+        assert!(matches!(action_for(&config, &alt_shift, Keysym::e), Some(Action::DockShow)));
         assert!(!allowed(&alt_shift, Keysym::e));
     }
 
@@ -480,6 +484,7 @@ impl Dune {
         let busy = self.move_drag.is_some()
             || self.resize_drag.is_some()
             || self.finder.is_some()
+            || self.dock_open.is_some()
             || self.session_lock.is_locked();
         if !self.config.focus_follows_mouse || busy || self.seat.get_pointer().unwrap().is_grabbed()
         {
@@ -540,11 +545,13 @@ impl Dune {
             Action::Switcher => self.toggle_finder(FinderMode::Windows),
             Action::TileOptions => self.toggle_finder(FinderMode::TileOptions),
             Action::PrivateTile => self.toggle_private_focused(),
-            Action::Fold => {
+            Action::Dock => {
                 if let Some(id) = self.focused {
-                    self.toggle_fold(id);
+                    self.send_to_dock(id);
                 }
             }
+            Action::DockShow => self.toggle_dock_keys(None),
+            Action::DockKey(key) => self.press_dock_key(key),
             Action::Focus(dir) => self.focus_direction(dir),
             Action::FocusMonitor(dir) => self.focus_output_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
@@ -571,7 +578,6 @@ impl Dune {
                 }
             }
             Action::Scratchpad => self.toggle_scratchpad(),
-            Action::OpenFolded(id) => self.open_folded(id),
             Action::Close => self.close_focused(),
             Action::Quit => self.loop_signal.stop(),
             Action::CycleTab(delta) => self.cycle_tab(delta),
@@ -608,8 +614,9 @@ impl Dune {
         // While dune-finder is open, Mod+Enter is its own (files: the file manager).
         let finder_open = self.finder.is_some();
         let locked = self.session_lock.is_locked();
-        // A focused folded tile opens with Enter (no modifiers) instead of getting it.
-        let folded = self.focused.filter(|f| self.is_folded(*f));
+        // The dock shown for the keys takes them: its own (`dock_key`), and the compositor's
+        // bindings (which hide it first); nothing else reaches the windows meanwhile.
+        let dock_keys = self.dock_keys && self.dock_open.is_some() && !locked;
 
         let action = self.seat.get_keyboard().unwrap().input::<Action, _>(
             self,
@@ -619,11 +626,14 @@ impl Dune {
             time,
             |_, mods, handle| match handle.raw_latin_sym_or_raw_current_sym().and_then(|sym| {
                 let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-                match folded {
-                    Some(id) if plain && matches!(sym, Keysym::Return | Keysym::KP_Enter) => Some(Action::OpenFolded(id)),
+                match crate::dock::dock_key(sym) {
+                    Some(key) if dock_keys && plain => Some(Action::DockKey(key)),
                     _ => action_for(&config, mods, sym),
                 }
             }) {
+                Some(action) if dock_keys && pressed => FilterResult::Intercept(action),
+                // Any other key: swallowed, as a move that goes nowhere.
+                None if dock_keys && pressed => FilterResult::Intercept(Action::DockKey(crate::dock::DockKey::Nothing)),
                 // While dune-finder is open, Mod+Enter and Mod+Tab are its own.
                 Some(Action::EmptyContainer | Action::CycleTab(_)) if finder_open => FilterResult::Forward,
                 Some(action) if locked && !allowed_while_locked(&action) => FilterResult::Forward,
@@ -632,6 +642,9 @@ impl Dune {
             },
         );
         if let Some(action) = action {
+            if dock_keys && !matches!(action, Action::DockKey(_) | Action::DockShow) {
+                self.close_dock();
+            }
             self.run_action(action);
         }
     }
@@ -663,10 +676,11 @@ impl Dune {
                 }
                 let wanted = current + event.delta();
                 let mut pos = self.clamp_to_outputs(wanted);
-                // Pushing on against a left/right screen edge slides the strip there (not
-                // for a pointer a game confines, nor while locked).
+                // Pushing on against a left/right screen edge slides the strip there (not for
+                // a pointer a game confines, nor while locked).
                 if constraint.is_none() && !locked {
-                    let dx = edge_slide(&mut self.edge_push, (pos.x - current.x).abs() < 0.5, wanted.x - pos.x);
+                    let at_edge = (pos.x - current.x).abs() < 0.5;
+                    let dx = edge_slide(&mut self.edge_push, at_edge, wanted.x - pos.x);
                     self.slide_strip(pos, dx);
                 }
                 // A confined one stays on its surface, inside the region.
@@ -683,6 +697,7 @@ impl Dune {
                     }
                 }
                 self.pointer_at(pos);
+                self.dock_hover((pos.x, pos.y));
                 self.drag_resize(pos);
                 self.drag_move(pos);
                 let under = self.surface_under(pos);
@@ -706,6 +721,7 @@ impl Dune {
                 let output_geo = self.space.output_geometry(output).unwrap();
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 self.pointer_at(pos);
+                self.dock_hover((pos.x, pos.y));
                 self.drag_resize(pos);
                 self.drag_move(pos);
 
@@ -744,16 +760,60 @@ impl Dune {
                     return self.close_finder();
                 }
 
+                // The dock shown: a click on an entry takes it out, a right click pins it;
+                // the dock keeps the clicks on it. A click away hides it.
+                if self.dock_open.is_some() {
+                    let pos = pointer.current_location();
+                    let (hit, on_dock) = self.dock_at((pos.x, pos.y));
+                    if on_dock {
+                        if button_state == ButtonState::Pressed
+                            && let Some(hit) = hit
+                        {
+                            match (hit, event.button_code()) {
+                                (DockHit::Scratchpad, BTN_LEFT) => {
+                                    self.close_dock();
+                                    self.take_from_scratchpad(None);
+                                }
+                                (DockHit::Scratch(k), BTN_LEFT) => {
+                                    self.close_dock();
+                                    self.take_from_scratchpad(Some(k));
+                                }
+                                (DockHit::Entry(i), BTN_LEFT) => {
+                                    self.close_dock();
+                                    self.undock(i);
+                                }
+                                (DockHit::Tab(i, k), BTN_LEFT) => {
+                                    let tab = self.dock[i].leads().get(k).copied();
+                                    self.close_dock();
+                                    match tab {
+                                        Some(tab) => self.undock_showing(i, tab),
+                                        None => self.undock(i),
+                                    }
+                                }
+                                (DockHit::Entry(i) | DockHit::Tab(i, _), BTN_RIGHT) => {
+                                    let output = self.dock_open.clone().unwrap_or_default();
+                                    self.toggle_dock_pin(i, &output);
+                                }
+                                _ => {}
+                            }
+                        }
+                        return;
+                    }
+                    if button_state == ButtonState::Pressed {
+                        self.close_dock();
+                    }
+                }
+
                 let mods = self.seat.get_keyboard().unwrap().modifier_state();
                 let mod_held = modifier_held(&self.config.modifier, &mods);
-                let fold = self.config.fold_click.is_some_and(|c| c.matches(&mods, event.button_code()));
+                let dock = self.config.dock_click.is_some_and(|c| c.matches(&mods, event.button_code()));
 
-                // `fold_click` folds the tile under the pointer into the accordion (opens a
-                // folded one). On a button Mod drags with, only a click does (on release).
-                if fold && button_state == ButtonState::Pressed && !(mod_held && [BTN_LEFT, BTN_RIGHT].contains(&event.button_code())) {
+                // `dock_click` puts the tile under the pointer into the dock. On a button Mod
+                // drags with, only a click does (on release).
+                if dock && button_state == ButtonState::Pressed && !(mod_held && [BTN_LEFT, BTN_RIGHT].contains(&event.button_code())) {
                     let pos = pointer.current_location();
                     if let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y)) {
-                        return self.toggle_fold(id);
+                        return self.send_to_dock(id);
                     }
                 }
 
@@ -763,8 +823,8 @@ impl Dune {
                     if button_state == ButtonState::Released
                         && let Some(drag) = self.resize_drag.take()
                     {
-                        if drag.fold && (pos.x - drag.start.x).hypot(pos.y - drag.start.y) <= CLICK_SLOP {
-                            self.toggle_fold(drag.tile);
+                        if drag.dock && (pos.x - drag.start.x).hypot(pos.y - drag.start.y) <= CLICK_SLOP {
+                            self.send_to_dock(drag.tile);
                         }
                         return;
                     }
@@ -773,7 +833,7 @@ impl Dune {
                         && let Some(id) = self.tile_at(pos.x, pos.y).or_else(|| self.tab_at(pos.x, pos.y))
                     {
                         self.focus_tile(id);
-                        self.resize_drag = Some(ResizeDrag { tile: id, start: pos, last: pos, fold });
+                        self.resize_drag = Some(ResizeDrag { tile: id, start: pos, last: pos, dock });
                         return;
                     }
                 }
@@ -792,7 +852,7 @@ impl Dune {
                         if !drag.moved {
                             match drag.split {
                                 Some(side) => self.open_empty_split(drag.tile, side),
-                                None if drag.fold => self.toggle_fold(drag.tile),
+                                None if drag.dock => self.send_to_dock(drag.tile),
                                 None => self.toggle_floating(drag.tile),
                             }
                         } else if drag.from.is_none() {
@@ -810,7 +870,7 @@ impl Dune {
                         let split = self.split_hint_at(pos).filter(|(t, ..)| *t == id).map(|(_, side, _)| side);
                         self.focus_tile(id);
                         let from = self.float_rect(id);
-                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from, split, fold });
+                        self.move_drag = Some(MoveDrag { tile: id, start: pos, moved: false, from, split, dock });
                         return;
                     }
                 }
@@ -830,10 +890,7 @@ impl Dune {
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
                     if let Some(id) = self.tab_at(pos.x, pos.y).or_else(|| self.tile_at(pos.x, pos.y)) {
-                        // A click on a folded tile's bar opens it; hovering only focuses it.
-                        if self.is_folded(id) {
-                            self.open_folded(id);
-                        } else if self.focused != Some(id) {
+                        if self.focused != Some(id) {
                             self.focus_tile(id);
                         } else if !self.geometries.iter().any(|(t, r)| *t == id && self.shown.contains(&(*t, *r))) {
                             // Focused already but partly off its monitor (slid there by hand):
@@ -936,6 +993,16 @@ impl Dune {
                 }
 
                 let pointer = self.seat.get_pointer().unwrap();
+                // The layout may have moved under a still pointer (a strip slide, a desktop
+                // switch, a window closing): the scroll goes to what is under it now.
+                if !pointer.is_grabbed() {
+                    let location = pointer.current_location();
+                    let under = self.surface_under(location);
+                    if under.as_ref().map(|(s, _)| s) != pointer.current_focus().as_ref() {
+                        let event = MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time: event.time() };
+                        pointer.motion(self, under, &event);
+                    }
+                }
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }

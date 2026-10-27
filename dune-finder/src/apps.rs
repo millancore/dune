@@ -47,6 +47,8 @@ pub enum Step {
     Files,
     /// `>` typed first: go to the folders to jump to.
     Jump,
+    /// `@` typed first: go to the system actions.
+    System,
 }
 
 pub struct Apps {
@@ -204,6 +206,7 @@ impl Apps {
             Key::Char('/') if self.picker.input().is_empty() => return Step::Windows,
             Key::Char('#') if self.picker.input().is_empty() => return Step::Files,
             Key::Char('>') if self.picker.input().is_empty() => return Step::Jump,
+            Key::Char('@') if self.picker.input().is_empty() => return Step::System,
             _ => {}
         }
         // Nothing is highlighted yet: the first Down lands on the first app.
@@ -603,6 +606,7 @@ mod tests {
             Step::Files
         );
         assert_eq!(press(&mut a, Keysym::slash, false), Step::Windows);
+        assert_eq!(a.feed(&Modifiers::default(), Keysym::at, Some('@')), Step::System);
         // Inside a command it is just typed (a path).
         typed(&mut a, "ls");
         assert_eq!(

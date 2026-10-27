@@ -1,4 +1,4 @@
-//! Application icons for dune-finder: looked up in the freedesktop icon theme
+//! Application icons for dune-finder and the dock: looked up in the freedesktop icon theme
 //! (with the themes it inherits, then hicolor and `/usr/share/pixmaps`) and drawn
 //! with resvg, SVG or PNG, to a square of the size asked.
 

@@ -43,6 +43,7 @@ use crate::{
     finder::{Action, Finder, Mode},
     icons::Icons,
     panel::{self, FONT_SIZE, SMALL_FONT_SIZE},
+    system::Power,
     tabs,
 };
 
@@ -145,6 +146,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         Box::new(windows),
         Box::new(tabs::list),
         Box::new(|| dune_common::jumps::ranked(dune_common::jumps::now()).into_iter().map(|j| j.path).collect()),
+        Box::new(|| awake(false)),
         home,
         options.file_manager.clone(),
     );
@@ -222,6 +224,17 @@ fn tab_window(title: &str) -> Option<TileId> {
         std::thread::sleep(Duration::from_millis(50));
     }
     None
+}
+
+/// Whether dune's Stay awake is on; `toggle`: turn it on or off first.
+fn awake(toggle: bool) -> bool {
+    match protocol::ask(&Request::Awake { toggle }, ANSWER) {
+        Ok(answer) => answer == "on",
+        Err(err) => {
+            eprintln!("dune-finder: cannot ask whether to stay awake: {err}");
+            false
+        }
+    }
 }
 
 /// The rows of the tile options menu for `tile`, from dune.
@@ -446,6 +459,9 @@ impl App {
                     if let Err(err) = std::process::Command::new("sh").args(["-c", command]).spawn() {
                         eprintln!("dune-finder: cannot run `{command}`: {err}");
                     }
+                }
+                None if power == Power::StayAwake => {
+                    awake(true);
                 }
                 None => {
                     if let Err(err) = protocol::ask(&Request::Quit, ANSWER) {

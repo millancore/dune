@@ -21,9 +21,15 @@
 //! - `tile_action\t<tile or empty>\t<action>` — do `action` (`TileAction::code`) on that
 //!   tile; nothing without one. Answered `ok`;
 //! - `quit\t` — end the session (dune-finder's Log out); answered `ok`;
+//! - `awake\t` — answered `on` while dune holds off idle (dune-finder's Stay awake), else
+//!   `off`; `awake\ttoggle` turns that on or off, answered the new state;
 //! - `scratchpad_show\t` — what the `scratchpad` key does (`dune scratchpad show`); answered `ok`;
 //! - `watch_scratchpad\t` — the connection stays open: dune writes a waybar JSON line with the
 //!   scratchpad's windows now and on every change (`dune scratchpad watch`);
+//! - `dock_show\t<output or empty>` — show the dock of that monitor (none: the active one),
+//!   driven by keys, or hide it when shown (`dune dock show`); answered `ok`;
+//! - `watch_dock\t<output or empty>` — the connection stays open: dune writes a waybar JSON
+//!   line with the windows in that monitor's dock now and on every change (`dune dock watch`);
 //! - `recording\tstarted|ended` — the recording's shell: wf-recorder started / ended;
 //! - `recording_stop\t` — stop the recording running (`dune recording stop`); answered `ok`;
 //! - `watch_recording\t` — the connection stays open: dune writes `on SECONDS` (when the
@@ -305,6 +311,8 @@ pub enum TileAction {
     /// Out of its split into a tab of its own (`stack_to_tabs`).
     ToTab,
     SendToDesk(u8),
+    /// Into the dock of its desktop (with its tabs).
+    Dock,
     /// Off every desktop, into the scratchpad.
     Scratchpad,
     Close,
@@ -316,7 +324,7 @@ impl TileAction {
         use TileAction::*;
         let mut all = vec![PrivateTile, Float, Center, FullWidth, ToTab];
         all.extend((1..=9).map(SendToDesk));
-        all.extend([Scratchpad, Close]);
+        all.extend([Dock, Scratchpad, Close]);
         all
     }
 
@@ -329,6 +337,7 @@ impl TileAction {
             TileAction::FullWidth => "full_width".into(),
             TileAction::ToTab => "stack_to_tabs".into(),
             TileAction::SendToDesk(n) => format!("send_to_desk_{n}"),
+            TileAction::Dock => "dock".into(),
             TileAction::Scratchpad => "send_to_scratchpad".into(),
             TileAction::Close => "close".into(),
         }
@@ -347,6 +356,7 @@ impl TileAction {
             TileAction::FullWidth => "Full width".into(),
             TileAction::ToTab => "To tab".into(),
             TileAction::SendToDesk(n) => format!("Send to desktop {n}"),
+            TileAction::Dock => "Send to dock".into(),
             TileAction::Scratchpad => "Send to scratchpad".into(),
             TileAction::Close => "Close".into(),
         }
@@ -441,10 +451,17 @@ pub enum Request {
     },
     /// End the session.
     Quit,
+    /// Whether idle is held off (swayidle's lock and suspend wait); `toggle`: flip it first.
+    Awake { toggle: bool },
     /// Hide the shown scratchpad window focused, or show the next one.
     ScratchpadShow,
     /// Keep the connection, writing the scratchpad's state on every change.
     WatchScratchpad,
+    /// Show the dock of `output` (none: the active monitor's), or hide it when shown.
+    DockShow { output: Option<String> },
+    /// Keep the connection, writing the state of `output`'s dock (none: the active
+    /// monitor's) on every change.
+    WatchDock { output: Option<String> },
     /// The recording's shell: wf-recorder started (`true`) or ended; `area`: the rectangle
     /// it records (`x, y, w, h`), when not a whole monitor.
     Recording { started: bool, area: Option<(i32, i32, i32, i32)> },
@@ -498,8 +515,11 @@ impl Request {
                 format!("tile_action\t{}\t{}", tile.map(|t| t.to_string()).unwrap_or_default(), action.code())
             }
             Request::Quit => "quit\t".into(),
+            Request::Awake { toggle } => format!("awake\t{}", if *toggle { "toggle" } else { "" }),
             Request::ScratchpadShow => "scratchpad_show\t".into(),
             Request::WatchScratchpad => "watch_scratchpad\t".into(),
+            Request::DockShow { output } => format!("dock_show\t{}", output.as_deref().unwrap_or_default()),
+            Request::WatchDock { output } => format!("watch_dock\t{}", output.as_deref().unwrap_or_default()),
             Request::Recording { started, area } => {
                 let area = area.map(|(x, y, w, h)| format!("\t{x},{y} {w}x{h}")).unwrap_or_default();
                 format!("recording\t{}{area}", if *started { "started" } else { "ended" })
@@ -561,8 +581,15 @@ impl Request {
                 Some(Request::TileAction { tile: tile.parse().ok(), action: TileAction::parse(action)? })
             }
             "quit" => Some(Request::Quit),
+            "awake" => match rest {
+                "" => Some(Request::Awake { toggle: false }),
+                "toggle" => Some(Request::Awake { toggle: true }),
+                _ => None,
+            },
             "scratchpad_show" => Some(Request::ScratchpadShow),
             "watch_scratchpad" => Some(Request::WatchScratchpad),
+            "dock_show" => Some(Request::DockShow { output: (!rest.is_empty()).then(|| rest.to_string()) }),
+            "watch_dock" => Some(Request::WatchDock { output: (!rest.is_empty()).then(|| rest.to_string()) }),
             "recording" => {
                 let (state, area) = rest.split_once('\t').unwrap_or((rest, ""));
                 let started = match state {
@@ -687,8 +714,14 @@ mod tests {
             Request::TileAction { tile: Some(2), action: TileAction::SendToDesk(9) },
             Request::TileAction { tile: Some(2), action: TileAction::Scratchpad },
             Request::Quit,
+            Request::Awake { toggle: false },
+            Request::Awake { toggle: true },
             Request::ScratchpadShow,
             Request::WatchScratchpad,
+            Request::DockShow { output: None },
+            Request::DockShow { output: Some("DP-1".into()) },
+            Request::WatchDock { output: None },
+            Request::WatchDock { output: Some("HDMI-A-1".into()) },
             Request::Recording { started: true, area: None },
             Request::Recording { started: true, area: Some((-10, 20, 300, 40)) },
             Request::Recording { started: false, area: None },
@@ -802,7 +835,7 @@ mod tests {
     #[test]
     fn tile_actions_have_their_config_names() {
         let all = TileAction::all();
-        assert_eq!(all.len(), 16);
+        assert_eq!(all.len(), 17);
         for action in all {
             assert_eq!(TileAction::parse(&action.code()), Some(action));
         }

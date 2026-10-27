@@ -208,11 +208,12 @@ impl IdleInhibitHandler for Dune {
 
 impl Dune {
     /// Idle is held off while a surface that asked for it is alive and shown: on a window
-    /// mapped on screen (not a hidden tab or desktop, nor under another window) or a layer. Called
-    /// after every frame too, as surfaces die or get hidden without telling.
+    /// mapped on screen (not a hidden tab or desktop, nor under another window) or a layer;
+    /// or while Stay awake is on. Called after every frame too, as surfaces die or get hidden
+    /// without telling.
     pub fn refresh_idle_inhibit(&mut self) {
         self.idle_inhibitors.retain(|s| s.is_alive());
-        let inhibited = self.idle_inhibitors.iter().any(|s| self.is_shown_surface(s));
+        let inhibited = self.stay_awake || self.idle_inhibitors.iter().any(|s| self.is_shown_surface(s));
         self.idle_notifier_state.set_is_inhibited(inhibited);
     }
 

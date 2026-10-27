@@ -1,5 +1,5 @@
 //! The compositor's end of the control socket (protocol in `dune_common::protocol`),
-//! and the `dune open`, `dune scratchpad` and `dune recording` commands.
+//! and the `dune open`, `dune scratchpad`, `dune dock` and `dune recording` commands.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -27,6 +27,7 @@ pub fn listen(event_loop: &mut EventLoop<'static, Dune>, path: &Path) -> std::io
                 match read_request(&mut stream) {
                     Some(Request::WatchScratchpad) => state.watch_scratchpad(stream),
                     Some(Request::WatchRecording) => state.watch_recording(stream),
+                    Some(Request::WatchDock { output }) => state.watch_dock(stream, output),
                     Some(req) => {
                         if let Some(answer) = state.handle_request(req) {
                             let _ = stream.write_all(answer.as_bytes());
@@ -65,6 +66,27 @@ pub fn scratchpad_command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         _ => Err("usage: dune scratchpad show|watch".into()),
+    }
+}
+
+/// `dune dock show`: show the dock of the monitor of the bar it is run from (waybar says
+/// which in `$WAYBAR_OUTPUT_NAME`; else the active one), or hide it. `dune dock watch`: a
+/// line for waybar (`return-type: json`) with the windows in that dock, now and on every
+/// change, until dune goes away.
+pub fn dock_command(args: &[String]) -> Result<(), String> {
+    let output = std::env::var("WAYBAR_OUTPUT_NAME").ok().filter(|o| !o.is_empty());
+    match args.first().map(String::as_str) {
+        Some("show") => ask(&Request::DockShow { output }, Duration::from_secs(1)).map(|_| ()),
+        Some("watch") => {
+            let stream = watch(&Request::WatchDock { output })?;
+            let mut out = std::io::stdout().lock();
+            for line in BufReader::new(stream).lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                writeln!(out, "{line}").and_then(|_| out.flush()).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        _ => Err("usage: dune dock show|watch".into()),
     }
 }
 

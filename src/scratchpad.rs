@@ -26,7 +26,7 @@ pub fn status_line(titles: &[String]) -> String {
     format!(r#"{{"text":"{}","tooltip":"{}","class":"filled"}}"#, titles.len(), json_escape(&tooltip))
 }
 
-fn json_escape(s: &str) -> String {
+pub fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -46,9 +46,9 @@ impl Dune {
         self.scratchpad.iter().any(|(t, _)| *t == id)
     }
 
-    /// Whether `id` is off the screen: on a desktop not shown, or in the scratchpad.
+    /// Whether `id` is off the screen: on a desktop not shown, in the scratchpad or a dock.
     pub fn put_away(&self, id: TileId) -> bool {
-        self.hidden_desk(id).is_some() || self.in_scratchpad(id)
+        self.hidden_desk(id).is_some() || self.in_scratchpad(id) || self.in_dock(id)
     }
 
     /// `id` leaves wherever it is for the end of the scratchpad, keeping its float's size
@@ -96,9 +96,14 @@ impl Dune {
         self.focus_tile(id);
     }
 
+    /// The windows waiting in the scratchpad, in its order.
+    pub fn scratchpad_tiles(&self) -> Vec<TileId> {
+        self.scratchpad.iter().map(|(t, _)| *t).filter(|t| self.tiles.get(t).is_some_and(|tile| tile.top().is_some())).collect()
+    }
+
     /// The titles of the windows waiting in the scratchpad, in its order.
-    fn scratchpad_titles(&self) -> Vec<String> {
-        self.scratchpad.iter().map(|(t, _)| *t).filter(|t| self.tiles.get(t).is_some_and(|tile| tile.top().is_some())).map(|t| self.shown_title(t)).collect()
+    pub fn scratchpad_titles(&self) -> Vec<String> {
+        self.scratchpad_tiles().into_iter().map(|t| self.shown_title(t)).collect()
     }
 
     /// A `watch_scratchpad` connection: told the state now, and on every change.

@@ -30,7 +30,7 @@
 //! recording_dir = "~/videos"  # where `record` saves; default $XDG_VIDEOS_DIR, else ~/Videos
 //!
 //! [mouse]
-//! fold_click = "mod+right"    # fold the tile under the pointer into the accordion (on a folded one: open it); default none
+//! dock_click = "mod+right"    # the tile under the pointer (with its tabs) into the dock of its desktop; default none
 //!
 //! # Mice and touchpads (on the real session, not nested)
 //! [input]
@@ -103,12 +103,13 @@
 //! tile_options = "mod+slash"          # dune-finder on the focused tile's options (private, float, ...)
 //! switcher = "none"                   # dune-finder on the windows (`/` in it gets there too)
 //! private_tile = "none"               # block the focused tile on screen and in captures (again: show it)
-//! fold = "none"                       # fold the focused tile into the accordion (on a folded one: open it)
+//! dock = "mod+shift+d"                # the focused tile (with its tabs) into the dock of its desktop
+//! dock_show = "mod+shift+e"           # the dock of the active monitor: arrows or k/j, Enter out, p pins, Esc
 //! terminal_vertical = "mod+v"         # a terminal right of the tile, in its folder
 //! terminal_horizontal = "mod+s"       # one below it
 //! terminal_tab = "none"               # one as a new tab of its container
 //! stack_to_tabs = "mod+t"
-//! quit = "mod+shift+e"
+//! quit = "none"                       # end the session at once (Log out is in dune-finder's System mode)
 //! lock = "mod+Escape"                 # runs `lock_command`
 //! screenshot = "Print"                # of a region chosen with the mouse (Esc: none)
 //! screenshot_tile = "ctrl+Print"      # of the focused tile
@@ -321,7 +322,8 @@ pub enum Binding {
     TileOptions,
     Switcher,
     PrivateTile,
-    Fold,
+    Dock,
+    DockShow,
     Terminal(TerminalHere),
     StackToTabs,
     Quit,
@@ -380,12 +382,13 @@ fn binding_table() -> Vec<(String, Binding, String)> {
         ("tile_options", TileOptions, "mod+slash"),
         ("switcher", Switcher, "none"),
         ("private_tile", PrivateTile, "none"),
-        ("fold", Fold, "none"),
+        ("dock", Dock, "mod+shift+d"),
+        ("dock_show", DockShow, "mod+shift+e"),
         ("terminal_vertical", Terminal(TerminalHere::Right), "mod+v"),
         ("terminal_horizontal", Terminal(TerminalHere::Below), "mod+s"),
         ("terminal_tab", Terminal(TerminalHere::Tab), "none"),
         ("stack_to_tabs", StackToTabs, "mod+t"),
-        ("quit", Quit, "mod+shift+e"),
+        ("quit", Quit, "none"),
         ("lock", Lock, "mod+Escape"),
         ("screenshot", Screenshot, "Print"),
         ("screenshot_tile", ScreenshotTile, "ctrl+Print"),
@@ -455,12 +458,12 @@ fn bindings(file: &BTreeMap<String, Keys>, modifier: &str) -> Vec<(Binding, KeyS
     taken.into_iter().map(|(_, binding, key, _)| (binding, key)).collect()
 }
 
-/// `mouse.fold_click`: a click, or none (the default); a value that is not one is warned about.
-fn fold_click(value: Option<&str>, modifier: &str) -> Option<ClickSpec> {
+/// `mouse.dock_click`: a click, or none (the default); a value that is not one is warned about.
+fn dock_click(value: Option<&str>, modifier: &str) -> Option<ClickSpec> {
     let value = value.filter(|v| !v.eq_ignore_ascii_case("none"))?;
     let click = ClickSpec::parse(value, modifier);
     if click.is_none() {
-        tracing::warn!("ignoring `mouse.fold_click = {value}`: not modifiers and left, right or middle, nor none");
+        tracing::warn!("ignoring `mouse.dock_click = {value}`: not modifiers and left, right or middle, nor none");
     }
     click
 }
@@ -535,8 +538,8 @@ pub struct Config {
     pub follow: bool,
     /// The tile under the pointer takes focus as the pointer moves.
     pub focus_follows_mouse: bool,
-    /// The click that folds the tile under the pointer into the accordion (opens a folded one).
-    pub fold_click: Option<ClickSpec>,
+    /// The click that puts the tile under the pointer into the dock.
+    pub dock_click: Option<ClickSpec>,
     /// `satellite` (default) or `off`.
     pub xwayland: String,
     /// Monitors by connector name, like `HDMI-A-1`.
@@ -651,7 +654,7 @@ struct CaptureFile {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct MouseFile {
-    fold_click: Option<String>,
+    dock_click: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -728,7 +731,7 @@ fn resolve(file: &File, env: &dyn Fn(&str) -> Option<String>) -> Config {
         lock_command: file.lock_command.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "swaylock -f".into()),
         follow: file.follow,
         focus_follows_mouse: file.focus_follows_mouse,
-        fold_click: fold_click(file.mouse.fold_click.as_deref(), &modifier),
+        dock_click: dock_click(file.mouse.dock_click.as_deref(), &modifier),
         outputs: outputs(&file.output),
         input: input(&file.input),
         font_family: file.font.clone().filter(|f| !f.is_empty()).unwrap_or_else(|| "monospace".into()),
@@ -874,10 +877,10 @@ mod tests {
         let c = resolve(&parse("modifier = \"alt\"\n").unwrap(), &env);
         assert_eq!(keys_of(&c, Binding::Close), [spec("super+q")]);
         // Every binding has a key by default, but the windows (`/` in dune-finder), the
-        // private switches (in the tile options), folding (`fold_click`), a terminal tab (Mod+Shift+t opens
+        // private switches (in the tile options), a terminal tab (Mod+Shift+t opens
         // an empty one) and the monitors (their keys depend on how they are placed).
         let c = config("");
-        let unbound = [Binding::Switcher, Binding::PrivateTile, Binding::Fold, Binding::Terminal(TerminalHere::Tab)];
+        let unbound = [Binding::Switcher, Binding::PrivateTile, Binding::Terminal(TerminalHere::Tab), Binding::Quit];
         for (name, binding, defaults) in binding_table() {
             let none = unbound.contains(&binding) || matches!(binding, Binding::FocusMonitor(_));
             assert_eq!(keys_of(&c, binding).is_empty(), none, "{name}");
@@ -886,16 +889,16 @@ mod tests {
     }
 
     #[test]
-    fn fold_click_is_a_button_with_modifiers() {
-        let c = config("modifier = \"super\"\n[mouse]\nfold_click = \"mod+right\"\n");
-        let click = c.fold_click.unwrap();
+    fn dock_click_is_a_button_with_modifiers() {
+        let c = config("modifier = \"super\"\n[mouse]\ndock_click = \"mod+right\"\n");
+        let click = c.dock_click.unwrap();
         assert_eq!((click.logo, click.alt, click.ctrl, click.shift, click.button), (true, false, false, false, 0x111));
         assert_eq!(ClickSpec::parse("ctrl+shift+Middle", "alt").map(|c| (c.ctrl, c.shift, c.button)), Some((true, true, 0x112)));
         // None by default; `none`, a key or an unknown modifier: none.
         for value in ["none", "mod+q", "hyper+left"] {
-            assert_eq!(config(&format!("[mouse]\nfold_click = \"{value}\"\n")).fold_click, None, "{value}");
+            assert_eq!(config(&format!("[mouse]\ndock_click = \"{value}\"\n")).dock_click, None, "{value}");
         }
-        assert_eq!(config("").fold_click, None);
+        assert_eq!(config("").dock_click, None);
     }
 
     #[test]
@@ -923,7 +926,7 @@ mod tests {
         assert!(keys_of(&c, Binding::Quit).is_empty());
         assert!(keys_of(&c, Binding::Lock).is_empty());
         assert!(keys_of(&c, Binding::Close).is_empty());
-        assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+shift+e")));
+        assert!(!c.bindings.iter().any(|(_, k)| *k == spec("alt+q")));
     }
 
     #[test]

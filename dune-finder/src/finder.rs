@@ -1,6 +1,6 @@
 //! The finder: one panel that is the apps (the launcher), the windows (the switcher), the
 //! files or the folders to jump to, and turns from one into the other: `/` typed first in
-//! the apps shows the windows, `#` the files, `>` the jumps, Backspace with nothing typed
+//! the apps shows the windows, `#` the files, `>` the jumps, `@` the system one, Backspace with nothing typed
 //! there goes back; Mod+Tab goes through them all and the system one (power off, reboot,
 //! log out), Mod+Shift+Tab back. Started on the tile options (Mod+/), it stays on them. Keys, clicks and
 //! the wheel come in; what to do with dune comes out (`Action`).
@@ -33,7 +33,7 @@ pub enum Mode {
     Jump,
     /// The focused tile's options.
     TileOptions,
-    /// Power off, reboot, log out.
+    /// Power off, reboot, log out, stay awake.
     System,
 }
 
@@ -63,7 +63,7 @@ pub enum Action {
     Unlock(TileId),
     /// Do that to the tile the finder was opened for, then close.
     TileAction(TileAction),
-    /// Power off, reboot or log out, then close.
+    /// Power off, reboot, log out or turn Stay awake on or off, then close.
     Power(Power),
 }
 
@@ -91,6 +91,8 @@ pub struct Finder {
     system: System,
     /// The recorded folders, the highest frecency first.
     load_jumps: Box<dyn FnMut() -> Vec<PathBuf>>,
+    /// Whether dune's Stay awake is on, asked when the system mode is shown.
+    load_awake: Box<dyn FnMut() -> bool>,
     home: PathBuf,
     /// The terminal file manager Mod+Enter (or Ctrl+Enter) opens files in (`yazi`).
     file_manager: String,
@@ -111,6 +113,7 @@ impl Finder {
         load_windows: Box<dyn FnMut(bool) -> Vec<WindowInfo>>,
         load_tabs: Box<dyn FnMut() -> Vec<Tab>>,
         load_jumps: Box<dyn FnMut() -> Vec<PathBuf>>,
+        load_awake: Box<dyn FnMut() -> bool>,
         home: PathBuf,
         file_manager: String,
     ) -> Self {
@@ -125,8 +128,9 @@ impl Finder {
             jump: None,
             files_from_jump: false,
             tile_options: None,
-            system: System::new(),
+            system: System::new(false),
             load_jumps,
+            load_awake,
             home,
             file_manager,
             file_manager_terminal: None,
@@ -167,7 +171,7 @@ impl Finder {
 
     /// The system actions, nothing typed.
     fn show_system(&mut self) {
-        self.system = System::new();
+        self.system = System::new((self.load_awake)());
         self.mode = Mode::System;
     }
 
@@ -267,7 +271,10 @@ impl Finder {
                     .map_or(tile_options::Step::Close, |o| o.feed(mods, sym, text));
                 tile_options_step(step)
             }
-            Mode::System => system_step(self.system.feed(mods, sym, text)),
+            Mode::System => {
+                let step = self.system.feed(mods, sym, text);
+                self.system_step(step)
+            }
         }
     }
 
@@ -310,7 +317,10 @@ impl Finder {
                     .map_or(tile_options::Step::Continue, |o| o.click(row));
                 tile_options_step(step)
             }
-            Mode::System => system_step(self.system.click(row)),
+            Mode::System => {
+                let step = self.system.click(row);
+                self.system_step(step)
+            }
         }
     }
 
@@ -346,6 +356,22 @@ impl Finder {
             }
             apps::Step::Jump => {
                 self.show_jump();
+                Action::Continue
+            }
+            apps::Step::System => {
+                self.show_system();
+                Action::Continue
+            }
+        }
+    }
+
+    fn system_step(&mut self, step: system::Step) -> Action {
+        match step {
+            system::Step::Continue => Action::Continue,
+            system::Step::Close => Action::Close,
+            system::Step::Do(power) => Action::Power(power),
+            system::Step::Apps => {
+                self.mode = Mode::Apps;
                 Action::Continue
             }
         }
@@ -499,14 +525,6 @@ fn help_rows(hint: &str) -> Vec<Row<'_>> {
         .collect()
 }
 
-fn system_step(step: system::Step) -> Action {
-    match step {
-        system::Step::Continue => Action::Continue,
-        system::Step::Close => Action::Close,
-        system::Step::Do(power) => Action::Power(power),
-    }
-}
-
 fn tile_options_step(step: tile_options::Step) -> Action {
     match step {
         tile_options::Step::Continue => Action::Continue,
@@ -557,6 +575,7 @@ mod tests {
             Box::new(windows),
             Box::new(Vec::new),
             Box::new(move || vec![jump_dir.clone(), "/no/such/folder".into()]),
+            Box::new(|| false),
             home,
             "yazi".into(),
         )
@@ -690,6 +709,15 @@ mod tests {
         f.feed(&Modifiers::default(), Keysym::slash, Some('/'));
         assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
         assert_eq!(f.mode(), Mode::Jump);
+        assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
+        assert_eq!(f.mode(), Mode::Apps);
+    }
+
+    #[test]
+    fn an_at_shows_the_system_and_backspace_goes_back() {
+        let mut f = finder(Mode::Apps);
+        assert_eq!(f.feed(&Modifiers::default(), Keysym::at, Some('@')), Action::Continue);
+        assert_eq!(f.mode(), Mode::System);
         assert_eq!(key(&mut f, Keysym::BackSpace), Action::Continue);
         assert_eq!(f.mode(), Mode::Apps);
     }

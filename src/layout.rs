@@ -49,12 +49,8 @@ const MAX_WIDTH: f64 = 1.0;
 const MIN_HEIGHT: f64 = 0.1;
 /// Smallest share of a row's width a tile can be shrunk to.
 const MIN_ROW_WIDTH: f64 = 0.1;
-/// A tile squeezed below this share of its column by a neighbour growing becomes a tab.
-const TAB_THRESHOLD: f64 = 0.15;
 /// Height of a tab's bar, in pixels.
 pub const TAB_HEIGHT: i32 = 24;
-/// Thickness of a folded (accordion) row's bar, or a folded tile's upright one.
-pub const FOLD_WIDTH: i32 = TAB_HEIGHT * 3 / 2;
 /// Widest a tab of a tabbed container gets in its bar, in pixels, unless the config says.
 pub const TAB_MAX_WIDTH: i32 = 220;
 /// Narrowest a tab gets: past that, the bar scrolls (see `tab_strip`). The config may change it.
@@ -168,76 +164,90 @@ pub fn tab_strip(bar: Rect, n: usize, shown: usize, widths: TabWidths) -> TabStr
 #[derive(Debug)]
 struct Row {
     tiles: Vec<TileId>,
-    /// Share of the column's width of each tile; the open ones add up to 1.
+    /// Share of the column's width of each tile; they add up to 1.
     widths: Vec<f64>,
-    /// Tiles folded into an upright bar by a neighbour growing (see `resize_row_width`).
-    folded: Vec<bool>,
 }
 
 impl Row {
     fn new(id: TileId) -> Self {
-        Row { tiles: vec![id], widths: vec![1.0], folded: vec![false] }
+        Row { tiles: vec![id], widths: vec![1.0] }
     }
 
-    /// Put `id` at `index`, giving it an even share of the width of the open tiles.
+    /// Put `id` at `index`, giving it an even share of the width.
     fn insert(&mut self, index: usize, id: TileId) {
-        let open = self.folded.iter().filter(|f| !**f).count();
-        let share = 1.0 / (open + 1) as f64;
-        for (w, _) in self.widths.iter_mut().zip(&self.folded).filter(|(_, f)| !**f) {
+        let share = 1.0 / (self.tiles.len() + 1) as f64;
+        for w in &mut self.widths {
             *w *= 1.0 - share;
         }
         self.tiles.insert(index, id);
         self.widths.insert(index, share);
-        self.folded.insert(index, false);
     }
 
     fn remove(&mut self, index: usize) {
         self.tiles.remove(index);
         self.widths.remove(index);
-        self.folded.remove(index);
-        // A lone tile opens again; with only folded ones left, the neighbour that took its
-        // place (the one before it at the end) opens, the rest stay folded.
-        if self.tiles.len() < 2 {
-            self.unfold();
-        } else if self.folded.iter().all(|f| *f) {
-            let open = index.min(self.tiles.len() - 1);
-            self.folded[open] = false;
-            self.widths[open] = 1.0;
-        }
-        self.normalize_open();
+        normalize(&mut self.widths);
     }
+}
 
-    /// Every tile open again, with an even share of the width.
-    fn unfold(&mut self) {
-        let even = 1.0 / self.tiles.len().max(1) as f64;
-        self.widths.iter_mut().for_each(|w| *w = even);
-        self.folded.iter_mut().for_each(|f| *f = false);
+/// `shares` scaled to add up to 1.
+fn normalize(shares: &mut [f64]) {
+    let total: f64 = shares.iter().sum();
+    if total > 0.0 {
+        shares.iter_mut().for_each(|s| *s /= total);
     }
+}
 
-    /// The open tiles' widths scaled to add up to 1.
-    fn normalize_open(&mut self) {
-        let total: f64 = self.widths.iter().zip(&self.folded).filter(|(_, f)| !**f).map(|(w, _)| w).sum();
-        if total > 0.0 {
-            for (w, _) in self.widths.iter_mut().zip(&self.folded).filter(|(_, f)| !**f) {
-                *w /= total;
-            }
+/// Share `i` of `shares` set to `share`, the others scaled to fill the rest.
+fn set_share(shares: &mut [f64], i: usize, share: f64) {
+    let rest: f64 = shares.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, s)| s).sum();
+    for (j, s) in shares.iter_mut().enumerate() {
+        if j == i {
+            *s = share;
+        } else if rest > 0.0 {
+            *s = *s / rest * (1.0 - share);
         }
+    }
+}
+
+/// Change share `i` of `shares` (adding up to 1) by `delta`, the others giving or taking
+/// the difference in proportion; none goes below `min`.
+fn resize_share(shares: &mut [f64], i: usize, delta: f64, min: f64) {
+    if shares.len() < 2 {
+        return;
+    }
+    normalize(shares);
+    let old = shares[i];
+    // The smallest of the others reaches `min` first as they shrink together.
+    let smallest = shares.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
+    let most = 1.0 - (1.0 - old) * (min / smallest).min(1.0);
+    let new = (old + delta).clamp(min.min(old), most.max(old));
+    let scale = if old < 1.0 { (1.0 - new) / (1.0 - old) } else { 0.0 };
+    for (j, s) in shares.iter_mut().enumerate() {
+        *s = if j == i { new } else { *s * scale };
+    }
+}
+
+/// Names a column, tabs and all: it keeps it while tabs come and go, and out of the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GroupId(u64);
+
+impl GroupId {
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        GroupId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 }
 
 #[derive(Debug)]
 struct Column {
+    id: GroupId,
     rows: Vec<Row>,
     /// Share of the column's height of each row; they add up to 1.
     heights: Vec<f64>,
-    /// Rows folded into tabs: a bar instead of their windows.
-    tabs: Vec<bool>,
     width: f64,
     /// Width to go back to when leaving full width.
     restore_width: Option<f64>,
-    /// Folded into an upright bar, narrowed too much (see `resize_width`); `width` is
-    /// what it opens to.
-    folded: bool,
     /// The column's tabs in order, when it has two or more: each one rows of its own. The
     /// shown one is `None`: its rows are the column's.
     panes: Vec<Option<Pane>>,
@@ -248,7 +258,6 @@ struct Column {
 struct Pane {
     rows: Vec<Row>,
     heights: Vec<f64>,
-    tabs: Vec<bool>,
 }
 
 impl Pane {
@@ -259,15 +268,7 @@ impl Pane {
 
 impl Column {
     fn new(id: TileId, width: f64) -> Self {
-        Column {
-            rows: vec![Row::new(id)],
-            heights: vec![1.0],
-            tabs: vec![false],
-            width,
-            restore_width: None,
-            folded: false,
-            panes: Vec::new(),
-        }
+        Column { id: GroupId::next(), rows: vec![Row::new(id)], heights: vec![1.0], width, restore_width: None, panes: Vec::new() }
     }
 
     fn tiles(&self) -> impl Iterator<Item = TileId> + '_ {
@@ -279,28 +280,28 @@ impl Column {
         self.rows.iter().enumerate().find_map(|(r, row)| row.tiles.iter().position(|t| *t == id).map(|k| (r, k)))
     }
 
-    /// Rows, heights and folds of each tab (only the shown rows when not tabbed).
-    fn views(&self) -> Vec<(&[Row], &[f64], &[bool])> {
+    /// Rows and heights of each tab (only the shown rows when not tabbed).
+    fn views(&self) -> Vec<(&[Row], &[f64])> {
         if self.panes.is_empty() {
-            return vec![(&self.rows, &self.heights, &self.tabs)];
+            return vec![(&self.rows, &self.heights)];
         }
         self.panes
             .iter()
             .map(|p| match p {
-                Some(p) => (&p.rows[..], &p.heights[..], &p.tabs[..]),
-                None => (&self.rows[..], &self.heights[..], &self.tabs[..]),
+                Some(p) => (&p.rows[..], &p.heights[..]),
+                None => (&self.rows[..], &self.heights[..]),
             })
             .collect()
     }
 
     /// Every tile of the column, tab by tab.
     fn all_tiles(&self) -> Vec<TileId> {
-        self.views().into_iter().flat_map(|(rows, _, _)| rows.iter().flat_map(|r| r.tiles.iter().copied())).collect()
+        self.views().into_iter().flat_map(|(rows, _)| rows.iter().flat_map(|r| r.tiles.iter().copied())).collect()
     }
 
     /// The first tile of each tab, which names it.
     fn leads(&self) -> Vec<TileId> {
-        self.views().into_iter().map(|(rows, _, _)| rows[0].tiles[0]).collect()
+        self.views().into_iter().map(|(rows, _)| rows[0].tiles[0]).collect()
     }
 
     /// Which tab `id` is in; None when the column has no tabs (or not `id`).
@@ -322,8 +323,7 @@ impl Column {
         let Some(pane) = self.panes.get_mut(p).and_then(Option::take) else { return };
         let rows = std::mem::replace(&mut self.rows, pane.rows);
         let heights = std::mem::replace(&mut self.heights, pane.heights);
-        let tabs = std::mem::replace(&mut self.tabs, pane.tabs);
-        self.panes[a] = Some(Pane { rows, heights, tabs });
+        self.panes[a] = Some(Pane { rows, heights });
         self.panes[p] = None;
     }
 
@@ -334,7 +334,7 @@ impl Column {
         }
         let at = self.shown() + 1;
         let new = Column::new(id, 0.0);
-        self.panes.insert(at, Some(Pane { rows: new.rows, heights: new.heights, tabs: new.tabs }));
+        self.panes.insert(at, Some(Pane { rows: new.rows, heights: new.heights }));
         self.show(at);
     }
 
@@ -357,7 +357,6 @@ impl Column {
         }
         self.rows.insert(index, Row::new(id));
         self.heights.insert(index, share);
-        self.tabs.insert(index, false);
     }
 
     /// Take tile `k` out of row `r`; an emptied row goes away.
@@ -371,34 +370,8 @@ impl Column {
 
     fn remove(&mut self, index: usize) {
         self.rows.remove(index);
-        let tab = self.tabs.remove(index);
-        // An open row leaving gives its place to the tab just above it (the tile it
-        // was stacked on, see `Layout::stack_on`).
-        if !tab && index > 0 && self.tabs[index - 1] {
-            self.tabs[index - 1] = false;
-            self.heights[index - 1] = self.heights.remove(index);
-            return;
-        }
-        let h = self.heights.remove(index);
-        if h < 1.0 {
-            for rest in &mut self.heights {
-                *rest /= 1.0 - h;
-            }
-        }
-        // A column of tabs only: the first one opens.
-        if !self.tabs.is_empty() && self.tabs.iter().all(|t| *t) {
-            self.tabs[0] = false;
-        }
-    }
-
-    /// Share of the height among the rows that are not tabs, normalized to add up to 1.
-    fn normalize_open(&mut self) {
-        let total: f64 = self.heights.iter().zip(&self.tabs).filter(|(_, t)| !**t).map(|(h, _)| h).sum();
-        if total > 0.0 {
-            for (h, _) in self.heights.iter_mut().zip(&self.tabs).filter(|(_, t)| !**t) {
-                *h /= total;
-            }
-        }
+        self.heights.remove(index);
+        normalize(&mut self.heights);
     }
 }
 
@@ -407,14 +380,55 @@ impl Column {
 pub enum Home {
     /// Sharing a row: on `side` of `by`, with its share of the row's width.
     Row { by: TileId, side: Side, width: f64 },
-    /// The open row stacked on the tab of `on`.
-    Stacked { on: TileId },
     /// A tab of the container `with` is in, at `index` among its tabs.
     Tab { with: TileId, index: usize },
     /// A row of its own in a column: on `side` of `by`, with its share of the height.
     Column { by: TileId, side: Side, height: f64 },
     /// A column of its own, on a side of a neighbouring column (none: alone) and its width.
     Strip { by: Option<(TileId, Side)>, width: f64 },
+}
+
+/// A column out of the strip (`Layout::take_column`): its tabs, rows and width, kept to
+/// go back in whole.
+#[derive(Debug)]
+pub struct Detached(Layout);
+
+impl Detached {
+    /// Its tiles, tab by tab.
+    pub fn tiles(&self) -> Vec<TileId> {
+        self.0.tiles()
+    }
+
+    /// The id of its column, the same however many tabs it has.
+    pub fn id(&self) -> Option<GroupId> {
+        self.0.columns.first().map(|c| c.id)
+    }
+
+    /// How many tabs it has.
+    pub fn tabs(&self) -> usize {
+        self.0.columns.first().map_or(0, |c| c.panes.len())
+    }
+
+    /// The shown tab's first tile.
+    pub fn active(&self) -> Option<TileId> {
+        self.0.columns.first().map(|c| c.rows[0].tiles[0])
+    }
+
+    /// The first tile of each tab, which names it, in the order of its bar.
+    pub fn leads(&self) -> Vec<TileId> {
+        self.0.columns.first().map(Column::leads).unwrap_or_default()
+    }
+
+    /// Show the tab `id` is in.
+    pub fn show(&mut self, id: TileId) {
+        self.0.activate_tab(id);
+    }
+
+    /// `id` leaves it (its window closed); false once nothing is left.
+    pub fn remove(&mut self, id: TileId) -> bool {
+        self.0.remove(id);
+        !self.0.columns.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -429,8 +443,6 @@ pub struct Layout {
     slid: Option<Option<TileId>>,
     /// Bars of the tabbed columns, as last laid out by `geometries`.
     bars: Vec<TabBar>,
-    /// Folded columns with tabs, as last laid out: the tiles of their bar, with the tab count.
-    fold_counts: Vec<(TileId, usize)>,
 }
 
 impl Layout {
@@ -467,6 +479,11 @@ impl Layout {
         let (c, _, _) = self.find(id)?;
         let col = &self.columns[c];
         (!col.panes.is_empty()).then(|| col.leads())
+    }
+
+    /// The id of the column `id` is in (see `GroupId`).
+    pub fn group_id(&self, id: TileId) -> Option<GroupId> {
+        self.find(id).map(|(c, _, _)| self.columns[c].id)
     }
 
     /// Add `new` as a tab of `target`'s column, after `target`'s tab, and show it.
@@ -521,7 +538,7 @@ impl Layout {
     /// tab of `id`'s column any more (and nothing was done).
     pub fn tab_back(&mut self, id: TileId, home: Home) -> bool {
         let by = match home {
-            Home::Row { by, .. } | Home::Column { by, .. } | Home::Stacked { on: by } => by,
+            Home::Row { by, .. } | Home::Column { by, .. } => by,
             Home::Tab { .. } | Home::Strip { .. } => return false,
         };
         let Some((c, _, _)) = self.find(id) else { return false };
@@ -597,12 +614,6 @@ impl Layout {
         &self.bars
     }
 
-    /// The tiles of the folded tabbed columns' bars, with the column's tab count, as last
-    /// laid out: their bar shows the count instead of a title.
-    pub fn fold_counts(&self) -> &[(TileId, usize)] {
-        &self.fold_counts
-    }
-
     /// Insert `new` after `target`: in a new column to its right (`Vertical`) or below it
     /// in its column (`Horizontal`). Without a (known) target it goes at the end.
     pub fn insert(&mut self, new: TileId, target: Option<TileId>, split: Split) {
@@ -647,29 +658,8 @@ impl Layout {
         let col = &mut self.columns[c];
         match side {
             Side::Up | Side::Down => col.insert(if side.before() { r } else { r + 1 }, new),
-            Side::Left | Side::Right => {
-                // A folded row opens: the new tile must be seen.
-                if col.tabs[r] {
-                    let id = col.rows[r].tiles[0];
-                    col.rows[r].insert(if side.before() { k } else { k + 1 }, new);
-                    self.open_tab(id);
-                } else {
-                    col.rows[r].insert(if side.before() { k } else { k + 1 }, new);
-                }
-            }
+            Side::Left | Side::Right => col.rows[r].insert(if side.before() { k } else { k + 1 }, new),
         }
-    }
-
-    /// Stack `new` on `target`: it takes the place of the target's row in its column and
-    /// that row folds into a tab just above it (focusing the tab opens it again).
-    pub fn stack_on(&mut self, new: TileId, target: TileId) -> bool {
-        let Some((c, r, _)) = self.find(target) else { return false };
-        let col = &mut self.columns[c];
-        col.rows.insert(r + 1, Row::new(new));
-        col.heights.insert(r + 1, col.heights[r]);
-        col.tabs.insert(r + 1, false);
-        col.tabs[r] = true;
-        true
     }
 
     /// Where `id` sits, told by its neighbours, so it can be put back there after leaving
@@ -686,8 +676,6 @@ impl Layout {
         Some(if row.tiles.len() > 1 {
             let (by, side) = if k > 0 { (row.tiles[k - 1], Side::Right) } else { (row.tiles[1], Side::Left) };
             Home::Row { by, side, width: row.widths[k] }
-        } else if r > 0 && col.tabs[r - 1] && !col.tabs[r] {
-            Home::Stacked { on: col.rows[r - 1].tiles[0] }
         } else if col.rows.len() > 1 {
             let (by, side) = if r > 0 { (col.rows[r - 1].tiles[0], Side::Down) } else { (col.rows[1].tiles[0], Side::Up) };
             Home::Column { by, side, height: col.heights[r] }
@@ -710,18 +698,7 @@ impl Layout {
                 let (c, r, k) = self.find(id).unwrap();
                 let row = &mut self.columns[c].rows[r];
                 let width = width.clamp(MIN_ROW_WIDTH, 1.0 - MIN_ROW_WIDTH * (row.tiles.len() - 1) as f64);
-                let open = |i: &usize| *i != k && !row.folded[*i];
-                let rest: f64 = (0..row.tiles.len()).filter(open).map(|i| row.widths[i]).sum();
-                for i in 0..row.tiles.len() {
-                    if i == k {
-                        row.widths[i] = width;
-                    } else if open(&i) {
-                        row.widths[i] = row.widths[i] / rest * (1.0 - width);
-                    }
-                }
-            }
-            Home::Stacked { on } if here(on) => {
-                self.stack_on(id, on);
+                set_share(&mut row.widths, k, width);
             }
             Home::Tab { with, index } if here(with) => {
                 self.add_tab(id, with);
@@ -733,16 +710,8 @@ impl Layout {
                 self.insert_on(id, Some(by), side);
                 let (c, r, _) = self.find(id).unwrap();
                 let col = &mut self.columns[c];
-                let open = col.tabs.iter().filter(|t| !**t).count();
-                let height = height.clamp(MIN_HEIGHT, 1.0 - MIN_HEIGHT * (open - 1) as f64);
-                let rest: f64 = col.heights.iter().zip(&col.tabs).enumerate().filter(|(i, (_, t))| *i != r && !**t).map(|(_, (h, _))| h).sum();
-                for (i, (h, t)) in col.heights.iter_mut().zip(&col.tabs).enumerate() {
-                    if i == r {
-                        *h = height;
-                    } else if !*t && rest > 0.0 {
-                        *h = *h / rest * (1.0 - height);
-                    }
-                }
+                let height = height.clamp(MIN_HEIGHT, 1.0 - MIN_HEIGHT * (col.rows.len() - 1) as f64);
+                set_share(&mut col.heights, r, height);
             }
             Home::Strip { by, width } if by.is_none_or(|(t, _)| here(t)) => {
                 let (target, side) = by.map_or((None, Side::Right), |(t, s)| (Some(t), s));
@@ -754,6 +723,40 @@ impl Layout {
             _ => return false,
         }
         true
+    }
+
+    /// Take the column `id` is in out of the strip whole, with its tabs, rows and width,
+    /// and the neighbouring column it sat by (see `put_column`).
+    pub fn take_column(&mut self, id: TileId) -> Option<(Detached, Option<(TileId, Side)>)> {
+        let (c, _, _) = self.find(id)?;
+        let by = match c {
+            0 => self.columns.get(1).map(|n| (n.rows[0].tiles[0], Side::Left)),
+            _ => Some((self.columns[c - 1].rows[0].tiles[0], Side::Right)),
+        };
+        let column = self.columns.remove(c);
+        Some((Detached(Layout { columns: vec![column], ..Layout::default() }), by))
+    }
+
+    /// Put a column taken out (`take_column`) back on `side` of `by`'s column, or at the
+    /// end of the strip without one. Given back when `by` is not here.
+    pub fn put_column(&mut self, detached: Detached, by: Option<(TileId, Side)>) -> Result<(), Detached> {
+        let c = match by {
+            Some((t, side)) => match self.find(t) {
+                Some((c, _, _)) if side.before() => c,
+                Some((c, _, _)) => c + 1,
+                None => return Err(detached),
+            },
+            None => self.columns.len(),
+        };
+        let Some(mut column) = detached.0.columns.into_iter().next() else { return Ok(()) };
+        // As with `insert_column`: a lone column fills the output, a second one halves it.
+        if self.columns.is_empty() {
+            column.width = MAX_WIDTH;
+        } else if self.columns.len() == 1 && self.columns[0].width == MAX_WIDTH {
+            self.columns[0].width = DEFAULT_WIDTH;
+        }
+        self.columns.insert(c, column);
+        Ok(())
     }
 
     /// Remove a tile; an emptied tab closes, an emptied column goes away and the strip
@@ -771,14 +774,6 @@ impl Layout {
         if col.rows.is_empty() {
             if col.panes.len() < 2 {
                 self.columns.remove(c);
-                // Only folded columns left: the neighbour that took its place (the one
-                // before it at the end) opens, as wide as a new column at least.
-                if !self.columns.is_empty() && self.columns.iter().all(|c| c.folded) {
-                    let open = c.min(self.columns.len() - 1);
-                    let col = &mut self.columns[open];
-                    col.folded = false;
-                    col.width = col.width.max(DEFAULT_WIDTH);
-                }
                 return true;
             }
             col.drop_shown();
@@ -801,75 +796,20 @@ impl Layout {
         }
     }
 
-    /// Exchange the positions of two tiles, each keeping whether it is folded
-    /// (`x_folded`, `y_folded`: told by the caller, as they may be on another monitor).
-    pub fn swap_keeping_folds(&mut self, x: TileId, y: TileId, x_folded: bool, y_folded: bool) {
-        self.swap(x, y);
-        let wanted = [(x, x_folded), (y, y_folded)];
-        // Fold first: the one opening afterwards then has an open neighbour to trade with.
-        for (t, folded) in wanted {
-            if folded && self.contains(t) && !self.is_tab(t) {
-                self.toggle_fold(t);
-            }
-        }
-        for (t, folded) in wanted {
-            if !folded && self.is_tab(t) {
-                self.open_tab(t);
-            }
-        }
-    }
-
     /// Make the tile's column wider (positive `delta`) or narrower, as a share of the output.
-    /// A column narrowed below `TAB_THRESHOLD` folds into an upright bar, keeping the width
-    /// it opens to; the last open one does not. A folded one does not resize.
     pub fn resize_width(&mut self, id: TileId, delta: f64) {
-        let Some((c, _, _)) = self.find(id) else { return };
-        let others_open = self.columns.iter().enumerate().any(|(i, col)| i != c && !col.folded);
-        let col = &mut self.columns[c];
-        if col.folded {
-            return;
+        if let Some(col) = self.column_of(id) {
+            col.width = (col.width + delta).clamp(MIN_WIDTH, MAX_WIDTH);
+            col.restore_width = None;
         }
-        let new = (col.width + delta).clamp(MIN_WIDTH, MAX_WIDTH);
-        if delta < 0.0 && new < TAB_THRESHOLD - 1e-9 && others_open {
-            col.folded = true;
-            col.width = col.width.max(TAB_THRESHOLD);
-        } else {
-            col.width = new;
-        }
-        col.restore_width = None;
     }
 
     /// Make the tile's row taller (positive `delta`) or shorter, as a share of its column;
-    /// the other open rows of the column give or take the difference. A row squeezed below
-    /// `TAB_THRESHOLD` (by another growing, or shrunk itself) folds into a tab; the last open
-    /// one does not. Tabs open again by a click or Enter on them (`open_tab`).
+    /// the other rows of the column give or take the difference, none going below
+    /// `MIN_HEIGHT`.
     pub fn resize_height(&mut self, id: TileId, delta: f64) {
         let Some((c, r, _)) = self.find(id) else { return };
-        let col = &mut self.columns[c];
-        if col.tabs[r] || col.tabs.iter().filter(|t| !**t).count() < 2 {
-            return;
-        }
-        col.normalize_open();
-        let old = col.heights[r];
-        let new = (old + delta).clamp(MIN_HEIGHT, 1.0);
-        if delta < 0.0 && new < TAB_THRESHOLD - 1e-9 {
-            col.tabs[r] = true;
-            return col.normalize_open();
-        }
-        let scale = if old < 1.0 { (1.0 - new) / (1.0 - old) } else { 0.0 };
-        for (i, (h, tab)) in col.heights.iter_mut().zip(col.tabs.iter_mut()).enumerate() {
-            if *tab {
-                continue;
-            }
-            if i == r {
-                *h = new;
-            } else {
-                *h *= scale;
-                // Rounding noise must not fold a row that is exactly at the threshold.
-                *tab = *h < TAB_THRESHOLD - 1e-9;
-            }
-        }
-        col.normalize_open();
+        resize_share(&mut self.columns[c].heights, r, delta, MIN_HEIGHT);
     }
 
     /// Whether the tile has neighbours side by side in its row.
@@ -878,113 +818,11 @@ impl Layout {
     }
 
     /// Make the tile wider (positive `delta`) or narrower inside its row, as a share of the
-    /// column's width; the other open tiles of the row give or take the difference. Tiles
-    /// squeezed below `TAB_THRESHOLD` (by another growing, or shrunk themselves) fold into
-    /// upright bars, as `resize_height` does with rows.
+    /// column's width; the other tiles of the row give or take the difference, none going
+    /// below `MIN_ROW_WIDTH`.
     pub fn resize_row_width(&mut self, id: TileId, delta: f64) {
         let Some((c, r, k)) = self.find(id) else { return };
-        let row = &mut self.columns[c].rows[r];
-        if row.folded[k] || row.folded.iter().filter(|f| !**f).count() < 2 {
-            return;
-        }
-        row.normalize_open();
-        let old = row.widths[k];
-        let new = (old + delta).clamp(MIN_ROW_WIDTH, 1.0);
-        if delta < 0.0 && new < TAB_THRESHOLD - 1e-9 {
-            row.folded[k] = true;
-            return row.normalize_open();
-        }
-        let scale = if old < 1.0 { (1.0 - new) / (1.0 - old) } else { 0.0 };
-        for (i, (w, folded)) in row.widths.iter_mut().zip(row.folded.iter_mut()).enumerate() {
-            if *folded {
-                continue;
-            }
-            if i == k {
-                *w = new;
-            } else {
-                *w *= scale;
-                // Rounding noise must not fold a tile that is exactly at the threshold.
-                *folded = *w < TAB_THRESHOLD - 1e-9;
-            }
-        }
-        row.normalize_open();
-    }
-
-    /// Fold the tile into the accordion by hand, at the smallest level with open
-    /// neighbours: inside its row, else its row in the column, else its column in the
-    /// strip. The last open one folds at the smallest level with any neighbours (all
-    /// folded, the space is left empty); a lone tile folds its column. A folded one
-    /// opens instead (`open_tab`).
-    pub fn toggle_fold(&mut self, id: TileId) {
-        if self.is_tab(id) {
-            return self.open_tab(id);
-        }
-        let Some((c, r, k)) = self.find(id) else { return };
-        let others_open = self.columns.iter().enumerate().any(|(i, col)| i != c && !col.folded);
-        let col = &mut self.columns[c];
-        let row = &mut col.rows[r];
-        if row.folded.iter().filter(|f| !**f).count() > 1 {
-            row.folded[k] = true;
-            row.normalize_open();
-        } else if col.tabs.iter().filter(|t| !**t).count() > 1 {
-            col.tabs[r] = true;
-            col.normalize_open();
-        } else if others_open {
-            col.folded = true;
-        } else if row.tiles.len() > 1 {
-            row.folded[k] = true;
-        } else if col.rows.len() > 1 {
-            col.tabs[r] = true;
-        } else {
-            col.folded = true;
-        }
-    }
-
-    pub fn is_tab(&self, id: TileId) -> bool {
-        self.find(id).is_some_and(|(c, r, k)| {
-            let col = &self.columns[c];
-            col.folded || col.tabs[r] || col.rows[r].folded[k]
-        })
-    }
-
-    /// Open a tab: its row takes the place of the largest open row of its column, which
-    /// becomes a tab in turn. A tile folded inside its row does the same with the widest
-    /// open tile of the row. A folded column opens to its width, at least that of a new
-    /// column (`DEFAULT_WIDTH`): it folded narrowed to almost nothing.
-    pub fn open_tab(&mut self, id: TileId) {
-        let Some((c, r, k)) = self.find(id) else { return };
-        let col = &mut self.columns[c];
-        if col.folded {
-            col.folded = false;
-            col.width = col.width.max(DEFAULT_WIDTH);
-            return;
-        }
-        if col.rows[r].folded[k] {
-            let row = &mut col.rows[r];
-            let widest = (0..row.tiles.len()).filter(|i| !row.folded[*i]).max_by(|a, b| row.widths[*a].total_cmp(&row.widths[*b]));
-            match widest {
-                Some(wide) => {
-                    row.widths.swap(wide, k);
-                    row.folded[wide] = true;
-                }
-                None => row.widths[k] = 1.0,
-            }
-            row.folded[k] = false;
-        }
-        if !col.tabs[r] {
-            return;
-        }
-        let largest = (0..col.rows.len())
-            .filter(|i| !col.tabs[*i])
-            .max_by(|a, b| col.heights[*a].total_cmp(&col.heights[*b]));
-        match largest {
-            Some(big) => {
-                col.heights.swap(big, r);
-                col.tabs[big] = true;
-            }
-            None => col.heights[r] = 1.0,
-        }
-        col.tabs[r] = false;
+        resize_share(&mut self.columns[c].rows[r].widths, k, delta, MIN_ROW_WIDTH);
     }
 
     /// Step the tile's column through `WIDTH_PRESETS`.
@@ -1056,7 +894,7 @@ impl Layout {
             if !col.all_tiles().into_iter().any(visible) {
                 continue;
             }
-            let w = if col.folded { FOLD_WIDTH } else { (((area.w - gap) as f64 * col.width).round() as i32 - gap).max(1) };
+            let w = (((area.w - gap) as f64 * col.width).round() as i32 - gap).max(1);
             placed.push((x, w, c));
             x += w + gap;
         }
@@ -1095,62 +933,33 @@ impl Layout {
 
         let mut out = Vec::new();
         let mut bars = Vec::new();
-        let mut fold_counts = Vec::new();
         for (x, w, c) in placed {
             let col = &self.columns[c];
             // The shown tab, or while it has no window yet (just launched) one that has.
             let views = col.views();
-            let has_any = |(rows, _, _): &(&[Row], &[f64], &[bool])| rows.iter().flat_map(|r| &r.tiles).any(|t| visible(*t));
+            let has_any = |(rows, _): &(&[Row], &[f64])| rows.iter().flat_map(|r| &r.tiles).any(|t| visible(*t));
             let p = Some(col.shown()).filter(|p| has_any(&views[*p])).or_else(|| views.iter().position(has_any)).unwrap();
-            let (rows, heights, folded) = views[p];
+            let (rows, heights) = views[p];
             let mut content = Rect::new(area.x + x - self.view, area.y + gap, w, inner_h);
-            let tabs: Vec<TileId> = views.iter().filter(|v| has_any(v)).map(|(rows, _, _)| rows[0].tiles[0]).collect();
-            if col.folded {
-                // One upright bar: the shown tab's tiles share it top to bottom, showing
-                // the tab count (two or more) instead of their titles.
-                let tiles: Vec<TileId> = rows.iter().flat_map(|r| r.tiles.iter().copied()).filter(|t| visible(*t)).collect();
-                if tabs.len() > 1 {
-                    fold_counts.extend(tiles.iter().map(|t| (*t, tabs.len())));
-                }
-                let n = tiles.len() as i32;
-                let each = (content.h - sep * (n - 1)) / n.max(1);
-                for (i, t) in tiles.into_iter().enumerate() {
-                    let y = content.y + i as i32 * (each + sep);
-                    let h = if i as i32 == n - 1 { content.y + content.h - y } else { each };
-                    out.push((t, Rect::new(content.x, y, w, h)));
-                }
-                continue;
-            }
+            let tabs: Vec<TileId> = views.iter().filter(|v| has_any(v)).map(|(rows, _)| rows[0].tiles[0]).collect();
             if tabs.len() > 1 || col.panes.len() == 1 {
                 let (bar, rest) = split_tab_bar(content);
                 bars.push(TabBar { rect: bar, tabs, active: rows[0].tiles[0] });
                 content = rest;
             }
-            let shown: Vec<(usize, f64, bool)> = (0..rows.len())
-                .filter(|r| rows[*r].tiles.iter().any(|t| visible(*t)))
-                .map(|r| (r, heights[r], folded[r]))
-                .collect();
-            let total: f64 = shown.iter().filter(|(_, _, tab)| !tab).map(|(_, h, _)| h).sum();
-            let tab_bars = shown.iter().filter(|(_, _, tab)| *tab).count() as i32;
-            let space = content.h - sep * (shown.len() as i32 - 1) - tab_bars * FOLD_WIDTH;
-            let last_open = shown.iter().rposition(|(_, _, tab)| !tab);
+            let shown: Vec<(usize, f64)> =
+                (0..rows.len()).filter(|r| rows[*r].tiles.iter().any(|t| visible(*t))).map(|r| (r, heights[r])).collect();
+            let total: f64 = shown.iter().map(|(_, h)| h).sum();
+            let space = content.h - sep * (shown.len() as i32 - 1);
             let mut y = content.y;
-            for (i, (r, h, tab)) in shown.iter().enumerate() {
-                let th = if *tab {
-                    FOLD_WIDTH
-                } else if Some(i) == last_open {
-                    // The last open row takes what rounding left, minus the tabs below it.
-                    let below = shown[i + 1..].len() as i32;
-                    content.y + content.h - y - below * (FOLD_WIDTH + sep)
-                } else {
-                    (space as f64 * h / total).round() as i32
-                };
-                out.extend(row_geometries(&rows[*r], Rect::new(content.x, y, w, th), sep, *tab, visible));
+            for (i, (r, h)) in shown.iter().enumerate() {
+                // The last row takes what rounding left.
+                let th = if i + 1 == shown.len() { content.y + content.h - y } else { (space as f64 * h / total).round() as i32 };
+                out.extend(row_geometries(&rows[*r], Rect::new(content.x, y, w, th), sep, visible));
                 y += th + sep;
             }
         }
         self.bars = bars;
-        self.fold_counts = fold_counts;
         out
     }
 }
@@ -1163,31 +972,17 @@ pub fn past_edges(area: Rect, rects: &[(TileId, Rect)]) -> (usize, usize) {
     (left, right)
 }
 
-/// The tiles of `row` side by side in `rect`, `sep` pixels apart; folded ones as upright
-/// bars `FOLD_WIDTH` wide. A row folded in its column (`in_bar`) gives each tile its share
-/// of the bar, folded or not.
-fn row_geometries(row: &Row, rect: Rect, sep: i32, in_bar: bool, visible: &dyn Fn(TileId) -> bool) -> Vec<(TileId, Rect)> {
-    let shown: Vec<(TileId, f64, bool)> = (0..row.tiles.len())
-        .filter(|i| visible(row.tiles[*i]))
-        .map(|i| (row.tiles[i], row.widths[i], row.folded[i] && !in_bar))
-        .collect();
-    // Folded widths are stale shares: only the open tiles split what the bars leave.
-    let total: f64 = shown.iter().filter(|(_, _, f)| !f).map(|(_, w, _)| w).sum();
-    let bars = shown.iter().filter(|(_, _, f)| *f).count() as i32;
-    let space = rect.w - sep * (shown.len() as i32 - 1) - bars * FOLD_WIDTH;
-    let last_open = shown.iter().rposition(|(_, _, f)| !f);
+/// The tiles of `row` side by side in `rect`, `sep` pixels apart.
+fn row_geometries(row: &Row, rect: Rect, sep: i32, visible: &dyn Fn(TileId) -> bool) -> Vec<(TileId, Rect)> {
+    let shown: Vec<(TileId, f64)> =
+        (0..row.tiles.len()).filter(|i| visible(row.tiles[*i])).map(|i| (row.tiles[i], row.widths[i])).collect();
+    let total: f64 = shown.iter().map(|(_, w)| w).sum();
+    let space = rect.w - sep * (shown.len() as i32 - 1);
     let mut x = rect.x;
     let mut out = Vec::new();
-    for (i, (t, w, folded)) in shown.iter().enumerate() {
-        let tw = if *folded {
-            FOLD_WIDTH
-        } else if Some(i) == last_open {
-            // The last open tile takes what rounding left, minus the bars after it.
-            let after = shown[i + 1..].len() as i32;
-            rect.x + rect.w - x - after * (FOLD_WIDTH + sep)
-        } else {
-            (space as f64 * w / total).round() as i32
-        };
+    for (i, (t, w)) in shown.iter().enumerate() {
+        // The last tile takes what rounding left.
+        let tw = if i + 1 == shown.len() { rect.x + rect.w - x } else { (space as f64 * w / total).round() as i32 };
         out.push((*t, Rect::new(x, rect.y, tw, rect.h)));
         x += tw + sep;
     }
@@ -1459,99 +1254,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stacked_tile_takes_the_place_and_folds_the_target_into_a_tab() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert(2, Some(1), Split::Horizontal);
-        assert!(l.stack_on(3, 1));
-        assert!(l.is_tab(1));
-        assert!(!l.is_tab(3) && !l.is_tab(2));
-        let g = geo(&mut l, 3);
-        assert_eq!(g.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![1, 3, 2]);
-        // The tab is a bar; the stacked tile and its neighbour share the rest evenly.
-        assert_eq!(g[0].1.h, FOLD_WIDTH);
-        assert_eq!(g[1].1.h, g[2].1.h);
-        // Closing the stacked tile brings the target back.
-        l.remove(3);
-        assert!(!l.is_tab(1));
-        assert!(!l.stack_on(4, 99));
-    }
 
-    #[test]
-    fn folding_by_hand_takes_the_smallest_level_with_open_neighbours() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        // A lone tile folds its column into a bar, the rest left empty.
-        l.toggle_fold(1);
-        assert!(l.is_tab(1));
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, FOLD_WIDTH, 600))]);
-        l.toggle_fold(1);
-        assert!(!l.is_tab(1));
-        l.insert_on(2, Some(1), Side::Right);
-        l.insert(3, Some(2), Split::Horizontal);
-        l.insert(4, Some(3), Split::Vertical);
-        // Sharing a row: it folds inside it.
-        l.toggle_fold(2);
-        assert!(l.is_tab(2) && !l.is_tab(1));
-        // Alone in its row: the row folds in the column.
-        l.toggle_fold(3);
-        assert!(l.is_tab(3));
-        // Alone in its column: the column folds, the last open one too.
-        l.toggle_fold(4);
-        assert!(l.is_tab(4));
-        l.toggle_fold(1);
-        assert!(l.is_tab(1));
-        // Again on a folded one: it opens.
-        l.toggle_fold(1);
-        assert!(!l.is_tab(1));
-        l.toggle_fold(4);
-        assert!(!l.is_tab(4));
-        l.toggle_fold(2);
-        assert!(!l.is_tab(2));
-    }
 
-    #[test]
-    fn the_last_open_tile_of_a_row_or_column_folds_too() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_on(2, Some(1), Side::Right);
-        l.toggle_fold(2);
-        l.toggle_fold(1);
-        assert!(l.is_tab(1) && l.is_tab(2));
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, FOLD_WIDTH, 600)), (2, Rect::new(FOLD_WIDTH, 0, FOLD_WIDTH, 600))]);
-        l.toggle_fold(1);
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000 - FOLD_WIDTH, 600)), (2, Rect::new(1000 - FOLD_WIDTH, 0, FOLD_WIDTH, 600))]);
 
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert(2, Some(1), Split::Horizontal);
-        l.toggle_fold(2);
-        l.toggle_fold(1);
-        assert!(l.is_tab(1) && l.is_tab(2));
-        l.toggle_fold(2);
-        assert!(!l.is_tab(2) && l.is_tab(1));
-    }
-
-    #[test]
-    fn a_swapped_tile_keeps_its_fold() {
-        // Side by side in a row, and in columns of their own.
-        for column in [false, true] {
-            let mut l = Layout::default();
-            l.insert(1, None, Split::Vertical);
-            if column {
-                l.insert(2, Some(1), Split::Vertical);
-            } else {
-                l.insert_on(2, Some(1), Side::Right);
-            }
-            l.toggle_fold(1);
-            l.swap_keeping_folds(1, 2, true, false);
-            assert!(l.is_tab(1) && !l.is_tab(2), "column: {column}");
-            let rects = geo(&mut l, 2);
-            assert_eq!((rects[0].0, rects[0].1.w), (2, rects[0].1.w), "column: {column}");
-            assert_eq!((rects[1].0, rects[1].1.w), (1, FOLD_WIDTH), "column: {column}");
-        }
-    }
 
     #[test]
     fn row_width_resizes_inside_the_row() {
@@ -1560,10 +1265,9 @@ mod tests {
         l.insert_on(2, Some(1), Side::Right);
         l.resize_row_width(1, 0.2);
         assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 700, 600)), (2, Rect::new(700, 0, 300, 600))]);
-        // Shrunk too much it folds into a bar; a lone tile has nothing to share.
+        // Shrunk too much it stops at its smallest share; a lone tile has nothing to share.
         l.resize_row_width(2, -1.0);
-        let w = 1000 - FOLD_WIDTH;
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, w, 600)), (2, Rect::new(w, 0, FOLD_WIDTH, 600))]);
+        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 900, 600)), (2, Rect::new(900, 0, 100, 600))]);
         l.remove(2);
         assert!(!l.shares_row(1));
         l.resize_row_width(1, -0.2);
@@ -1571,103 +1275,28 @@ mod tests {
     }
 
     #[test]
-    fn squeezed_tiles_of_a_row_fold_into_upright_bars() {
+    fn squeezed_tiles_stop_at_their_smallest_share() {
         let mut l = Layout::default();
         l.insert(1, None, Split::Vertical);
         l.insert_on(2, Some(1), Side::Right);
         l.insert_on(3, Some(2), Side::Right);
         l.resize_row_width(1, 1.0);
-        assert!(!l.is_tab(1) && l.is_tab(2) && l.is_tab(3));
-        let w = 1000 - 2 * FOLD_WIDTH;
         assert_eq!(
             geo(&mut l, 1),
-            vec![
-                (1, Rect::new(0, 0, w, 600)),
-                (2, Rect::new(w, 0, FOLD_WIDTH, 600)),
-                (3, Rect::new(w + FOLD_WIDTH, 0, FOLD_WIDTH, 600)),
-            ]
+            vec![(1, Rect::new(0, 0, 800, 600)), (2, Rect::new(800, 0, 100, 600)), (3, Rect::new(900, 0, 100, 600))]
         );
-        // Shrinking the open one does not open the others, nor fold the last one open.
-        l.resize_row_width(1, -0.05);
-        assert!(!l.is_tab(1) && l.is_tab(2) && l.is_tab(3));
-        l.resize_row_width(1, -1.0);
-        assert!(!l.is_tab(1));
-    }
-
-    #[test]
-    fn a_tile_shrunk_too_much_folds_itself() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_on(2, Some(1), Side::Right);
-        l.insert_on(3, Some(2), Side::Right);
-        // 1/3 each; 1 shrunk to 0.18, then below the threshold: folded, the others share its room.
-        l.resize_row_width(1, -0.15);
-        assert!(!l.is_tab(1));
-        l.resize_row_width(1, -0.05);
-        assert!(l.is_tab(1) && !l.is_tab(2) && !l.is_tab(3));
-        let w = (1000 - FOLD_WIDTH) / 2;
-        assert_eq!(geo(&mut l, 2)[1], (2, Rect::new(FOLD_WIDTH, 0, w, 600)));
-        // A folded one does not resize; the same with rows of a column.
-        l.resize_row_width(1, 0.5);
-        assert!(l.is_tab(1));
+        // The same with the rows of a column.
         let mut l = Layout::default();
         l.insert(1, None, Split::Vertical);
         l.insert(2, Some(1), Split::Horizontal);
-        for _ in 0..7 {
-            l.resize_height(2, -0.05); // 0.5 → 0.15: still open
-        }
-        assert!(!l.is_tab(2));
-        l.resize_height(2, -0.05);
-        assert!(l.is_tab(2) && !l.is_tab(1));
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 600 - FOLD_WIDTH)), (2, Rect::new(0, 600 - FOLD_WIDTH, 1000, FOLD_WIDTH))]);
+        l.resize_height(1, 1.0);
+        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 540)), (2, Rect::new(0, 540, 1000, 60))]);
+        l.resize_height(1, -1.0);
+        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 60)), (2, Rect::new(0, 60, 1000, 540))]);
     }
 
-    #[test]
-    fn a_folded_tile_of_a_row_opens_in_place_of_the_widest() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_on(2, Some(1), Side::Right);
-        l.insert_on(3, Some(2), Side::Right);
-        l.resize_row_width(1, 0.2); // 2 and 3 squeezed to 0.23 each: still open
-        assert!(!l.is_tab(2));
-        l.resize_row_width(1, 0.2); // now 0.13: folded
-        assert!(l.is_tab(2) && l.is_tab(3));
-        l.open_tab(3);
-        assert!(l.is_tab(1) && l.is_tab(2) && !l.is_tab(3));
-        let g = geo(&mut l, 3);
-        assert_eq!(g[2], (3, Rect::new(2 * FOLD_WIDTH, 0, 1000 - 2 * FOLD_WIDTH, 600)));
-        // Taking out the one open tile (floated, closed) opens its neighbour, not the rest.
-        l.remove(3);
-        assert!(l.is_tab(1) && !l.is_tab(2));
-        assert_eq!(geo(&mut l, 2), vec![(1, Rect::new(0, 0, FOLD_WIDTH, 600)), (2, Rect::new(FOLD_WIDTH, 0, 1000 - FOLD_WIDTH, 600))]);
-        // The last two: a lone tile opens.
-        l.remove(2);
-        assert!(!l.is_tab(1));
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 600))]);
-    }
 
-    #[test]
-    fn taking_out_the_one_open_column_opens_its_neighbour() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_column(2, Some(1), Side::Right);
-        l.insert_column(3, Some(2), Side::Right);
-        l.toggle_fold(1);
-        l.toggle_fold(3);
-        assert!(l.is_tab(1) && !l.is_tab(2) && l.is_tab(3));
-        // 2 floats away: 3, which takes its place, opens; 1 stays folded.
-        l.remove(2);
-        assert!(l.is_tab(1) && !l.is_tab(3));
-        // The last column leaving: the one before it opens.
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_column(2, Some(1), Side::Right);
-        l.insert_column(3, Some(2), Side::Right);
-        l.toggle_fold(1);
-        l.toggle_fold(2);
-        l.remove(3);
-        assert!(l.is_tab(1) && !l.is_tab(2));
-    }
+
 
     #[test]
     fn side_splits_share_the_row() {
@@ -1704,21 +1333,6 @@ mod tests {
         assert_eq!(l.tiles(), vec![5, 4, 1, 3, 2]);
     }
 
-    #[test]
-    fn folded_row_shows_a_bar_per_tile() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert_on(2, Some(1), Side::Right);
-        assert!(l.stack_on(3, 2));
-        assert!(l.is_tab(1) && l.is_tab(2));
-        let g = geo(&mut l, 3);
-        assert_eq!(g[0], (1, Rect::new(0, 0, 500, FOLD_WIDTH)));
-        assert_eq!(g[1], (2, Rect::new(500, 0, 500, FOLD_WIDTH)));
-        assert_eq!(g[2], (3, Rect::new(0, FOLD_WIDTH, 1000, 600 - FOLD_WIDTH)));
-        // A split beside a tab opens its row.
-        l.insert_on(4, Some(1), Side::Right);
-        assert!(!l.is_tab(1) && l.is_tab(3));
-    }
 
     #[test]
     fn invisible_tiles_take_no_space() {
@@ -1769,11 +1383,9 @@ mod tests {
         assert_eq!(geo(&mut l, 1)[0], (1, Rect::new(0, 0, 600, 600)));
         l.resize_width(1, -0.45);
         assert_eq!(geo(&mut l, 1)[0].1.w, 150);
-        l.resize_width(1, -0.05);
-        l.open_tab(1); // narrowed past the threshold it folded; open again as wide as a new one
-        assert_eq!(geo(&mut l, 1)[0].1.w, 500);
-        l.resize_width(1, -0.35); // 0.15: still open
-        l.cycle_width(1); // 0.15 -> 1/3
+        l.resize_width(1, -0.1); // stops at the narrowest
+        assert_eq!(geo(&mut l, 1)[0].1.w, 100);
+        l.cycle_width(1); // 0.1 -> 1/3
         assert_eq!(geo(&mut l, 1)[0].1.w, 333);
         l.cycle_width(1); // -> 1/2
         assert_eq!(geo(&mut l, 1)[0].1.w, 500);
@@ -1783,31 +1395,6 @@ mod tests {
         assert_eq!(geo(&mut l, 1)[0].1.w, 500);
     }
 
-    #[test]
-    fn a_column_narrowed_too_much_folds_showing_its_tab_count() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert(2, Some(1), Split::Vertical);
-        l.add_tab(3, 2);
-        l.resize_width(2, -0.3); // 0.2: open
-        assert!(!l.is_tab(2));
-        l.resize_width(2, -0.1); // below the threshold: folded, with its two tabs
-        assert!(l.is_tab(2) && l.is_tab(3));
-        let g = geo(&mut l, 1);
-        assert_eq!(g[0], (1, Rect::new(0, 0, 500, 600)));
-        assert_eq!(g[1], (3, Rect::new(500, 0, FOLD_WIDTH, 600)));
-        assert_eq!(l.fold_counts(), &[(3, 2)]);
-        // The last open column does not fold; a folded one does not resize.
-        l.resize_width(1, -0.45);
-        assert!(!l.is_tab(1));
-        l.resize_width(2, 0.5);
-        assert_eq!(geo(&mut l, 1)[1].1.w, FOLD_WIDTH);
-        // Opened, it is as wide as a new column, not the sliver it folded at.
-        l.open_tab(3);
-        assert!(!l.is_tab(3));
-        assert_eq!(geo(&mut l, 3)[1].1.w, 500);
-        assert!(l.fold_counts().is_empty());
-    }
 
     #[test]
     fn resize_height_in_a_column() {
@@ -1827,36 +1414,6 @@ mod tests {
         assert_eq!(geo(&mut single, 1), vec![(1, AREA)]);
     }
 
-    #[test]
-    fn squeezed_tile_becomes_a_tab() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        l.insert(2, Some(1), Split::Horizontal);
-        for _ in 0..7 {
-            l.resize_height(1, 0.05); // 0.85 / 0.15: still a tile
-        }
-        assert!(!l.is_tab(2));
-        l.resize_height(1, 0.05);
-        assert!(l.is_tab(2));
-        // The open tile takes the column but the tab's bar.
-        assert_eq!(geo(&mut l, 1), vec![(1, Rect::new(0, 0, 1000, 600 - FOLD_WIDTH)), (2, Rect::new(0, 600 - FOLD_WIDTH, 1000, FOLD_WIDTH))]);
-        // Opening the tab folds the other one.
-        l.open_tab(2);
-        assert!(l.is_tab(1) && !l.is_tab(2));
-        assert_eq!(geo(&mut l, 2), vec![(1, Rect::new(0, 0, 1000, FOLD_WIDTH)), (2, Rect::new(0, FOLD_WIDTH, 1000, 600 - FOLD_WIDTH))]);
-        // Shrinking the one open row does nothing: it does not fold, the tab stays.
-        l.resize_height(2, -0.05);
-        assert!(l.is_tab(1) && !l.is_tab(2));
-        // Closing the open tile of a column of tabs opens one.
-        l.remove(2);
-        assert!(!l.is_tab(1));
-        l.insert(2, Some(1), Split::Horizontal);
-        l.resize_height(1, 1.0);
-        assert!(l.is_tab(2));
-        l.remove(1);
-        assert!(!l.is_tab(2));
-        assert_eq!(geo(&mut l, 2), vec![(2, AREA)]);
-    }
 
     #[test]
     fn swap_tiles() {
@@ -1953,6 +1510,20 @@ mod tests {
         assert!(l.add_tab(3, 1));
         assert!(l.add_tab(4, 3));
         l
+    }
+
+    #[test]
+    fn a_tabbed_column_keeps_its_id_as_tabs_come_and_go() {
+        let mut l = tabbed();
+        let id = l.group_id(1).unwrap();
+        assert_ne!(l.group_id(2), Some(id));
+        l.remove(3);
+        assert!(l.add_tab(5, 1));
+        assert_eq!(l.group_id(5), Some(id));
+        let (column, by) = l.take_column(4).unwrap();
+        assert_eq!(column.id(), Some(id));
+        assert!(l.put_column(column, by).is_ok());
+        assert_eq!(l.group_id(1), Some(id));
     }
 
     #[test]
@@ -2152,17 +1723,6 @@ mod tests {
         assert_eq!(l.group(1), Some(vec![2, 1, 3]));
     }
 
-    #[test]
-    fn accordion_stack_inside_a_tab() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        assert!(l.add_tab(3, 1));
-        assert!(l.stack_on(5, 3));
-        let g = geo(&mut l, 5);
-        assert_eq!(g.len(), 2);
-        assert_eq!(l.tab_bars().len(), 1);
-        assert!(l.is_tab(3) && !l.is_tab(5));
-    }
 
     #[test]
     fn tiles_past_the_edges_are_counted() {
@@ -2264,13 +1824,41 @@ mod tests {
         round_trip(&mut l, 3);
     }
 
+
     #[test]
-    fn a_stacked_tile_goes_back_on_its_tab() {
-        let mut l = Layout::default();
-        l.insert(1, None, Split::Vertical);
-        assert!(l.stack_on(2, 1));
-        round_trip(&mut l, 2);
-        assert!(l.is_tab(1));
+    fn a_column_goes_out_whole_and_back_with_its_tabs() {
+        let mut l = tabbed();
+        l.insert_on(5, Some(4), Side::Down);
+        l.insert(6, Some(2), Split::Vertical);
+        let before = geo(&mut l, 4);
+        let (column, by) = l.take_column(3).unwrap();
+        assert_eq!(by, Some((2, Side::Left)));
+        assert_eq!(column.tiles(), vec![1, 3, 4, 5]);
+        assert_eq!(column.active(), Some(4));
+        assert_eq!(l.tiles(), vec![2, 6]);
+        assert!(l.put_column(column, by).is_ok());
+        assert_eq!(geo(&mut l, 4), before);
+        assert_eq!(l.group(1), Some(vec![1, 3, 4]));
+        // Its neighbour gone: given back.
+        let (column, _) = l.take_column(1).unwrap();
+        let back = l.put_column(column, Some((99, Side::Right))).unwrap_err();
+        assert_eq!(back.tiles(), vec![1, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_detached_column_loses_closed_tiles() {
+        let mut l = tabbed();
+        let (mut column, _) = l.take_column(1).unwrap();
+        assert!(column.remove(4));
+        assert!(column.remove(1));
+        assert_eq!(column.tiles(), vec![3]);
+        assert!(!column.remove(3));
+        // Back alone in an empty strip, it fills it.
+        let mut l = tabbed();
+        let (column, _) = l.take_column(2).unwrap();
+        let mut empty = Layout::default();
+        assert!(empty.put_column(column, None).is_ok());
+        assert_eq!(geo(&mut empty, 2), vec![(2, AREA)]);
     }
 
     #[test]

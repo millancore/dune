@@ -185,6 +185,7 @@ impl Dune {
             }
         }
         self.desks.retain(|o, _| outputs.iter().any(|out| out.name() == *o));
+        self.adopt_docks(&outputs.iter().map(|o| o.name()).collect::<Vec<_>>(), first);
     }
 
     /// Where a tile that starts floating on `output` goes: in the middle.

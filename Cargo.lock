@@ -411,6 +411,7 @@ name = "dune-common"
 version = "0.1.0"
 dependencies = [
  "fontdb",
+ "resvg",
  "swash",
 ]
 

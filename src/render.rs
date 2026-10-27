@@ -8,7 +8,7 @@ use smithay::{
         Texture,
         element::{
             AsRenderElements, Element, Kind,
-            memory::MemoryRenderBufferRenderElement,
+            memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
             render_elements,
             utils::CropRenderElement,
             solid::{SolidColorBuffer, SolidColorRenderElement},
@@ -27,9 +27,10 @@ use smithay::{
 
 use crate::{
     Dune,
-    layout::{Rect, Side, TileId},
+    dock::{self, Shape},
+    layout::{Rect, Side, TAB_HEIGHT, TileId},
     rounded::{Radii, Rounded, RoundedRect, Shaders},
-    tab_title::WAVES,
+    tab_title::{Cell, WAVES},
     tiling::{BORDER, GAP},
 };
 
@@ -67,7 +68,14 @@ const GLASS_SHEEN: [f32; 4] = [0.16, 0.16, 0.16, 0.16];
 /// How thick that edge is.
 const GLASS_SHEEN_HEIGHT: i32 = 1;
 const PRIVATE_LABEL: &str = "🔒 private";
-/// How long each stage of a folded bar's speaker waves shows (see `tab_title::WAVES`).
+/// The scratchpad's cell under the pointer, with windows waiting there and without.
+const SCRATCH_LABEL: &str = "Scratchpad";
+const SCRATCH_EMPTY_LABEL: &str = "Scratchpad empty";
+/// Behind the dock's bars.
+const DOCK_COLOR: [f32; 4] = [0x1e as f32 / 255.0, 0x20 as f32 / 255.0, 0x29 as f32 / 255.0, 1.0];
+/// The mark at the left of the dock cell under the pointer.
+const DOCK_HOVER_WIDTH: i32 = 4;
+/// How long each stage of a dock bar's speaker waves shows (see `tab_title::WAVES`).
 const WAVE_STEP_MS: u128 = 300;
 
 render_elements! {
@@ -99,6 +107,12 @@ pub struct Decorations {
     dragged: SolidColorBuffer,
     /// The edge of the split a Mod+click there would open.
     split_edge: SolidColorBuffer,
+    /// Behind the dock shown, and the mark on its entry under the pointer; behind the fan of
+    /// its chosen column's tabs, and the mark on the tab chosen there.
+    dock_panel: SolidColorBuffer,
+    dock_hover: SolidColorBuffer,
+    dock_fan: SolidColorBuffer,
+    dock_fan_hover: SolidColorBuffer,
     /// What shows under each tiled window (`BACKDROP_COLOR`).
     backdrops: HashMap<TileId, SolidColorBuffer>,
     /// The sheen along the top of each empty container (`GLASS_SHEEN`).
@@ -149,21 +163,17 @@ impl Dune {
         self.geometries.iter().find(|(t, _)| *t == tile).map(|(_, r)| self.drawn_rect(tile, *r))
     }
 
-    /// A tile's `rect` grown to take in its column's bar, when it fills the shown tab's width
-    /// right under it.
+    /// A tile's `rect` grown to take in the part of its column's bar right above it: the
+    /// whole bar, or the tile's share of it when its row is split side by side.
     fn with_tab_bar(&self, rect: Rect) -> Rect {
-        match self.tab_bars.iter().map(|b| self.drawn_bar(b)).find(|b| b.x == rect.x && b.w == rect.w && b.y + b.h == rect.y) {
-            Some(bar) => Rect::new(rect.x, bar.y, rect.w, rect.y + rect.h - bar.y),
-            None => rect,
-        }
+        self.tab_bars.iter().find_map(|b| under_bar(self.drawn_bar(b), rect)).unwrap_or(rect)
     }
 
     /// Where `bar` is drawn: on top of its shown tab as drawn, so a sliding resize takes
     /// it along instead of it jumping there first.
     fn drawn_bar(&self, bar: &crate::layout::TabBar) -> Rect {
         let Some((_, target)) = self.geometries.iter().find(|(t, _)| *t == bar.active) else { return bar.rect };
-        let drawn = self.drawn_rect(bar.active, *target);
-        Rect::new(drawn.x, drawn.y - (target.y - bar.rect.y), drawn.w, bar.rect.h)
+        moved_bar(bar.rect, *target, self.drawn_rect(bar.active, *target))
     }
 
     /// The corners of `tile`'s box `outer` (with its tab bar): `corner_radius`, but square
@@ -311,26 +321,7 @@ impl Dune {
     fn tab_elements(&mut self, renderer: &mut GlesRenderer, output: &Output, shaders: &Shaders) -> Vec<OutputRenderElements> {
         let Some(geo) = self.space.output_geometry(output) else { return Vec::new() };
         let local = |r: Rect| Rect::new(r.x - geo.loc.x, r.y - geo.loc.y, r.w, r.h);
-        self.tab_titles.retain(&self.tabs);
         let mut elements = Vec::new();
-        for tile in self.tabs.clone() {
-            let Some(rect) = self.shown_rect(tile, output) else { continue };
-            // A folded tabbed column's bar shows its tab count instead of a title.
-            let count = self.fold_counts.iter().find(|(t, _)| *t == tile).map(|(_, n)| n.to_string());
-            let leading = count.is_some();
-            let title = count.unwrap_or_else(|| self.shown_title(tile));
-            // While its sound plays, the speaker's waves come one after another.
-            let waves = (self.start_time.elapsed().as_millis() / WAVE_STEP_MS % (WAVES as u128 + 1)) as u8;
-            let sound = self.plays_sound(tile).then_some(waves);
-            let radii = self.radii(tile, rect);
-            let buffer = self.tab_titles.bar(tile, &title, (rect.w, rect.h), sound, leading);
-            let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
-            if let Ok(e) = MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified) {
-                elements.push(rounded_image(e, shaders, radii, local(rect)));
-            }
-        }
-
-        // Tabbed containers' bars.
         let actives: Vec<TileId> = self.tab_bars.iter().map(|b| b.active).collect();
         self.tab_titles.retain_strips(&actives);
         for bar in self.tab_bars.clone() {
@@ -339,9 +330,10 @@ impl Dune {
             }
             let titles = bar.tabs.iter().map(|t| self.shown_title(*t)).collect();
             let shown = bar.tabs.iter().position(|t| *t == bar.active).unwrap_or(0);
-            // The strip takes the top corners of the tile under it.
+            // The strip takes the top corners of the tiles under it: its box goes down with
+            // the shown tab's first tile, across the whole column.
             let rect = self.drawn_bar(&bar);
-            let outer = self.shown_rect(bar.active, output).map(|r| self.with_tab_bar(r)).unwrap_or(rect);
+            let outer = self.shown_rect(bar.active, output).map_or(rect, |r| Rect::new(rect.x, rect.y, rect.w, r.y + r.h - rect.y));
             let radii = self.radii(bar.active, outer);
             let buffer = self.tab_titles.strip(bar.active, titles, shown, (rect.w, rect.h));
             let at = Point::<f64, Physical>::from(((rect.x - geo.loc.x) as f64, (rect.y - geo.loc.y) as f64));
@@ -381,9 +373,8 @@ impl Dune {
                     .map(OutputRenderElements::Surface)
                     .collect()
             }
-            // Named shapes all use the theme's default arrow for now.
-            CursorImageStatus::Named(_) => {
-                let (buffer, hotspot) = self.cursor.image(self.start_time.elapsed());
+            CursorImageStatus::Named(icon) => {
+                let (buffer, hotspot) = self.cursor.image(*icon, self.start_time.elapsed());
                 let position = (local - hotspot.to_f64()).to_physical(1.0);
                 MemoryRenderBufferRenderElement::from_buffer(renderer, position, &buffer, None, None, None, Kind::Cursor)
                     .map(|e| vec![OutputRenderElements::Image(e)])
@@ -412,6 +403,7 @@ impl Dune {
         } else {
             Vec::new()
         };
+        elements.extend(self.dock_elements(renderer, output));
         elements.extend(self.recording_elements(output).into_iter().map(OutputRenderElements::Solid));
         elements.extend(self.drag_elements(output, &shaders));
         // A fullscreen tile covers the bars: only Overlay layers (and the pointer) are over it.
@@ -453,7 +445,7 @@ impl Dune {
     }
 
     /// An opaque block with the lock mark over each private tile of `output` picked by
-    /// `only` (folded tabs keep their bar), where its window would be.
+    /// `only`, where its window would be.
     fn private_elements(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -465,7 +457,7 @@ impl Dune {
         let rects: Vec<(TileId, Rect, Rect, Radii)> = self
             .tiles
             .iter()
-            .filter(|(t, tile)| only(**t) && self.privacy.tile(**t) && tile.top().is_some() && !self.tabs.contains(t))
+            .filter(|(t, tile)| only(**t) && self.privacy.tile(**t) && tile.top().is_some())
             .filter_map(|(t, _)| Some((*t, self.shown_rect(*t, output)?)))
             .map(|(t, r)| (t, r, self.with_tab_bar(r)))
             .map(|(t, r, o)| (t, r, o, self.radii(t, o)))
@@ -496,6 +488,114 @@ impl Dune {
         MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified)
             .ok()
             .map(OutputRenderElements::Image)
+    }
+
+    /// The dock shown on `output` (`crate::dock`): a bar down from the top left corner, or
+    /// along the bottom, with the scratchpad's cell first (a dot per window waiting there),
+    /// then a cell per entry, its app's icon (see `TabTitles::cell`); the one under the
+    /// pointer (or chosen by keys) marked, its title in a label beside the bar (above it,
+    /// along the bottom), or there the fan of its tabs when a tabbed column (of its windows,
+    /// the scratchpad's).
+    fn dock_elements(&mut self, renderer: &mut GlesRenderer, output: &Output) -> Vec<OutputRenderElements> {
+        let name = output.name();
+        if self.dock_open.as_deref() != Some(name.as_str()) {
+            return Vec::new();
+        }
+        let (Some((origin, shape)), Some(panel), Some(geo)) = (self.dock_origin(&name), self.dock_panel(&name), self.space.output_geometry(output)) else {
+            return Vec::new();
+        };
+        // The dock's rects are global; elements are placed on the output.
+        let place = |x: i32, y: i32| Point::<i32, Physical>::from((x - geo.loc.x, y - geo.loc.y));
+        let image = |renderer: &mut GlesRenderer, buffer: &MemoryRenderBuffer, x: i32, y: i32| {
+            let at = Point::<f64, Physical>::from(((x - geo.loc.x) as f64, (y - geo.loc.y) as f64));
+            MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Unspecified).ok().map(OutputRenderElements::Image)
+        };
+        let entries = self.dock_entries(&name);
+        let rows = dock::rows(origin, entries.len() + 1, shape);
+        let pointer = self.seat.get_pointer().unwrap().current_location();
+        // While its sound plays, the speaker's waves come one after another.
+        let waves = (self.start_time.elapsed().as_millis() / WAVE_STEP_MS % (WAVES as u128 + 1)) as u8;
+        let waiting = self.scratchpad_tiles().len();
+        let scratch = (
+            dock::SCRATCH_KEY,
+            if waiting == 0 { SCRATCH_EMPTY_LABEL } else { SCRATCH_LABEL }.to_string(),
+            Cell { app: dock::SCRATCH_ICON.into(), letter: dock::SCRATCH_LETTER, size: rows[0].w, pinned: false, tabs: waiting, sound: None },
+            rows[0],
+        );
+        let cells: Vec<(TileId, String, Cell, Rect)> = std::iter::once(scratch)
+            .chain(entries.iter().zip(&rows[1..]).map(|(i, rect)| {
+                let entry = &self.dock[*i];
+                let (lead, title) = (entry.lead(), self.dock_title(entry));
+                let app = self.tile_app_id(lead).unwrap_or_default();
+                let letter = app.chars().chain(self.shown_title(lead).chars()).find(|c| c.is_alphanumeric()).unwrap_or('?');
+                let sound = entry.tiles().into_iter().any(|t| self.plays_sound(t)).then_some(waves);
+                (lead, title, Cell { app, letter, size: rect.w, pinned: entry.pinned, tabs: entry.tabs(), sound }, *rect)
+            }))
+            .collect();
+        let fan = self.dock_fan();
+        let fan_tiles = fan.iter().flat_map(|(_, leads, _)| leads.iter().copied());
+        self.tab_titles.retain(&cells.iter().map(|(t, ..)| *t).chain(fan_tiles).collect::<Vec<_>>());
+        let mut elements = Vec::new();
+        let marked = match self.dock_keys {
+            true => cells.get(self.dock_selected),
+            false => cells.iter().find(|(.., r)| r.contains(pointer.x, pointer.y)),
+        };
+        // Beside the bar, its middle level with the cell's; along the bottom, above the bar,
+        // centred on the cell but kept on the monitor.
+        let beside = |rect: &Rect, (w, h): (i32, i32)| match shape {
+            Shape::Down => (panel.x + panel.w + dock::LABEL_GAP, rect.y + (rect.h - h) / 2),
+            Shape::Across => ((rect.x + (rect.w - w) / 2).max(geo.loc.x), panel.y - dock::LABEL_GAP - h),
+        };
+        if let Some((lead, title, _, rect)) = marked {
+            if fan.is_none() {
+                let w = self.tab_titles.bar_width(title, dock::LABEL_WIDTH);
+                let (x, y) = beside(rect, (w, TAB_HEIGHT));
+                let buffer = self.tab_titles.bar(*lead, title, (w, TAB_HEIGHT), None);
+                elements.extend(image(renderer, buffer, x, y));
+            }
+            let hover = &mut self.decorations.dock_hover;
+            // Left of the cell, or under it.
+            let (size, at) = match shape {
+                Shape::Down => ((DOCK_HOVER_WIDTH, rect.h), place(rect.x - DOCK_HOVER_WIDTH - 1, rect.y)),
+                Shape::Across => ((rect.w, DOCK_HOVER_WIDTH), place(rect.x, rect.y + rect.h + 1)),
+            };
+            hover.update(size, FOCUS_COLOR);
+            elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(hover, at, 1.0, 1.0, Kind::Unspecified)));
+        }
+        // The fan: a row per tab, its icon and title, the chosen one marked left of it.
+        if let Some((_, leads, fan_rows)) = &fan {
+            for (k, (lead, row)) in leads.iter().zip(fan_rows).enumerate() {
+                if self.dock_tab == Some(k) {
+                    let hover = &mut self.decorations.dock_fan_hover;
+                    hover.update((DOCK_HOVER_WIDTH, row.h), FOCUS_COLOR);
+                    let at = place(row.x - DOCK_HOVER_WIDTH - 1, row.y);
+                    elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(hover, at, 1.0, 1.0, Kind::Unspecified)));
+                }
+                let title = self.shown_title(*lead);
+                let x = row.x + dock::FAN_CELL + dock::LABEL_GAP;
+                let sound = self.plays_sound(*lead).then_some(waves);
+                let buffer = self.tab_titles.fan_bar(*lead, &title, (dock::FAN_TITLE, TAB_HEIGHT), sound);
+                elements.extend(image(renderer, buffer, x, row.y + (row.h - TAB_HEIGHT) / 2));
+                let app = self.tile_app_id(*lead).unwrap_or_default();
+                let letter = app.chars().chain(title.chars()).find(|c| c.is_alphanumeric()).unwrap_or('?');
+                let cell = Cell { app, letter, size: dock::FAN_CELL, pinned: false, tabs: 0, sound: None };
+                let buffer = self.tab_titles.fan_cell(*lead, cell.clone(), self.dock_icons.get(&cell.app));
+                elements.extend(image(renderer, buffer, row.x, row.y));
+            }
+            if let Some(b) = dock::fan_back(fan_rows) {
+                let back = &mut self.decorations.dock_fan;
+                back.update((b.w, b.h), DOCK_COLOR);
+                elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(back, place(b.x, b.y), 1.0, 1.0, Kind::Unspecified)));
+            }
+        }
+        for (lead, _, cell, rect) in cells {
+            let buffer = self.tab_titles.cell(lead, cell.clone(), self.dock_icons.get(&cell.app));
+            elements.extend(image(renderer, buffer, rect.x, rect.y));
+        }
+        let back = &mut self.decorations.dock_panel;
+        back.update((panel.w, panel.h), DOCK_COLOR);
+        elements.push(OutputRenderElements::Solid(SolidColorRenderElement::from_buffer(back, place(panel.x, panel.y), 1.0, 1.0, Kind::Unspecified)));
+        elements
     }
 
     /// The marks floating at the left and right edges of `output` when tiles of its strip
@@ -593,7 +693,7 @@ impl Dune {
         let rects: Vec<(TileId, Rect, Rect, bool, Radii)> = self
             .tiles
             .iter()
-            .filter(|(t, tile)| only(**t) && (tile.top().is_some() || tile.reserved) && !self.tabs.contains(t))
+            .filter(|(t, tile)| only(**t) && (tile.top().is_some() || tile.reserved))
             .filter_map(|(t, tile)| Some((*t, self.shown_rect(*t, output)?, tile.top().is_none())))
             .map(|(t, r, empty)| (t, r, self.with_tab_bar(r), empty))
             .map(|(t, r, o, empty)| (t, r, o, empty, self.radii(t, o)))
@@ -683,6 +783,18 @@ impl Dune {
 }
 
 /// A tab bar's image, rounded as the corners of `outer` (output-local) with `radii`.
+/// `rect` grown up to take in the part of `bar` right above it, when it is under the bar.
+fn under_bar(bar: Rect, rect: Rect) -> Option<Rect> {
+    let under = bar.y + bar.h == rect.y && bar.x <= rect.x && rect.x + rect.w <= bar.x + bar.w;
+    under.then(|| Rect::new(rect.x, bar.y, rect.w, rect.y + rect.h - bar.y))
+}
+
+/// A column's `bar` laid out over the tile at `target`, moved and stretched as the tile is
+/// `drawn` (a sliding resize), keeping the column's whole width when the tile is a part of it.
+fn moved_bar(bar: Rect, target: Rect, drawn: Rect) -> Rect {
+    Rect::new(drawn.x - (target.x - bar.x), drawn.y - (target.y - bar.y), bar.w + drawn.w - target.w, bar.h)
+}
+
 fn rounded_image(e: MemoryRenderBufferRenderElement<GlesRenderer>, shaders: &Shaders, radii: Radii, outer: Rect) -> OutputRenderElements {
     match shaders.clip.as_ref().filter(|_| radii.iter().any(|r| *r > 0)) {
         Some(clip) => {
@@ -701,4 +813,27 @@ fn border_edges(rect: Rect, b: i32) -> [(i32, i32, i32, i32); 4] {
         (rect.x - b, rect.y, b, rect.h),
         (rect.x + rect.w, rect.y, b, rect.h),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiles_side_by_side_under_a_bar_each_take_their_part_of_it() {
+        let bar = Rect::new(0, 0, 1000, 30);
+        assert_eq!(under_bar(bar, Rect::new(0, 30, 500, 570)), Some(Rect::new(0, 0, 500, 600)));
+        assert_eq!(under_bar(bar, Rect::new(504, 30, 496, 570)), Some(Rect::new(504, 0, 496, 600)));
+        assert_eq!(under_bar(bar, Rect::new(0, 34, 1000, 570)), None, "a row below");
+        assert_eq!(under_bar(bar, Rect::new(1010, 30, 500, 570)), None, "another column");
+    }
+
+    #[test]
+    fn a_bar_keeps_the_column_width_over_a_split_tile() {
+        let bar = Rect::new(0, 0, 1000, 30);
+        let target = Rect::new(0, 30, 500, 570);
+        assert_eq!(moved_bar(bar, target, target), bar);
+        // The column sliding narrower: the bar follows the tile, by as much.
+        assert_eq!(moved_bar(bar, target, Rect::new(10, 30, 480, 570)), Rect::new(10, 0, 980, 30));
+    }
 }

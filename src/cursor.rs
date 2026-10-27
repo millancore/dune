@@ -1,10 +1,11 @@
 //! The pointer image dune draws on a real session: the user's xcursor theme
 //! (`XCURSOR_THEME`, `XCURSOR_SIZE`), or a plain arrow when none is installed.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    input::pointer::CursorIcon,
     utils::{Logical, Point, Transform},
 };
 use xcursor::{
@@ -12,56 +13,79 @@ use xcursor::{
     parser::{Image, parse_xcursor},
 };
 
+type Frames = Vec<(Image, MemoryRenderBuffer)>;
+
 pub struct Cursor {
-    /// Frames of the theme's default cursor at the configured size.
-    frames: Vec<(Image, MemoryRenderBuffer)>,
+    theme: CursorTheme,
+    size: u32,
+    /// Frames of each shape asked for so far, at the configured size.
+    shapes: HashMap<CursorIcon, Frames>,
 }
 
 impl Cursor {
     pub fn load() -> Cursor {
-        let theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
+        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
         let size = std::env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
-        let images = load_theme(&theme).unwrap_or_else(|| {
-            tracing::warn!("no xcursor theme `{theme}` found, using a plain arrow");
-            vec![fallback_arrow()]
-        });
-        // The frames closest to the wanted size.
-        let nearest = images.iter().min_by_key(|i| (i.size as i32 - size as i32).abs()).map(|i| i.size);
-        let frames = images
-            .into_iter()
-            .filter(|i| Some(i.size) == nearest)
-            .map(|image| {
-                let buffer = MemoryRenderBuffer::from_slice(
-                    &image.pixels_rgba,
-                    Fourcc::Abgr8888,
-                    (image.width as i32, image.height as i32),
-                    1,
-                    Transform::Normal,
-                    None,
-                );
-                (image, buffer)
-            })
-            .collect();
-        Cursor { frames }
+        let mut cursor = Cursor { theme: CursorTheme::load(&name), size, shapes: HashMap::new() };
+        if load_icon(&cursor.theme, "default").is_none() {
+            tracing::warn!("no xcursor theme `{name}` found, using a plain arrow");
+        }
+        cursor.frames(CursorIcon::Default);
+        cursor
     }
 
-    /// The image to show at `time` (animated themes cycle) and its hotspot.
-    pub fn image(&self, time: Duration) -> (MemoryRenderBuffer, Point<i32, Logical>) {
-        let total: u32 = self.frames.iter().map(|(i, _)| i.delay).sum();
+    /// The image of `icon` to show at `time` (animated themes cycle) and its hotspot.
+    pub fn image(&mut self, icon: CursorIcon, time: Duration) -> (MemoryRenderBuffer, Point<i32, Logical>) {
+        let frames = self.frames(icon);
+        let total: u32 = frames.iter().map(|(i, _)| i.delay).sum();
         let mut millis = if total == 0 { 0 } else { time.as_millis() as u32 % total };
-        for (image, buffer) in &self.frames {
+        for (image, buffer) in frames {
             if millis < image.delay || total == 0 {
                 return (buffer.clone(), (image.xhot as i32, image.yhot as i32).into());
             }
             millis -= image.delay;
         }
-        let (image, buffer) = &self.frames[0];
+        let (image, buffer) = &frames[0];
         (buffer.clone(), (image.xhot as i32, image.yhot as i32).into())
+    }
+
+    /// The frames of `icon`, loaded the first time: its name, the older names themes use
+    /// for it, else the default arrow (else a plain one).
+    fn frames(&mut self, icon: CursorIcon) -> &Frames {
+        let (theme, size) = (&self.theme, self.size);
+        self.shapes.entry(icon).or_insert_with(|| {
+            let images = std::iter::once(icon.name())
+                .chain(icon.alt_names().iter().copied())
+                .chain(std::iter::once("default"))
+                .find_map(|name| load_icon(theme, name))
+                .unwrap_or_else(|| vec![fallback_arrow()]);
+            nearest_frames(images, size)
+        })
     }
 }
 
-fn load_theme(name: &str) -> Option<Vec<Image>> {
-    let path = CursorTheme::load(name).load_icon("default")?;
+/// The frames of `images` closest to `size`, ready to draw.
+fn nearest_frames(images: Vec<Image>, size: u32) -> Frames {
+    let nearest = images.iter().min_by_key(|i| (i.size as i32 - size as i32).abs()).map(|i| i.size);
+    images
+        .into_iter()
+        .filter(|i| Some(i.size) == nearest)
+        .map(|image| {
+            let buffer = MemoryRenderBuffer::from_slice(
+                &image.pixels_rgba,
+                Fourcc::Abgr8888,
+                (image.width as i32, image.height as i32),
+                1,
+                Transform::Normal,
+                None,
+            );
+            (image, buffer)
+        })
+        .collect()
+}
+
+fn load_icon(theme: &CursorTheme, name: &str) -> Option<Vec<Image>> {
+    let path = theme.load_icon(name)?;
     let data = std::fs::read(path).ok()?;
     parse_xcursor(&data).filter(|images| !images.is_empty())
 }
@@ -118,9 +142,18 @@ mod tests {
 
     #[test]
     fn loads_something() {
-        let cursor = Cursor::load();
-        assert!(!cursor.frames.is_empty());
-        let (_, hotspot) = cursor.image(Duration::from_millis(1234));
+        let mut cursor = Cursor::load();
+        let (_, hotspot) = cursor.image(CursorIcon::Default, Duration::from_millis(1234));
         assert!(hotspot.x >= 0 && hotspot.y >= 0);
+    }
+
+    #[test]
+    fn every_shape_has_frames() {
+        // Whatever the installed theme has, a named shape always draws something.
+        let mut cursor = Cursor::load();
+        for icon in [CursorIcon::Pointer, CursorIcon::Text, CursorIcon::EwResize, CursorIcon::Wait] {
+            assert!(!cursor.frames(icon).is_empty());
+            cursor.image(icon, Duration::ZERO);
+        }
     }
 }

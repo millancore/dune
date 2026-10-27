@@ -12,7 +12,7 @@
 
 **dune** is a tiling Wayland compositor built on [Smithay](https://github.com/Smithay/smithay).
 Its windows live on an endless horizontal strip of columns, as in [niri](https://github.com/YaLTeR/niri),
-with tabs, folding, floats, a scratchpad and nine desktops per monitor on top. It comes with
+with tabs, a dock per desktop, floats, a scratchpad and nine desktops per monitor on top. It comes with
 **dune-finder**, one panel that is the launcher, the window switcher, a file browser, a
 folder jumper, the tile menu and the power menu.
 
@@ -25,7 +25,7 @@ folder jumper, the tile menu and the power menu.
 - [The strip](#the-strip)
 - [Columns, rows and tiles](#columns-rows-and-tiles)
 - [Tabs](#tabs)
-- [Folding (the accordion)](#folding-the-accordion)
+- [The dock](#the-dock)
 - [Fullscreen](#fullscreen)
 - [Floating tiles and the scratchpad](#floating-tiles-and-the-scratchpad)
 - [Desktops and monitors](#desktops-and-monitors)
@@ -192,29 +192,57 @@ then the bar scrolls.
 | Mod+drag a tab along its bar | reorder it |
 | `Ctrl+T` or `:t` in dune-finder | open the app as a tab |
 
-## Folding (the accordion)
+## The dock
 
-A tile can fold into a thin bar that shows its title, at the smallest level with open
-neighbours: inside its row, otherwise its row in the column, otherwise its column in the strip.
-A lone tile folds its column. A tile squeezed too small by a neighbour folds on its own.
-Hovering a folded bar focuses it; clicking it (or Enter while it is focused) opens it again.
+Every desktop of every monitor has a dock: tiles put out of the way, off the strip.
+`Mod+Shift+d` (the `dock` key), `[mouse] dock_click` (for example `"mod+right"`) on the
+tile under the pointer, or **Send to dock** in the tile options puts a tile there. A tile
+of a tabbed column takes its whole column, tabs and all.
+
+Two ways open the dock of the desktop a monitor shows, as a bar down the left edge (along
+the bottom, just above the bar, when a monitor's bars are only at the bottom), over
+everything, with the icon of each entry's app (from the icon theme, as dune-finder finds
+them; the app's first letter without one). A pinned entry has
+an orange dot, a tabbed column a dot per tab, a window playing sound a speaker. The title
+of the entry under the pointer (or chosen by keys) shows beside the bar (above it, along
+the bottom).
+
+`Mod+Shift+e` (the `dock_show` key), for the active monitor (the one desktops switch on); or a click on
+the dock module of a bar (`dune dock show`, see [Waybar](#waybar)), for the bar's monitor.
+It stays until Esc or a click away, and keys drive it: the arrows or `h`/`j`/`k`/`l` along
+the bar choose, Enter takes the entry out, `p` or Space pins it. Other keys do nothing meanwhile; the
+compositor's own bindings hide it and do their thing.
 
 ```text
-  row folded into a bar                  column folded upright
-  ┌──────────────────────────┐          ┌─┐┌──────────────────┐
-  │ ▸ htop — folded row      │          │3││                  │
-  ├──────────────────────────┤          │ ││                  │
-  │                          │          │♪││     editor       │
-  │        editor            │          │ ││                  │
-  │                          │          │ ││                  │
-  └──────────────────────────┘          └─┘└──────────────────┘
+  Mod+Shift+e, or a click on the bar's dock module
+  ┌──────┬───────────────────────────────
+  │ [*]··│                                  [*] the scratchpad, two windows waiting
+  │ [S] •│                                  [S] Spotify, pinned (•)
+  ▌ [h]  │ htop     the strip, as it was    [h] under the pointer: its title beside
+  │ [v]  │                                  [v] vim, a column of three tabs (···)
+  │  ··· │
+  └──────┘
 ```
 
-A folded tabbed column shows its tab count at the top. Folded tiles that play sound show
-a speaker 🔊 (followed through `pactl`; for browsers, matched by the MPRIS title).
+- **Click** an entry: it goes back where it was in the strip (or where it floated), focused.
+- **Right click**: pin it, or unpin it. A pinned entry (📌) is in the dock of every desktop,
+  and comes out on the desktop shown: a tile floating, a tabbed column right of the
+  focused one. Unpinned, it belongs to the dock it was unpinned in.
+- **A tabbed column** chosen (by keys or under the pointer) fans out its tabs beside the bar
+  (above it, along the bottom): a row per tab, its icon and title. A click on one, or Enter
+  on it, brings the whole column back with that tab shown. The arrow away from the bar
+  (right, or up along the bottom) goes into the fan, up/down go through its tabs, the arrow
+  back leaves it.
+- `(+2)` tells a column's other tabs; a speaker 🔊 shows on entries that play sound
+  (followed through `pactl`; for browsers, matched by the MPRIS title).
+- **The scratchpad** is the first cell of every dock (a dot per window waiting there).
+  Chosen, under the pointer or by keys (the dock opens on it), it fans out its windows
+  like a column's tabs; a click on one (or Enter) floats it on the desktop shown, a click
+  on the cell takes out the first.
+- dune-finder's windows mode lists docked windows (`dock`, `dock 📌`); choosing one takes
+  it out of the dock, going to its desktop.
 
-Fold with the `fold` key (unbound by default, set it in `[keys]`), or with `[mouse] fold_click`
-(for example `"mod+right"`) on the tile under the pointer.
+Tiles in a column or row never get smaller than a tenth of it: resizing stops there.
 
 ## Fullscreen
 
@@ -245,6 +273,8 @@ same again puts it back. Mod+left-drag moves a float, Mod+right-drag resizes it.
 The **scratchpad** works like sway's: `` Mod+Shift+` `` puts the tile away, off every desktop.
 `` Mod+` `` calls the next one back as a float on the active monitor; on a shown, focused one
 it puts it away again at the end of the queue, so repeated presses cycle through them.
+The scratchpad is also the first cell of the dock, which lists its windows (see
+[The dock](#the-dock)).
 
 ```text
    desktop                          scratchpad queue
@@ -343,12 +373,12 @@ goes back; `Mod+Tab` / `Mod+Shift+Tab` cycle through every mode.
 | Mode | Open with | What it does |
 |---|---|---|
 | **apps** | `Mod+d` | fuzzy-search desktop apps. Pick where it opens before Enter: a side of the focused tile, floating, as a tab (`Ctrl+T` / `:t`), another monitor or desktop (`firefox :d2`). Console programs get a terminal. |
-| **windows** | `/` in apps, or the `switcher` key | every window on every monitor, desktop, tab and folded row, most recent first; Enter right away goes back to the previous window. `:d2` / `:m1` filter by desktop / monitor. `:l` lists the windows of locked desktops. |
+| **windows** | `/` in apps, or the `switcher` key | every window on every monitor, desktop, tab and dock, most recent first; Enter right away goes back to the previous window. `:d2` / `:m1` filter by desktop / monitor. `:l` lists the windows of locked desktops. |
 | **browser tabs** | in windows | a Chromium browser started with `--remote-debugging-port=9222` lists its tabs; Enter brings the tab forward in its window. |
 | **files** | `#` in apps | browse from home: Enter goes into a folder or opens a file (`xdg-open`); `~`, `/` and `name/` work as in a shell; `Mod+Enter` opens `file_manager` (yazi, set in `finder.toml`), `Ctrl+Enter` a terminal there. |
 | **jumps** | `>` in apps | folders by frecency, like zoxide's `z` (parent folders in home included). Enter opens a terminal there, `Mod+Enter` the file manager, `/` goes into the folder in files mode. |
-| **tile options** | `Mod+/` | private, float, center, full width, to tab, send to desktop #, close, each with its key. |
-| **system** | `Mod+Tab` from the last mode | power off, reboot, log out. |
+| **tile options** | `Mod+/` | private, float, center, full width, to tab, send to desktop #, send to dock, close, each with its key. |
+| **system** | `@` in apps, or `Mod+Tab` from the last mode | power off, reboot, log out; **Stay awake** holds off idle (no lock, screen off nor suspend from swayidle) until chosen again, its row says `on` meanwhile. |
 | **empty container** | `Mod+Return` | Enter right away puts a terminal there; anything chosen or typed goes there instead (`/` then a window moves it in). |
 
 A click chooses a row, the wheel scrolls, a click outside closes the panel.
@@ -362,7 +392,7 @@ A click chooses a row, the wheel scrolls, a click outside closes the panel.
 | Mod+left drag | move the tile; drop it on another column, monitor, or a tab bar |
 | Mod+left click | float / unfloat; near an edge: an empty split there |
 | Mod+right drag | resize the tile (or a float) |
-| `[mouse] fold_click` | fold / open the tile under the pointer |
+| `[mouse] dock_click` | the tile under the pointer into the dock |
 | push a screen edge | slide the strip |
 
 ```text
@@ -418,7 +448,7 @@ ext/wlr data control, so wl-copy and wl-paste work.
 
 - **Lock**: `Mod+Escape` runs `lock_command` (`swaylock -f`), through `ext-session-lock`.
   While locked only the lock surface is shown and compositor keys are off.
-- **Idle**: `ext-idle-notify` for swayidle's timers; idle-inhibit lets videos and games hold it off.
+- **Idle**: `ext-idle-notify` for swayidle's timers; idle-inhibit lets videos and games hold it off, and so does the finder's Stay awake.
 - **Night light**: `wlr-gamma-control` for wlsunset (real session only).
 - **X11 apps**: through `xwayland-satellite`, started when the first X11 client connects
   and restarted if it crashes (`xwayland = "off"` disables it).
@@ -430,7 +460,8 @@ ext/wlr data control, so wl-copy and wl-paste work.
 | Module | Setup |
 |---|---|
 | desktops | `ext/workspaces`, with `"on-click-right": "deactivate"` to lock / unlock |
-| scratchpad | `custom`, `exec: dune scratchpad watch`, `return-type: json`, `on-click: dune scratchpad show` |
+| dock | `custom`, `exec: dune dock watch`, `return-type: json`, `on-click: dune dock show`; first in `modules-left` (each bar follows the dock of its own monitor, from `$WAYBAR_OUTPUT_NAME`; the text is the count, class `empty` or `filled`; the tooltip lists the scratchpad's windows too, it being the dock's first cell) |
+| scratchpad | optional, the dock has it: `custom`, `exec: dune scratchpad watch`, `return-type: json`, `on-click: dune scratchpad show` |
 | recording | `custom`, `exec: dune recording watch`, `return-type: json`, `on-click: dune recording stop` |
 | night light | waybar's own module, which runs wlsunset |
 
@@ -440,6 +471,7 @@ ext/wlr data control, so wl-copy and wl-paste work.
 dune open [--split l|r|u|d] [--from TILE] [--cwd DIR] [--] COMMAND...   # a terminal tile
 dune-open COMMAND...                     # in a terminal: the program takes its tile
 dune scratchpad show | watch
+dune dock show | watch                   # for the monitor of $WAYBAR_OUTPUT_NAME, else the active one
 dune recording stop | watch
 ```
 
@@ -482,7 +514,7 @@ screenshot_dir = "~/shots"
 recording_dir = "~/videos"
 
 [mouse]
-fold_click = "mod+right"
+dock_click = "mod+right"
 
 [input]                        # mice and touchpads (real session)
 left_handed = true
@@ -548,12 +580,13 @@ Environment variables win over the file: `XKB_DEFAULT_*`, `DUNE_TERMINAL`, `DUNE
 | `tile_options` | `Mod+/` | dune-finder: tile options |
 | `switcher` | none | dune-finder: windows |
 | `private_tile` | none | private tile |
-| `fold` | none | fold / open the tile |
+| `dock` | `Mod+Shift+d` | the tile (with its tabs) into the dock |
 | `terminal_vertical` / `terminal_horizontal` | `Mod+v` / `Mod+s` | terminal right / below |
 | `terminal_tab` | none | terminal as a tab |
 | `stack_to_tabs` | `Mod+t` | stack to tabs |
 | `lock` | `Mod+Escape` | lock |
-| `quit` | `Mod+Shift+e` | quit |
+| `dock_show` | `Mod+Shift+e` | the dock of the active monitor, by keys |
+| `quit` | none | end the session at once (Log out: dune-finder's System mode) |
 | `screenshot` / `_tile` / `_screen` | `Print` / `Ctrl+Print` / `Shift+Print` | screenshot region / tile / monitor |
 | `record` / `_tile` / `_screen` | `Mod+Shift+r` / `Mod+Ctrl+r` / `Mod+Ctrl+Shift+r` | record region / tile / monitor |
 

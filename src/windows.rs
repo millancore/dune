@@ -1,19 +1,20 @@
 //! The windows dune-finder lists for Mod+/ (a `windows` request): every window, on every
-//! monitor and desktop, in every tab and folded row, the most recently focused first (the
+//! monitor and desktop and in every tab, the most recently focused first (the
 //! focused one last: Enter right away goes back to the window before). Choosing one
 //! (`goto`) shows the window's desktop and focuses it; chosen for an empty container
 //! (Mod+Enter, then `/`), the window moves into it instead. Private tiles are listed by
 //! their app (`privacy::masked_title`), not their title. Windows of locked desktops are
 //! left out, and not gone to; a `locked_windows` request lists only them (`:l`). Windows in
-//! the scratchpad are listed too, as `scratchpad`; choosing one shows it.
+//! the scratchpad are listed too, as `scratchpad`, and those in a dock as `dock` (a pinned
+//! one `dock 📌`); choosing one shows it.
 
 use dune_common::protocol::WindowInfo;
 
 use crate::{Dune, layout::TileId};
 
 impl Dune {
-    /// Show the desktop `id` is on and focus it: its tab shows, its row opens and the view
-    /// slides to it (see `arrange`). Not on a locked desktop (`unlock_and_go` is).
+    /// Show the desktop `id` is on and focus it: its tab shows and the view slides to it
+    /// (see `arrange`); out of its dock, back where it was. Not on a locked desktop (`unlock_and_go` is).
     pub fn go_to(&mut self, id: TileId) {
         if !self.tiles.contains_key(&id) {
             return;
@@ -31,8 +32,18 @@ impl Dune {
         if let Some((output, desk)) = self.hidden_desk(id) {
             self.show_desk_on(&output, desk);
         }
-        // Chosen by name: a folded one opens, as with a click.
-        self.open_folded(id);
+        if let Some(i) = self.dock.iter().position(|d| d.tiles().contains(&id)) {
+            let entry = &self.dock[i];
+            if !entry.pinned {
+                let (output, desk) = (entry.output.clone(), entry.desk);
+                if self.privacy.locked(&output, desk) {
+                    return tracing::info!(tile = id, "docked on a locked desktop, not gone to");
+                }
+                self.show_desk_on(&output, desk);
+            }
+            self.undock(i);
+        }
+        self.focus_tile(id);
     }
 
     /// `id` leaves wherever it is (any monitor, desktop, tab or float) and takes the place
@@ -74,6 +85,14 @@ impl Dune {
         }
         if !locked {
             placed.extend(self.scratchpad.iter().map(|(t, _)| (*t, "scratchpad".to_string())));
+        }
+        // A docked one goes with its desktop, locked or not; a pinned one is everywhere.
+        for entry in &self.dock {
+            let listed = if entry.pinned { !locked } else { self.privacy.locked(&entry.output, entry.desk) == locked };
+            if listed {
+                let place = if entry.pinned { "dock 📌" } else { "dock" };
+                placed.extend(entry.tiles().into_iter().map(|t| (t, place.to_string())));
+            }
         }
         placed.retain(|(t, _)| self.tiles.get(t).is_some_and(|tile| tile.top().is_some()));
         let rank = |t: TileId| match self.recent.iter().position(|r| *r == t) {
